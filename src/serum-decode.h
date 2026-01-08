@@ -76,6 +76,10 @@ SERUM_API void Serum_DisableColorization(void);
 
 SERUM_API void Serum_EnableColorization(void);
 
+SERUM_API void Serum_DisablePupTriggers(void);
+
+SERUM_API void Serum_EnablePupTrigers(void);
+
 /** @brief Get the full version of this library
  *
  * @return A string formatted "major.minor.patch"

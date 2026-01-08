@@ -79,6 +79,7 @@ uint8_t sceneFrame[192 * 64] = {0};
 uint8_t lastFrame[192 * 64] = {0};
 bool monochromeMode = false;
 bool showStatusMessages = false;
+bool keepTriggersInternal = true;
 
 const int pathbuflen = 4096;
 
@@ -2021,14 +2022,25 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
   uint32_t frameID = Identify_Frame(frame);
   mySerum.frameID = IDENTIFY_NO_FRAME;
   uint32_t now = GetMonotonicTimeMs();
+  if (is_real_machine() && !showStatusMessages) {
+    showStatusMessages = (g_serumData.triggerIDs[lastfound][0] > 0xff98 &&
+                          g_serumData.triggerIDs[lastfound][0] < 0xffffffff);
+    if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
+  }
+  if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
+    monochromeMode = (g_serumData.triggerIDs[lastfound][0] == 65432);
+    if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
+      g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
 
-  if (frameID != IDENTIFY_NO_FRAME) {
     lastframe_found = now;
     if (maxFramesToSkip) {
       framesSkippedCounter = 0;
     }
 
-    if (frameID == IDENTIFY_SAME_FRAME) return IDENTIFY_SAME_FRAME;
+    if (frameID == IDENTIFY_SAME_FRAME) {
+      if (keepTriggersInternal) mySerum.triggerID = 0xffffffff;
+      return IDENTIFY_SAME_FRAME;
+    }
 
     mySerum.frameID = frameID;
     mySerum.rotationtimer = 0;
@@ -2085,11 +2097,16 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
         lasttriggerTimestamp = now;
       }
 
+      if (keepTriggersInternal) mySerum.triggerID = 0xffffffff;
+
       return mySerum.rotationtimer;
     }
   }
 
-  if ((ignoreUnknownFramesTimeout &&
+  mySerum.triggerID = 0xffffffff;
+
+  if (monochromeMode ||
+      (ignoreUnknownFramesTimeout &&
        (now - lastframe_found) >= ignoreUnknownFramesTimeout) ||
       (maxFramesToSkip && (frameID == IDENTIFY_NO_FRAME) &&
        (++framesSkippedCounter >= maxFramesToSkip))) {
@@ -2151,6 +2168,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
     if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
         !sceneFrameRequested && sceneCurrentFrame < sceneFrameCount &&
         !sceneInterruptable) {
+      if (keepTriggersInternal) mySerum.triggerID = 0xffffffff;
       // Scene is active and not interruptable
       return IDENTIFY_NO_FRAME;
     }
@@ -2166,7 +2184,10 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
       framesSkippedCounter = 0;
     }
 
-    if (frameID == IDENTIFY_SAME_FRAME) return IDENTIFY_SAME_FRAME;
+    if (frameID == IDENTIFY_SAME_FRAME) {
+      if (keepTriggersInternal) mySerum.triggerID = 0xffffffff;
+      return IDENTIFY_SAME_FRAME;
+    }
 
     mySerum.frameID = frameID;
     if (!sceneFrameRequested) {
@@ -2313,10 +2334,14 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
         rotationIsScene = true;
       }
 
+      if (keepTriggersInternal) mySerum.triggerID = 0xffffffff;
+
       return (uint32_t)mySerum.rotationtimer |
              (rotationIsScene ? FLAG_RETURNED_V2_SCENE : 0);
     }
   }
+
+  mySerum.triggerID = 0xffffffff;
 
   if (monochromeMode ||
       (ignoreUnknownFramesTimeout &&
@@ -2338,7 +2363,6 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
     mySerum.flags = FLAG_RETURNED_32P_FRAME_OK;
     mySerum.width32 = g_serumData.fwidth;
     mySerum.width64 = 0;
-    mySerum.triggerID = 0xffffffff;
     mySerum.frameID = 0xfffffffd;  // monochrome frame ID
 
     // disable render features like rotations
@@ -2563,6 +2587,10 @@ SERUM_API uint32_t Serum_Rotate(void) {
 SERUM_API void Serum_DisableColorization() { enabled = false; }
 
 SERUM_API void Serum_EnableColorization() { enabled = true; }
+
+SERUM_API void Serum_DisablePupTriggers(void) { keepTriggersInternal = true; }
+
+SERUM_API void Serum_EnablePupTrigers(void) { keepTriggersInternal = false; }
 
 SERUM_API bool Serum_Scene_ParseCSV(const char* const csv_filename) {
   if (!g_serumData.sceneGenerator) return false;
