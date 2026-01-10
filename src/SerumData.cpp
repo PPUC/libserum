@@ -203,6 +203,15 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
     concentrateFileVersion = FromLittleEndian16(littleEndianVersion);
     Log("cROMc version %d", concentrateFileVersion);
 
+    if (concentrateFileVersion < 5) {
+      Log("The cROMc version of %s is too old. Get a newer version. If you "
+          "have a cROM or cRZ file next to the cROMc file, delete the cROMc "
+          "file and restart. An updated cROMc will be generated.",
+          filename);
+      fclose(fp);
+      return false;
+    }
+
     // Read original size
     uint32_t littleEndianSize;
     if (fread(&littleEndianSize, sizeof(uint32_t), 1, fp) != 1) {
