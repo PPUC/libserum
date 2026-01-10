@@ -50,6 +50,7 @@ int strcat_s(char* dest, size_t destsz, const char* src) {
 #endif
 
 #define PUP_TRIGGER_REPEAT_TIMEOUT 500  // 500 ms
+#define PUP_TRIGGER_MAX_THRESHOLD 50000
 
 #pragma warning(disable : 4996)
 
@@ -79,7 +80,7 @@ uint8_t sceneFrame[192 * 64] = {0};
 uint8_t lastFrame[192 * 64] = {0};
 bool monochromeMode = false;
 bool showStatusMessages = false;
-bool keepTriggersInternal = true;
+bool keepTriggersInternal = false;
 
 const int pathbuflen = 4096;
 
@@ -530,9 +531,11 @@ Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
 
   mySerum.ntriggers = 0;
   for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
-    if (g_serumData.triggerIDs[ti][0] != 0xffffffff) {
+    // Every trigger ID greater than PUP_TRIGGER_MAX_THRESHOLD is an internal
+    // trigger for rotation scenes and must not be communicated to the PUP
+    // Player.
+    if (g_serumData.triggerIDs[ti][0] < PUP_TRIGGER_MAX_THRESHOLD)
       mySerum.ntriggers++;
-    }
   }
 
   // Allocate framechecked array
@@ -829,7 +832,11 @@ Serum_Frame_Struc* Serum_LoadFilev2(FILE* pfile, const uint8_t flags,
     }
   }
   for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
-    if (g_serumData.triggerIDs[ti][0] != 0xffffffff) mySerum.ntriggers++;
+    // Every trigger ID greater than PUP_TRIGGER_MAX_THRESHOLD is an internal
+    // trigger for rotation scenes and must not be communicated to the PUP
+    // Player.
+    if (g_serumData.triggerIDs[ti][0] < PUP_TRIGGER_MAX_THRESHOLD)
+      mySerum.ntriggers++;
   }
   framechecked = (bool*)malloc(sizeof(bool) * g_serumData.nframes);
   if (!framechecked) {
@@ -2038,7 +2045,9 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
     }
 
     if (frameID == IDENTIFY_SAME_FRAME) {
-      if (keepTriggersInternal) mySerum.triggerID = 0xffffffff;
+      if (keepTriggersInternal ||
+          mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
+        mySerum.triggerID = 0xffffffff;
       return IDENTIFY_SAME_FRAME;
     }
 
@@ -2097,7 +2106,9 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
         lasttriggerTimestamp = now;
       }
 
-      if (keepTriggersInternal) mySerum.triggerID = 0xffffffff;
+      if (keepTriggersInternal ||
+          mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
+        mySerum.triggerID = 0xffffffff;
 
       return mySerum.rotationtimer;
     }
@@ -2168,7 +2179,9 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
     if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
         !sceneFrameRequested && sceneCurrentFrame < sceneFrameCount &&
         !sceneInterruptable) {
-      if (keepTriggersInternal) mySerum.triggerID = 0xffffffff;
+      if (keepTriggersInternal ||
+          mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
+        mySerum.triggerID = 0xffffffff;
       // Scene is active and not interruptable
       return IDENTIFY_NO_FRAME;
     }
@@ -2185,7 +2198,9 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
     }
 
     if (frameID == IDENTIFY_SAME_FRAME) {
-      if (keepTriggersInternal) mySerum.triggerID = 0xffffffff;
+      if (keepTriggersInternal ||
+          mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
+        mySerum.triggerID = 0xffffffff;
       return IDENTIFY_SAME_FRAME;
     }
 
@@ -2334,7 +2349,9 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
         rotationIsScene = true;
       }
 
-      if (keepTriggersInternal) mySerum.triggerID = 0xffffffff;
+      if (keepTriggersInternal ||
+          mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
+        mySerum.triggerID = 0xffffffff;
 
       return (uint32_t)mySerum.rotationtimer |
              (rotationIsScene ? FLAG_RETURNED_V2_SCENE : 0);
