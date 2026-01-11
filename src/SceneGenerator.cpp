@@ -143,7 +143,7 @@ bool SceneGenerator::generateDump(const std::string &dump_filename, int id) {
         out_dump << hex_line << "\r\n";
 
         uint8_t frameBuffer[4096];
-        if (!generateFrame(scene.sceneId, frameIndex, frameBuffer, group)) {
+        if (!generateFrame(scene.sceneId, frameIndex, frameBuffer, group, true)) {
           // Log(DMDUtil_LogLevel_ERROR, "SceneGenerator: Error generating frame
           // %d for scene %d", frameIndex,
           //    scene.sceneId);

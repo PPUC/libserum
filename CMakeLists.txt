@@ -117,6 +117,18 @@ if(BUILD_SHARED)
       VERSION ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}
    )
 
+   if(PLATFORM STREQUAL "win")
+      set(SERUM_VERSION_STR "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}")
+      set(SERUM_FILE_VERSION "${VERSION_MAJOR},${VERSION_MINOR},${VERSION_PATCH},0")
+      set(SERUM_PRODUCT_VERSION "${VERSION_MAJOR},${VERSION_MINOR},${VERSION_PATCH},0")
+      configure_file(
+         src/serum.rc.in
+         ${CMAKE_CURRENT_BINARY_DIR}/serum.rc
+         @ONLY
+      )
+      target_sources(serum_shared PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/serum.rc)
+   endif()
+
    install(TARGETS serum_shared
       LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib
    )
