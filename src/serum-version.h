@@ -2,7 +2,7 @@
 
 #define SERUM_VERSION_MAJOR 2        // X Digits
 #define SERUM_VERSION_MINOR 5        // Max 2 Digits
-#define SERUM_VERSION_PATCH 1        // Max 2 Digits
+#define SERUM_VERSION_PATCH 2        // Max 2 Digits
 #define SERUM_CONCENTRATE_VERSION 5  // Max 2 Digits
 
 #define _SERUM_STR(x) #x
