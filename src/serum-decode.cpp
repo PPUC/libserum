@@ -473,25 +473,24 @@ Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
 
     if (flags & FLAG_REQUEST_32P_FRAMES) {
       mySerum.frame32 =
-          (uint16_t*)malloc(32 * g_serumData.fwidth * sizeof(uint16_t));
+          (uint16_t*)malloc(32 * mySerum.width32 * sizeof(uint16_t));
       mySerum.rotations32 = (uint16_t*)malloc(
           MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * sizeof(uint16_t));
       mySerum.rotationsinframe32 =
-          (uint16_t*)malloc(2 * 32 * g_serumData.fwidth * sizeof(uint16_t));
+          (uint16_t*)malloc(2 * 32 * mySerum.width32 * sizeof(uint16_t));
       if (flags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS)
-        mySerum.modifiedelements32 = (uint8_t*)malloc(32 * g_serumData.fwidth);
+        mySerum.modifiedelements32 = (uint8_t*)malloc(32 * mySerum.width32);
     }
 
     if (flags & FLAG_REQUEST_64P_FRAMES) {
       mySerum.frame64 =
-          (uint16_t*)malloc(64 * g_serumData.fwidth_extra * sizeof(uint16_t));
+          (uint16_t*)malloc(64 * mySerum.width64 * sizeof(uint16_t));
       mySerum.rotations64 = (uint16_t*)malloc(
           MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * sizeof(uint16_t));
-      mySerum.rotationsinframe64 = (uint16_t*)malloc(
-          2 * 64 * g_serumData.fwidth_extra * sizeof(uint16_t));
+      mySerum.rotationsinframe64 =
+          (uint16_t*)malloc(2 * 64 * mySerum.width64 * sizeof(uint16_t));
       if (flags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS)
-        mySerum.modifiedelements64 =
-            (uint8_t*)malloc(64 * g_serumData.fwidth_extra);
+        mySerum.modifiedelements64 = (uint8_t*)malloc(64 * mySerum.width64);
     }
 
     if (isextrarequested) {
@@ -1134,14 +1133,18 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   pathbuf += romname;
   pathbuf += '/';
 
+  // If no specific frame tyoe is requested, activate both
+  if ((flags & (FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES)) == 0) {
+    flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
+  }
+
   std::optional<std::string> csvFoundFile =
       find_case_insensitive_file(pathbuf, std::string(romname) + ".pup.csv");
   if (csvFoundFile) {
     Log("Found %s", csvFoundFile->c_str());
 #ifdef WRITE_CROMC
-    flags |= FLAG_REQUEST_32P_FRAMES |
-             FLAG_REQUEST_64P_FRAMES;  // request both frame types for updating
-                                       // concentrate
+    // request both frame types for updating concentrate
+    flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
 #endif
   }
   Serum_Frame_Struc* result = NULL;
@@ -1167,9 +1170,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
 
   if (!result) {
 #ifdef WRITE_CROMC
-    flags |=
-        FLAG_REQUEST_32P_FRAMES |
-        FLAG_REQUEST_64P_FRAMES;  // by default, we request both frame types
+    // by default, we request both frame types
+    flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
 #endif
     pFoundFile =
         find_case_insensitive_file(pathbuf, std::string(romname) + ".cROM");
