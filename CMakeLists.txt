@@ -89,6 +89,7 @@ endif()
 
 set(SERUM_SOURCES
    src/serum-decode.cpp
+   src/serum-editor.cpp
    src/SerumData.cpp
    src/SceneGenerator.cpp
    third-party/include/miniz/miniz.c
@@ -135,6 +136,7 @@ if(BUILD_SHARED)
    install(FILES
       src/serum.h
       src/serum-decode.h
+      src/serum-editor.h
       src/TimeUtils.h
       DESTINATION ${CMAKE_INSTALL_PREFIX}/include)
 
@@ -168,6 +170,7 @@ if(BUILD_STATIC)
    install(FILES
       src/serum.h
       src/serum-decode.h
+      src/serum-editor.h
       src/TimeUtils.h
       DESTINATION ${CMAKE_INSTALL_PREFIX}/include)
 
