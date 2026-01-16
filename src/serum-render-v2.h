@@ -375,9 +375,10 @@ inline void SerumV2_InitRotationState(const uint16_t* rotations,
   }
 }
 
-inline uint32_t SerumV2_ApplyRotations(
+template <typename ShiftT>
+inline uint32_t SerumV2_ApplyRotationsImpl(
     const uint16_t* rotations, uint16_t* frame, uint16_t* rotations_in_frame,
-    uint32_t pixel_count, uint32_t* next_time_ms, uint16_t* shifts,
+    uint32_t pixel_count, uint32_t* next_time_ms, ShiftT* shifts,
     uint8_t* active, uint32_t now_ms, uint8_t* modified_elements,
     uint32_t* last_time_ms, bool init_if_unset, bool* out_rotated) {
   if (!rotations || !frame || !next_time_ms || !shifts || !active) {
@@ -410,7 +411,7 @@ inline uint32_t SerumV2_ApplyRotations(
       }
     }
     if (next_time_ms[rot] != 0 && now_ms >= next_time_ms[rot]) {
-      shifts[rot] = static_cast<uint16_t>((shifts[rot] + 1) % length);
+      shifts[rot] = static_cast<ShiftT>((shifts[rot] + 1) % length);
       next_time_ms[rot] = now_ms + delay;
       if (last_time_ms) {
         last_time_ms[rot] = now_ms;
@@ -479,4 +480,26 @@ inline uint32_t SerumV2_ApplyRotations(
     *out_rotated = true;
   }
   return next_delay == 0xffffffffu ? 0 : next_delay;
+}
+
+inline uint32_t SerumV2_ApplyRotations(
+    const uint16_t* rotations, uint16_t* frame, uint16_t* rotations_in_frame,
+    uint32_t pixel_count, uint32_t* next_time_ms, uint16_t* shifts,
+    uint8_t* active, uint32_t now_ms, uint8_t* modified_elements,
+    uint32_t* last_time_ms, bool init_if_unset, bool* out_rotated) {
+  return SerumV2_ApplyRotationsImpl<uint16_t>(
+      rotations, frame, rotations_in_frame, pixel_count, next_time_ms, shifts,
+      active, now_ms, modified_elements, last_time_ms, init_if_unset,
+      out_rotated);
+}
+
+inline uint32_t SerumV2_ApplyRotations(
+    const uint16_t* rotations, uint16_t* frame, uint16_t* rotations_in_frame,
+    uint32_t pixel_count, uint32_t* next_time_ms, uint32_t* shifts,
+    uint8_t* active, uint32_t now_ms, uint8_t* modified_elements,
+    uint32_t* last_time_ms, bool init_if_unset, bool* out_rotated) {
+  return SerumV2_ApplyRotationsImpl<uint32_t>(
+      rotations, frame, rotations_in_frame, pixel_count, next_time_ms, shifts,
+      active, now_ms, modified_elements, last_time_ms, init_if_unset,
+      out_rotated);
 }
