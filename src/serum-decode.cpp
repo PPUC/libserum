@@ -17,6 +17,7 @@
 
 #include "SerumData.h"
 #include "TimeUtils.h"
+#include "serum-render-v2.h"
 #include "serum-version.h"
 
 #if defined(__APPLE__)
@@ -1595,250 +1596,99 @@ bool CheckExtraFrameAvailable(uint32_t frID) {
   return true;
 }
 
-bool ColorInRotation(uint32_t IDfound, uint16_t col, uint16_t* norot,
-                     uint16_t* posinrot, bool isextra) {
-  uint16_t* pcol = NULL;
-  if (isextra)
-    pcol = g_serumData.colorrotations_v2_extra[IDfound];
-  else
-    pcol = g_serumData.colorrotations_v2[IDfound];
-  *norot = 0xffff;
-  for (uint32_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
-    for (uint32_t tj = 2; tj < 2u + pcol[ti * MAX_LENGTH_COLOR_ROTATION];
-         tj++)  // val [0] is for length and val [1] is for duration in ms
-    {
-      if (col == pcol[ti * MAX_LENGTH_COLOR_ROTATION + tj]) {
-        *norot = ti;
-        *posinrot =
-            tj - 2;  // val [0] is for length and val [1] is for duration in ms
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-void CheckDynaShadow(uint16_t* pfr, uint32_t nofr, uint8_t dynacouche,
-                     uint8_t* isdynapix, uint16_t fx, uint16_t fy, uint32_t fw,
-                     uint32_t fh, bool isextra) {
-  uint8_t dsdir;
-  if (isextra)
-    dsdir = g_serumData.dynashadowsdir_extra[nofr][dynacouche];
-  else
-    dsdir = g_serumData.dynashadowsdir[nofr][dynacouche];
-  if (dsdir == 0) return;
-  uint16_t tcol;
-  if (isextra)
-    tcol = g_serumData.dynashadowscol_extra[nofr][dynacouche];
-  else
-    tcol = g_serumData.dynashadowscol[nofr][dynacouche];
-  if ((dsdir & 0b1) > 0 && fx > 0 && fy > 0 &&
-      isdynapix[(fy - 1) * fw + fx - 1] == 0)  // dyna shadow top left
-  {
-    isdynapix[(fy - 1) * fw + fx - 1] = 1;
-    pfr[(fy - 1) * fw + fx - 1] = tcol;
-  }
-  if ((dsdir & 0b10) > 0 && fy > 0 &&
-      isdynapix[(fy - 1) * fw + fx] == 0)  // dyna shadow top
-  {
-    isdynapix[(fy - 1) * fw + fx] = 1;
-    pfr[(fy - 1) * fw + fx] = tcol;
-  }
-  if ((dsdir & 0b100) > 0 && fx < fw - 1 && fy > 0 &&
-      isdynapix[(fy - 1) * fw + fx + 1] == 0)  // dyna shadow top right
-  {
-    isdynapix[(fy - 1) * fw + fx + 1] = 1;
-    pfr[(fy - 1) * fw + fx + 1] = tcol;
-  }
-  if ((dsdir & 0b1000) > 0 && fx < fw - 1 &&
-      isdynapix[fy * fw + fx + 1] == 0)  // dyna shadow right
-  {
-    isdynapix[fy * fw + fx + 1] = 1;
-    pfr[fy * fw + fx + 1] = tcol;
-  }
-  if ((dsdir & 0b10000) > 0 && fx < fw - 1 && fy < fh - 1 &&
-      isdynapix[(fy + 1) * fw + fx + 1] == 0)  // dyna shadow bottom right
-  {
-    isdynapix[(fy + 1) * fw + fx + 1] = 1;
-    pfr[(fy + 1) * fw + fx + 1] = tcol;
-  }
-  if ((dsdir & 0b100000) > 0 && fy < fh - 1 &&
-      isdynapix[(fy + 1) * fw + fx] == 0)  // dyna shadow bottom
-  {
-    isdynapix[(fy + 1) * fw + fx] = 1;
-    pfr[(fy + 1) * fw + fx] = tcol;
-  }
-  if ((dsdir & 0b1000000) > 0 && fx > 0 && fy < fh - 1 &&
-      isdynapix[(fy + 1) * fw + fx - 1] == 0)  // dyna shadow bottom left
-  {
-    isdynapix[(fy + 1) * fw + fx - 1] = 1;
-    pfr[(fy + 1) * fw + fx - 1] = tcol;
-  }
-  if ((dsdir & 0b10000000) > 0 && fx > 0 &&
-      isdynapix[fy * fw + fx - 1] == 0)  // dyna shadow left
-  {
-    isdynapix[fy * fw + fx - 1] = 1;
-    pfr[fy * fw + fx - 1] = tcol;
-  }
-}
-
 void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
-  uint16_t tj, ti;
-  // Generate the colorized version of a frame once identified in the crom
-  // frames
   bool isextra = CheckExtraFrameAvailable(IDfound);
   mySerum.flags &= 0b11111100;
-  uint16_t* pfr;
-  uint16_t* prot;
-  uint16_t* prt;
-  uint32_t* cshft;
   if (mySerum.frame32) mySerum.width32 = 0;
   if (mySerum.frame64) mySerum.width64 = 0;
-  uint8_t isdynapix[256 * 64];
+
+  const uint16_t background_id = g_serumData.backgroundIDs[IDfound][0];
+  const bool has_background = background_id < g_serumData.nbackgrounds;
+
   if (((mySerum.frame32 && g_serumData.fheight == 32) ||
        (mySerum.frame64 && g_serumData.fheight == 64)) &&
       isoriginalrequested) {
-    // create the original res frame
+    uint16_t* pfr = nullptr;
+    uint16_t* prot = nullptr;
+    uint16_t* prt = g_serumData.colorrotations_v2[IDfound];
+    uint32_t* cshft = nullptr;
     if (g_serumData.fheight == 32) {
       pfr = mySerum.frame32;
-      mySerum.flags |= FLAG_RETURNED_32P_FRAME_OK;
       prot = mySerum.rotationsinframe32;
       mySerum.width32 = g_serumData.fwidth;
-      prt = g_serumData.colorrotations_v2[IDfound];
+      mySerum.flags |= FLAG_RETURNED_32P_FRAME_OK;
       cshft = colorshifts32;
     } else {
       pfr = mySerum.frame64;
-      mySerum.flags |= FLAG_RETURNED_64P_FRAME_OK;
       prot = mySerum.rotationsinframe64;
       mySerum.width64 = g_serumData.fwidth;
-      prt = g_serumData.colorrotations_v2[IDfound];
+      mySerum.flags |= FLAG_RETURNED_64P_FRAME_OK;
       cshft = colorshifts64;
     }
-    memset(isdynapix, 0, g_serumData.fheight * g_serumData.fwidth);
-    for (tj = 0; tj < g_serumData.fheight; tj++) {
-      for (ti = 0; ti < g_serumData.fwidth; ti++) {
-        uint16_t tk = tj * g_serumData.fwidth + ti;
-        if ((g_serumData.backgroundIDs[IDfound][0] <
-             g_serumData.nbackgrounds) &&
-            (frame[tk] == 0) && (g_serumData.backgroundmask[IDfound][tk] > 0)) {
-          if (isdynapix[tk] == 0) {
-            pfr[tk] =
-                g_serumData
-                    .backgroundframes_v2[g_serumData.backgroundIDs[IDfound][0]]
-                                        [tk];
-            if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                &prot[tk * 2 + 1], false))
-              pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                            (cshft[prot[tk * 2]] + prot[tk * 2 + 1]) %
-                                prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
-          }
-        } else {
-          uint8_t dynacouche = g_serumData.dynamasks[IDfound][tk];
-          if (dynacouche == 255) {
-            if (isdynapix[tk] == 0) {
-              pfr[tk] = g_serumData.cframes_v2[IDfound][tk];
-              if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                  &prot[tk * 2 + 1], false))
-                pfr[tk] =
-                    prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                        (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                            prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
-            }
-          } else {
-            if (frame[tk] > 0) {
-              CheckDynaShadow(pfr, IDfound, dynacouche, isdynapix, ti, tj,
-                              g_serumData.fwidth, g_serumData.fheight, false);
-              isdynapix[tk] = 1;
-              pfr[tk] =
-                  g_serumData
-                      .dyna4cols_v2[IDfound][dynacouche * g_serumData.nocolors +
-                                             frame[tk]];
-            } else if (isdynapix[tk] == 0)
-              pfr[tk] =
-                  g_serumData
-                      .dyna4cols_v2[IDfound][dynacouche * g_serumData.nocolors +
-                                             frame[tk]];
-            prot[tk * 2] = prot[tk * 2 + 1] = 0xffff;
-          }
-        }
-      }
+
+    SerumV2RenderFrameInput input{};
+    input.width = g_serumData.fwidth;
+    input.height = g_serumData.fheight;
+    input.base_width = g_serumData.fwidth;
+    input.base_height = g_serumData.fheight;
+    input.nocolors = g_serumData.nocolors;
+    input.base_frame = frame;
+    input.colorized = g_serumData.cframes_v2[IDfound];
+    input.dyna_mask = g_serumData.dynamasks[IDfound];
+    input.dyna_colors = g_serumData.dyna4cols_v2[IDfound];
+    if (has_background) {
+      input.background_mask = g_serumData.backgroundmask[IDfound];
+      input.background_frame = g_serumData.backgroundframes_v2[background_id];
     }
+    input.dynashadows_dir = g_serumData.dynashadowsdir[IDfound];
+    input.dynashadows_col = g_serumData.dynashadowscol[IDfound];
+
+    SerumV2RenderRotationInput rotation{prt, cshft};
+    SerumV2_RenderFrame(&input, &rotation, pfr, prot);
   }
+
   if (isextra &&
       ((mySerum.frame32 && g_serumData.fheight_extra == 32) ||
        (mySerum.frame64 && g_serumData.fheight_extra == 64)) &&
       isextrarequested) {
-    // create the extra res frame
+    uint16_t* pfr = nullptr;
+    uint16_t* prot = nullptr;
+    uint16_t* prt = g_serumData.colorrotations_v2_extra[IDfound];
+    uint32_t* cshft = nullptr;
     if (g_serumData.fheight_extra == 32) {
       pfr = mySerum.frame32;
-      mySerum.flags |= FLAG_RETURNED_32P_FRAME_OK;
       prot = mySerum.rotationsinframe32;
       mySerum.width32 = g_serumData.fwidth_extra;
-      prt = g_serumData.colorrotations_v2_extra[IDfound];
+      mySerum.flags |= FLAG_RETURNED_32P_FRAME_OK;
       cshft = colorshifts32;
     } else {
       pfr = mySerum.frame64;
-      mySerum.flags |= FLAG_RETURNED_64P_FRAME_OK;
       prot = mySerum.rotationsinframe64;
       mySerum.width64 = g_serumData.fwidth_extra;
-      prt = g_serumData.colorrotations_v2_extra[IDfound];
+      mySerum.flags |= FLAG_RETURNED_64P_FRAME_OK;
       cshft = colorshifts64;
     }
-    memset(isdynapix, 0, g_serumData.fheight_extra * g_serumData.fwidth_extra);
-    for (tj = 0; tj < g_serumData.fheight_extra; tj++) {
-      for (ti = 0; ti < g_serumData.fwidth_extra; ti++) {
-        uint16_t tk = tj * g_serumData.fwidth_extra + ti;
-        uint16_t tl;
-        if (g_serumData.fheight_extra == 64)
-          tl = tj / 2 * g_serumData.fwidth + ti / 2;
-        else
-          tl = tj * 2 * g_serumData.fwidth + ti * 2;
 
-        if ((g_serumData.backgroundIDs[IDfound][0] <
-             g_serumData.nbackgrounds) &&
-            (frame[tl] == 0) &&
-            (g_serumData.backgroundmask_extra[IDfound][tk] > 0)) {
-          if (isdynapix[tk] == 0) {
-            pfr[tk] = g_serumData.backgroundframes_v2_extra
-                          [g_serumData.backgroundIDs[IDfound][0]][tk];
-            if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                &prot[tk * 2 + 1], true)) {
-              pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                            (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                                prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
-            }
-          }
-        } else {
-          uint8_t dynacouche = g_serumData.dynamasks_extra[IDfound][tk];
-          if (dynacouche == 255) {
-            if (isdynapix[tk] == 0) {
-              pfr[tk] = g_serumData.cframes_v2_extra[IDfound][tk];
-              if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                  &prot[tk * 2 + 1], true)) {
-                pfr[tk] =
-                    prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                        (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                            prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
-              }
-            }
-          } else {
-            if (frame[tl] > 0) {
-              CheckDynaShadow(pfr, IDfound, dynacouche, isdynapix, ti, tj,
-                              g_serumData.fwidth_extra,
-                              g_serumData.fheight_extra, true);
-              isdynapix[tk] = 1;
-              pfr[tk] =
-                  g_serumData.dyna4cols_v2_extra
-                      [IDfound][dynacouche * g_serumData.nocolors + frame[tl]];
-            } else if (isdynapix[tk] == 0)
-              pfr[tk] =
-                  g_serumData.dyna4cols_v2_extra
-                      [IDfound][dynacouche * g_serumData.nocolors + frame[tl]];
-            prot[tk * 2] = prot[tk * 2 + 1] = 0xffff;
-          }
-        }
-      }
+    SerumV2RenderFrameInput input{};
+    input.width = g_serumData.fwidth_extra;
+    input.height = g_serumData.fheight_extra;
+    input.base_width = g_serumData.fwidth;
+    input.base_height = g_serumData.fheight;
+    input.nocolors = g_serumData.nocolors;
+    input.base_frame = frame;
+    input.colorized = g_serumData.cframes_v2_extra[IDfound];
+    input.dyna_mask = g_serumData.dynamasks_extra[IDfound];
+    input.dyna_colors = g_serumData.dyna4cols_v2_extra[IDfound];
+    if (has_background) {
+      input.background_mask = g_serumData.backgroundmask_extra[IDfound];
+      input.background_frame =
+          g_serumData.backgroundframes_v2_extra[background_id];
     }
+    input.dynashadows_dir = g_serumData.dynashadowsdir_extra[IDfound];
+    input.dynashadows_col = g_serumData.dynashadowscol_extra[IDfound];
+
+    SerumV2RenderRotationInput rotation{prt, cshft};
+    SerumV2_RenderFrame(&input, &rotation, pfr, prot);
   }
 }
 
@@ -1861,119 +1711,86 @@ void Colorize_Spritev1(uint8_t nosprite, uint16_t frx, uint16_t fry,
 void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
                        uint16_t fry, uint16_t spx, uint16_t spy, uint16_t wid,
                        uint16_t hei, uint32_t IDfound) {
-  uint16_t *pfr, *prot;
-  uint16_t* prt;
-  uint32_t* cshft;
+  SerumV2RenderSpriteInput sprite_input{};
+  sprite_input.sprite_original = g_serumData.spriteoriginal[nosprite];
+  sprite_input.sprite_colored = g_serumData.spritecolored[nosprite];
+  sprite_input.sprite_mask_extra = g_serumData.spritemask_extra[nosprite];
+  sprite_input.sprite_colored_extra = g_serumData.spritecolored_extra[nosprite];
+  sprite_input.dynasprite_mask = g_serumData.dynaspritemasks[nosprite];
+  sprite_input.dynasprite_mask_extra =
+      g_serumData.dynaspritemasks_extra[nosprite];
+  sprite_input.dynasprite_cols = g_serumData.dynasprite4cols[nosprite];
+  sprite_input.dynasprite_cols_extra =
+      g_serumData.dynasprite4cols_extra[nosprite];
+
+  SerumV2SpritePlacement placement{};
+  placement.frx = frx;
+  placement.fry = fry;
+  placement.spx = spx;
+  placement.spy = spy;
+  placement.wid = wid;
+  placement.hei = hei;
+
   if (((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) &&
        g_serumData.fheight == 32) ||
       ((mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) &&
        g_serumData.fheight == 64)) {
+    uint16_t* pfr = nullptr;
+    uint16_t* prot = nullptr;
+    uint16_t* prt = g_serumData.colorrotations_v2[IDfound];
+    uint32_t* cshft = nullptr;
     if (g_serumData.fheight == 32) {
       pfr = mySerum.frame32;
       prot = mySerum.rotationsinframe32;
-      prt = g_serumData.colorrotations_v2[IDfound];
       cshft = colorshifts32;
     } else {
       pfr = mySerum.frame64;
       prot = mySerum.rotationsinframe64;
-      prt = g_serumData.colorrotations_v2[IDfound];
       cshft = colorshifts64;
     }
-    for (uint16_t tj = 0; tj < hei; tj++) {
-      for (uint16_t ti = 0; ti < wid; ti++) {
-        uint16_t tk = (fry + tj) * g_serumData.fwidth + frx + ti;
-        uint32_t tl = (tj + spy) * MAX_SPRITE_WIDTH + ti + spx;
-        uint8_t spriteref = g_serumData.spriteoriginal[nosprite][tl];
-        if (spriteref < 255) {
-          uint8_t dynacouche = g_serumData.dynaspritemasks[nosprite][tl];
-          if (dynacouche == 255) {
-            pfr[tk] = g_serumData.spritecolored[nosprite][tl];
-            if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                &prot[tk * 2 + 1], false))
-              pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                            (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                                prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
-          } else {
-            pfr[tk] =
-                g_serumData.dynasprite4cols[nosprite]
-                                           [dynacouche * g_serumData.nocolors +
-                                            oframe[tk]];
-            if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                &prot[tk * 2 + 1], false))
-              pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                            (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                                prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
-          }
-        }
-      }
-    }
+
+    SerumV2RenderFrameInput frame_input{};
+    frame_input.width = g_serumData.fwidth;
+    frame_input.height = g_serumData.fheight;
+    frame_input.base_width = g_serumData.fwidth;
+    frame_input.base_height = g_serumData.fheight;
+    frame_input.nocolors = g_serumData.nocolors;
+    frame_input.base_frame = oframe;
+
+    SerumV2RenderRotationInput rotation{prt, cshft};
+    SerumV2_RenderSprite(&frame_input, &sprite_input, &placement, &rotation,
+                         pfr, prot);
   }
+
   if (((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) &&
        g_serumData.fheight_extra == 32) ||
       ((mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) &&
        g_serumData.fheight_extra == 64)) {
-    uint16_t thei, twid, tfrx, tfry, tspy, tspx;
+    uint16_t* pfr = nullptr;
+    uint16_t* prot = nullptr;
+    uint16_t* prt = g_serumData.colorrotations_v2_extra[IDfound];
+    uint32_t* cshft = nullptr;
     if (g_serumData.fheight_extra == 32) {
       pfr = mySerum.frame32;
       prot = mySerum.rotationsinframe32;
-      thei = hei / 2;
-      twid = wid / 2;
-      tfrx = frx / 2;
-      tfry = fry / 2;
-      tspx = spx / 2;
-      tspy = spy / 2;
-      prt = g_serumData.colorrotations_v2_extra[IDfound];
       cshft = colorshifts32;
     } else {
       pfr = mySerum.frame64;
       prot = mySerum.rotationsinframe64;
-      thei = hei * 2;
-      twid = wid * 2;
-      tfrx = frx * 2;
-      tfry = fry * 2;
-      tspx = spx * 2;
-      tspy = spy * 2;
-      prt = g_serumData.colorrotations_v2_extra[IDfound];
       cshft = colorshifts64;
     }
-    for (uint16_t tj = 0; tj < thei; tj++) {
-      for (uint16_t ti = 0; ti < twid; ti++) {
-        uint16_t tk = (tfry + tj) * g_serumData.fwidth_extra + tfrx + ti;
-        if (g_serumData
-                .spritemask_extra[nosprite][(tj + tspy) * MAX_SPRITE_WIDTH +
-                                            ti + tspx] < 255) {
-          uint8_t dynacouche =
-              g_serumData.dynaspritemasks_extra[nosprite]
-                                               [(tj + tspy) * MAX_SPRITE_WIDTH +
-                                                ti + tspx];
-          if (dynacouche == 255) {
-            pfr[tk] =
-                g_serumData.spritecolored_extra[nosprite]
-                                               [(tj + tspy) * MAX_SPRITE_WIDTH +
-                                                ti + tspx];
-            if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                &prot[tk * 2 + 1], true))
-              pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                            (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                                prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
-          } else {
-            uint16_t tl;
-            if (g_serumData.fheight_extra == 64)
-              tl = (tj / 2 + fry) * g_serumData.fwidth + ti / 2 + frx;
-            else
-              tl = (tj * 2 + fry) * g_serumData.fwidth + ti * 2 + frx;
-            pfr[tk] =
-                g_serumData.dynasprite4cols_extra
-                    [nosprite][dynacouche * g_serumData.nocolors + oframe[tl]];
-            if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                &prot[tk * 2 + 1], true))
-              pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                            (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                                prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
-          }
-        }
-      }
-    }
+
+    SerumV2RenderFrameInput frame_input{};
+    frame_input.width = g_serumData.fwidth_extra;
+    frame_input.height = g_serumData.fheight_extra;
+    frame_input.base_width = g_serumData.fwidth;
+    frame_input.base_height = g_serumData.fheight;
+    frame_input.nocolors = g_serumData.nocolors;
+    frame_input.base_frame = oframe;
+
+    SerumV2RenderRotationInput rotation{prt, cshft};
+    SerumV2_RenderSprite(&frame_input, &sprite_input, &placement, &rotation,
+                         pfr, prot);
   }
 }
 
@@ -2516,68 +2333,26 @@ uint32_t Serum_ApplyRotationsv2(void) {
   uint32_t now = GetMonotonicTimeMs();
   if (mySerum.frame32) {
     sizeframe = 32 * mySerum.width32;
-    if (mySerum.modifiedelements32)
-      memset(mySerum.modifiedelements32, 0, sizeframe);
-    for (int ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
-      if (mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION] == 0 ||
-          mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1] == 0)
-        continue;
-      uint32_t elapsed = now - colorshiftinittime32[ti];
-      if (elapsed >=
-          (uint32_t)(mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1])) {
-        colorshifts32[ti]++;
-        colorshifts32[ti] %=
-            mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION];
-        colorshiftinittime32[ti] = now;
-        colorrotnexttime32[ti] =
-            now + mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1];
-        isrotation |= FLAG_RETURNED_V2_ROTATED32;
-        for (uint32_t tj = 0; tj < sizeframe; tj++) {
-          if (mySerum.rotationsinframe32[tj * 2] == ti) {
-            // if we have a pixel which is part of this rotation, we modify it
-            mySerum.frame32[tj] =
-                mySerum.rotations32
-                    [ti * MAX_LENGTH_COLOR_ROTATION + 2 +
-                     (mySerum.rotationsinframe32[tj * 2 + 1] +
-                      colorshifts32[ti]) %
-                         mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION]];
-            if (mySerum.modifiedelements32) mySerum.modifiedelements32[tj] = 1;
-          }
-        }
-      }
+    uint8_t active[MAX_COLOR_ROTATION_V2] = {};
+    bool rotated = false;
+    SerumV2_ApplyRotations(
+        mySerum.rotations32, mySerum.frame32, mySerum.rotationsinframe32,
+        sizeframe, colorrotnexttime32, colorshifts32, active, now,
+        mySerum.modifiedelements32, colorshiftinittime32, false, &rotated);
+    if (rotated) {
+      isrotation |= FLAG_RETURNED_V2_ROTATED32;
     }
   }
   if (mySerum.frame64) {
     sizeframe = 64 * mySerum.width64;
-    if (mySerum.modifiedelements64)
-      memset(mySerum.modifiedelements64, 0, sizeframe);
-    for (int ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
-      if (mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION] == 0 ||
-          mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1] == 0)
-        continue;
-      uint32_t elapsed = now - colorshiftinittime64[ti];
-      if (elapsed >=
-          (uint32_t)(mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1])) {
-        colorshifts64[ti]++;
-        colorshifts64[ti] %=
-            mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION];
-        colorshiftinittime64[ti] = now;
-        colorrotnexttime64[ti] =
-            now + mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1];
-        isrotation |= FLAG_RETURNED_V2_ROTATED64;
-        for (uint32_t tj = 0; tj < sizeframe; tj++) {
-          if (mySerum.rotationsinframe64[tj * 2] == ti) {
-            // if we have a pixel which is part of this rotation, we modify it
-            mySerum.frame64[tj] =
-                mySerum.rotations64
-                    [ti * MAX_LENGTH_COLOR_ROTATION + 2 +
-                     (mySerum.rotationsinframe64[tj * 2 + 1] +
-                      colorshifts64[ti]) %
-                         mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION]];
-            if (mySerum.modifiedelements64) mySerum.modifiedelements64[tj] = 1;
-          }
-        }
-      }
+    uint8_t active[MAX_COLOR_ROTATION_V2] = {};
+    bool rotated = false;
+    SerumV2_ApplyRotations(
+        mySerum.rotations64, mySerum.frame64, mySerum.rotationsinframe64,
+        sizeframe, colorrotnexttime64, colorshifts64, active, now,
+        mySerum.modifiedelements64, colorshiftinittime64, false, &rotated);
+    if (rotated) {
+      isrotation |= FLAG_RETURNED_V2_ROTATED64;
     }
   }
   mySerum.rotationtimer = Calc_Next_Rotationv2(now) &
