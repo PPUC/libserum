@@ -272,6 +272,74 @@ SERUM_EDITOR_API bool SerumEditor_RenderFrame(
   return true;
 }
 
+SERUM_EDITOR_API bool SerumEditor_RenderFrameWithRotations(
+    const SerumEditorDataView* data, const SerumEditorFrameView* frame,
+    const SerumEditorSpriteMatch* matches, uint8_t match_count, bool use_extra,
+    const uint16_t* rotations, const uint32_t* shifts, uint16_t* out_frame,
+    uint16_t* rotations_in_frame) {
+  if (!data || !frame || !out_frame || !frame->original) {
+    return false;
+  }
+  const uint32_t width = use_extra ? data->width_extra : data->width;
+  const uint32_t height = use_extra ? data->height_extra : data->height;
+  if (width == 0 || height == 0) {
+    return false;
+  }
+
+  SerumV2RenderFrameInput input{};
+  input.width = width;
+  input.height = height;
+  input.base_width = data->width;
+  input.base_height = data->height;
+  input.nocolors = data->nocolors;
+  input.base_frame = frame->original;
+  input.colorized = use_extra ? frame->colorized_extra : frame->colorized;
+  input.dyna_mask = use_extra ? frame->dynamask_extra : frame->dynamask;
+  input.dyna_colors = use_extra ? frame->dyna4cols_extra : frame->dyna4cols;
+  if (frame->background_id != 0xffff) {
+    input.background_mask =
+        use_extra ? frame->background_mask_extra : frame->background_mask;
+    input.background_frame =
+        use_extra ? frame->background_frame_extra : frame->background_frame;
+  }
+
+  SerumV2RenderRotationInput rotation{};
+  rotation.rotations = rotations;
+  rotation.shifts = shifts;
+  SerumV2_RenderFrame(&input, rotations ? &rotation : nullptr, out_frame,
+                      rotations_in_frame);
+
+  if (matches && data->sprites) {
+    for (uint8_t i = 0; i < match_count; ++i) {
+      const uint8_t sprite_id = matches[i].sprite_index;
+      if (sprite_id == 255 || sprite_id >= data->nsprites) {
+        continue;
+      }
+      const SerumEditorSpriteView& sprite = data->sprites[sprite_id];
+      SerumV2RenderSpriteInput sprite_input;
+      sprite_input.sprite_original = sprite.original;
+      sprite_input.sprite_colored = sprite.colored;
+      sprite_input.sprite_mask_extra = sprite.mask_extra;
+      sprite_input.sprite_colored_extra = sprite.colored_extra;
+      sprite_input.dynasprite_mask = sprite.dynasprite_mask;
+      sprite_input.dynasprite_mask_extra = sprite.dynasprite_mask_extra;
+      sprite_input.dynasprite_cols = sprite.dynasprite_cols;
+      sprite_input.dynasprite_cols_extra = sprite.dynasprite_cols_extra;
+      SerumV2SpritePlacement placement;
+      placement.frx = matches[i].frx;
+      placement.fry = matches[i].fry;
+      placement.spx = matches[i].spx;
+      placement.spy = matches[i].spy;
+      placement.wid = matches[i].wid;
+      placement.hei = matches[i].hei;
+      SerumV2_RenderSprite(&input, &sprite_input, &placement,
+                           rotations ? &rotation : nullptr, out_frame,
+                           rotations_in_frame);
+    }
+  }
+  return true;
+}
+
 SERUM_EDITOR_API void SerumEditor_InitRotationState(
     const uint16_t* rotations, SerumEditorRotationState* state,
     uint32_t now_ms) {
@@ -297,4 +365,21 @@ SERUM_EDITOR_API uint32_t SerumEditor_ApplyRotations(
       rotations, output_frame, nullptr, static_cast<uint32_t>(width) * height,
       state->next_time_ms, state->shift, state->active, now_ms, nullptr,
       nullptr, true, nullptr);
+}
+
+SERUM_EDITOR_API uint32_t SerumEditor_ApplyRotationsMasked(
+    const uint16_t* rotations, const uint16_t* input_frame,
+    uint16_t* output_frame, uint16_t* rotations_in_frame, uint32_t width,
+    uint32_t height, SerumEditorRotationState* state, uint32_t now_ms) {
+  if (!rotations || !input_frame || !output_frame || width == 0 ||
+      height == 0 || !state || !rotations_in_frame) {
+    return 0;
+  }
+  std::memcpy(output_frame, input_frame,
+              static_cast<std::size_t>(width) * height * sizeof(uint16_t));
+
+  return SerumV2_ApplyRotations(
+      rotations, output_frame, rotations_in_frame,
+      static_cast<uint32_t>(width) * height, state->next_time_ms, state->shift,
+      state->active, now_ms, nullptr, nullptr, true, nullptr);
 }
