@@ -1128,19 +1128,53 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   mySerum.modifiedelements32 = NULL;
   mySerum.modifiedelements64 = NULL;
 
-  std::string pathbuf = std::string(altcolorpath);
-  if (pathbuf.empty() || (pathbuf.back() != '\\' && pathbuf.back() != '/'))
+  std::string alt = altcolorpath ? std::string(altcolorpath) : std::string();
+  std::string rom = romname ? std::string(romname) : std::string();
+  std::string pathbuf;
+  bool useRomSubdir = true;
+
+  if (!alt.empty()) {
+    std::filesystem::path altPath = std::filesystem::u8path(alt);
+    if (std::filesystem::is_regular_file(altPath)) {
+      std::filesystem::path dir = altPath.parent_path();
+      if (rom.empty()) {
+        rom = altPath.stem().string();
+      }
+      pathbuf = dir.u8string();
+      if (!pathbuf.empty() && pathbuf.back() != '\\' && pathbuf.back() != '/')
+        pathbuf += '/';
+      useRomSubdir = false;
+    } else {
+      pathbuf = alt;
+      if (!pathbuf.empty() && pathbuf.back() != '\\' && pathbuf.back() != '/')
+        pathbuf += '/';
+      if (!rom.empty()) {
+        if (find_case_insensitive_file(pathbuf, rom + ".cROMc") ||
+            find_case_insensitive_file(pathbuf, rom + ".cROM") ||
+            find_case_insensitive_file(pathbuf, rom + ".cRZ")) {
+          useRomSubdir = false;
+        }
+      }
+    }
+  }
+
+  if (useRomSubdir && !rom.empty()) {
+    if (pathbuf.empty() || (pathbuf.back() != '\\' && pathbuf.back() != '/'))
+      pathbuf += '/';
+    pathbuf += rom;
     pathbuf += '/';
-  pathbuf += romname;
-  pathbuf += '/';
+  }
 
   // If no specific frame tyoe is requested, activate both
   if ((flags & (FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES)) == 0) {
     flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
   }
 
+  const std::string romQuery = rom;
   std::optional<std::string> csvFoundFile =
-      find_case_insensitive_file(pathbuf, std::string(romname) + ".pup.csv");
+      romQuery.empty()
+          ? std::optional<std::string>()
+          : find_case_insensitive_file(pathbuf, romQuery + ".pup.csv");
   if (csvFoundFile) {
     Log("Found %s", csvFoundFile->c_str());
 #ifdef WRITE_CROMC
@@ -1150,7 +1184,9 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   }
   Serum_Frame_Struc* result = NULL;
   std::optional<std::string> pFoundFile =
-      find_case_insensitive_file(pathbuf, std::string(romname) + ".cROMc");
+      romQuery.empty()
+          ? std::optional<std::string>()
+          : find_case_insensitive_file(pathbuf, romQuery + ".cROMc");
 
   if (pFoundFile) {
     Log("Found %s", pFoundFile->c_str());
@@ -1174,11 +1210,11 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     // by default, we request both frame types
     flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
 #endif
-    pFoundFile =
-        find_case_insensitive_file(pathbuf, std::string(romname) + ".cROM");
-    if (!pFoundFile)
-      pFoundFile =
-          find_case_insensitive_file(pathbuf, std::string(romname) + ".cRZ");
+    if (!romQuery.empty()) {
+      pFoundFile = find_case_insensitive_file(pathbuf, romQuery + ".cROM");
+      if (!pFoundFile)
+        pFoundFile = find_case_insensitive_file(pathbuf, romQuery + ".cRZ");
+    }
     if (!pFoundFile) {
       enabled = false;
       return NULL;

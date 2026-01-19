@@ -22,8 +22,10 @@ SERUM_API void Serum_SetLogCallback(Serum_LogCallback callback,
 
 /** @brief Load a Serum file.
  *
- *  @param altcolorpath: path to the altcolor directory (e.g. "C:\\visual
- * pinball\\vpinmame\\altcolor\\")
+ *  @param altcolorpath: base altcolor directory (e.g. "C:\\...\\altcolor\\")
+ *         or a direct path to a .cROM/.cRZ/.cROMc file. If a file path is
+ *         provided, the file's parent directory is used and the rom name can
+ *         be derived from the filename when romname is empty.
  *  @param romname: name of the rom (e.g. "afm_113b")
  *  @param flags (only needed for v2 files): this can be a combination of:
  * FLAG_REQUEST_32P_FRAMES (if you want the 32-pixel-high frame to be returned

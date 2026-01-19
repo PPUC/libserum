@@ -5,6 +5,7 @@
 #include <cereal/types/vector.hpp>
 #include <cstdint>
 #include <unordered_map>
+#include <cstring>
 #include <vector>
 
 #include "LZ4Stream.h"
@@ -74,11 +75,61 @@ class SparseVector {
     }
   }
 
+  const T *operator[](const uint32_t elementId) const {
+    if (useIndex) {
+      if (elementId >= index.size()) return noData.data();
+      return index[elementId].data();
+    }
+    auto it = data.find(elementId);
+    if (it == data.end()) return noData.data();
+
+    if (useCompression) {
+      // Cache-Hit
+      if (elementId == lastAccessedId) {
+        return lastDecompressed.data();
+      }
+
+      const auto &compressed = it->second;
+
+      // ensure decompBuffer is large enough
+      if (lastDecompressed.size() < elementSize) {
+        lastDecompressed.resize(elementSize);
+      }
+
+      int decompressedSize = LZ4_decompress_safe(
+          reinterpret_cast<const char *>(compressed.data()),
+          reinterpret_cast<char *>(lastDecompressed.data()),
+          static_cast<int>(compressed.size()),
+          static_cast<int>(elementSize * sizeof(T)));
+
+      if (decompressedSize < 0) return noData.data();
+
+      // Cache-Update
+      lastAccessedId = elementId;
+      return lastDecompressed.data();
+    }
+
+    return reinterpret_cast<const T *>(it->second.data());
+  }
+
   bool hasData(uint32_t elementId) const {
     if (useIndex)
       return elementId < index.size() && !index[elementId].empty() &&
              index[elementId][0] != noData[0];
     return data.find(elementId) != data.end();
+  }
+
+  size_t elementCount() const { return elementSize; }
+
+  void setIndex(uint32_t elementId, const T *values, size_t size) {
+    if (!useIndex) {
+      throw std::runtime_error("setIndex() only valid for index storage");
+    }
+    if (index.size() <= elementId) {
+      index.resize(elementId + 1);
+    }
+    index[elementId].resize(size);
+    std::memcpy(index[elementId].data(), values, size * sizeof(T));
   }
 
   template <typename U = T>
