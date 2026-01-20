@@ -51,6 +51,7 @@ int strcat_s(char* dest, size_t destsz, const char* src) {
 
 #define PUP_TRIGGER_REPEAT_TIMEOUT 500  // 500 ms
 #define PUP_TRIGGER_MAX_THRESHOLD 50000
+#define MONOCHROME_TRIGGER_ID 65432
 
 #pragma warning(disable : 4996)
 
@@ -78,8 +79,7 @@ uint8_t sceneRepeatCount = 0;
 uint8_t sceneEndFrame = 0;
 uint8_t sceneFrame[256 * 64] = {0};
 uint8_t lastFrame[256 * 64] = {0};
-uint8_t SG_sceneFrame[256 * 64] = {0};
-uint8_t SG_lastIncomingFrame[256 * 64] = {0};
+uint16_t sceneBackgroundFrame[256 * 64] = {0};
 bool monochromeMode = false;
 bool showStatusMessages = false;
 bool keepTriggersInternal = false;
@@ -120,7 +120,7 @@ bool generateCRomC = true;
 uint32_t lastfound = 0;  // last frame ID identified
 uint32_t lastframe_full_crc = 0;
 uint32_t lastframe_found = GetMonotonicTimeMs();
-uint32_t lasttriggerID = 0xffffffff;  // last trigger ID found
+uint32_t lastTriggerID = 0xffffffff;  // last trigger ID found
 uint32_t lasttriggerTimestamp = 0;
 bool isrotation = true;     // are there rotations to send
 bool crc32_ready = false;   // is the crc32 table filled?
@@ -160,31 +160,6 @@ uint32_t
     rotationnextabsolutetime[MAX_COLOR_ROTATIONS];  // cumulative time for the
                                                     // next rotation for each
                                                     // color rotation
-
-// ----------------------------------------------------------------------
-// last frame ID identified OR scene frame ID
-// ----------------------------------------------------------------------
-uint32_t SG_colFrameID = 0;
-
-// ----------------------------------------------------------------------
-// last fetched scene frame ID
-// ----------------------------------------------------------------------
-uint32_t SG_sceneFrameID = 0xffffffff;
-
-// ----------------------------------------------------------------------
-// SG: detected PUP scene
-// ----------------------------------------------------------------------
-uint32_t SG_detected_scene = 0xffffffff;
-
-// ----------------------------------------------------------------------
-// SG: running PUP scene
-// ----------------------------------------------------------------------
-uint32_t SG_current_scene = 0xffffffff;
-
-// ----------------------------------------------------------------------
-// SG: don't start with first frame
-// ----------------------------------------------------------------------
-bool SG_seamless_loop = false;
 
 Serum_Frame_Struc mySerum;  // structure to keep communicate colorization data
 
@@ -1709,7 +1684,8 @@ void CheckDynaShadow(uint16_t* pfr, uint32_t nofr, uint8_t dynacouche,
   }
 }
 
-void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
+void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
+                      bool applySceneBackground = false) {
   uint16_t tj, ti;
   // Generate the colorized version of a frame once identified in the crom
   // frames
@@ -1719,6 +1695,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
   uint16_t* prot;
   uint16_t* prt;
   uint32_t* cshft;
+  uint16_t* pSceneBackgroundFrame;
   if (mySerum.frame32) mySerum.width32 = 0;
   if (mySerum.frame64) mySerum.width64 = 0;
   uint8_t isdynapix[256 * 64];
@@ -1733,6 +1710,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
       mySerum.width32 = g_serumData.fwidth;
       prt = g_serumData.colorrotations_v2[IDfound];
       cshft = colorshifts32;
+      pSceneBackgroundFrame = mySerum.frame32;
     } else {
       pfr = mySerum.frame64;
       mySerum.flags |= FLAG_RETURNED_64P_FRAME_OK;
@@ -1740,7 +1718,11 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
       mySerum.width64 = g_serumData.fwidth;
       prt = g_serumData.colorrotations_v2[IDfound];
       cshft = colorshifts64;
+      pSceneBackgroundFrame = mySerum.frame64;
     }
+    if (applySceneBackground)
+      memcpy(sceneBackgroundFrame, pSceneBackgroundFrame,
+             g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
     memset(isdynapix, 0, g_serumData.fheight * g_serumData.fwidth);
     for (tj = 0; tj < g_serumData.fheight; tj++) {
       for (ti = 0; ti < g_serumData.fwidth; ti++) {
@@ -1749,15 +1731,18 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
              g_serumData.nbackgrounds) &&
             (frame[tk] == 0) && (g_serumData.backgroundmask[IDfound][tk] > 0)) {
           if (isdynapix[tk] == 0) {
-            pfr[tk] =
-                g_serumData
-                    .backgroundframes_v2[g_serumData.backgroundIDs[IDfound][0]]
-                                        [tk];
-            if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                &prot[tk * 2 + 1], false))
-              pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                            (cshft[prot[tk * 2]] + prot[tk * 2 + 1]) %
-                                prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
+            if (applySceneBackground) {
+              pfr[tk] = sceneBackgroundFrame[tk];
+            } else {
+              pfr[tk] = g_serumData.backgroundframes_v2
+                            [g_serumData.backgroundIDs[IDfound][0]][tk];
+              if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
+                                  &prot[tk * 2 + 1], false))
+                pfr[tk] =
+                    prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
+                        (cshft[prot[tk * 2]] + prot[tk * 2 + 1]) %
+                            prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
+            }
           }
         } else {
           uint8_t dynacouche = g_serumData.dynamasks[IDfound][tk];
@@ -1803,6 +1788,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
       mySerum.width32 = g_serumData.fwidth_extra;
       prt = g_serumData.colorrotations_v2_extra[IDfound];
       cshft = colorshifts32;
+      pSceneBackgroundFrame = mySerum.frame32;
     } else {
       pfr = mySerum.frame64;
       mySerum.flags |= FLAG_RETURNED_64P_FRAME_OK;
@@ -1810,7 +1796,12 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
       mySerum.width64 = g_serumData.fwidth_extra;
       prt = g_serumData.colorrotations_v2_extra[IDfound];
       cshft = colorshifts64;
+      pSceneBackgroundFrame = mySerum.frame64;
     }
+    if (applySceneBackground)
+      memcpy(sceneBackgroundFrame, pSceneBackgroundFrame,
+             g_serumData.fwidth_extra * g_serumData.fheight_extra *
+                 sizeof(uint16_t));
     memset(isdynapix, 0, g_serumData.fheight_extra * g_serumData.fwidth_extra);
     for (tj = 0; tj < g_serumData.fheight_extra; tj++) {
       for (ti = 0; ti < g_serumData.fwidth_extra; ti++) {
@@ -1826,13 +1817,18 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
             (frame[tl] == 0) &&
             (g_serumData.backgroundmask_extra[IDfound][tk] > 0)) {
           if (isdynapix[tk] == 0) {
-            pfr[tk] = g_serumData.backgroundframes_v2_extra
-                          [g_serumData.backgroundIDs[IDfound][0]][tk];
-            if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                &prot[tk * 2 + 1], true)) {
-              pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                            (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                                prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
+            if (applySceneBackground) {
+              pfr[tk] = sceneBackgroundFrame[tk];
+            } else {
+              pfr[tk] = g_serumData.backgroundframes_v2_extra
+                            [g_serumData.backgroundIDs[IDfound][0]][tk];
+              if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
+                                  &prot[tk * 2 + 1], true)) {
+                pfr[tk] =
+                    prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
+                        (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
+                            prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
+              }
             }
           }
         } else {
@@ -2064,7 +2060,8 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    monochromeMode = (g_serumData.triggerIDs[lastfound][0] == 65432);
+    monochromeMode =
+        (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
     if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
       g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
 
@@ -2128,9 +2125,9 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
 
       mySerum.rotationtimer = Calc_Next_Rotationv1(now);
 
-      if (g_serumData.triggerIDs[lastfound][0] != lasttriggerID ||
+      if (g_serumData.triggerIDs[lastfound][0] != lastTriggerID ||
           lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT)) {
-        lasttriggerID = mySerum.triggerID =
+        lastTriggerID = mySerum.triggerID =
             g_serumData.triggerIDs[lastfound][0];
         lasttriggerTimestamp = now;
       }
@@ -2190,37 +2187,9 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
   // before the first rotation in ms
   mySerum.triggerID = 0xffffffff;
   mySerum.frameID = IDENTIFY_NO_FRAME;
-  SG_detected_scene = 0xffffffff;
-  bool SG_scene_running =
-      (g_serumData.sceneGenerator->isActive() && sceneFrameCount > 0);
 
-  uint32_t frameID;
-  if (!sceneFrameRequested) {
-    // Let's first identify the incoming frame among the ones we have in the
-    // crom
-    frameID = Identify_Frame(frame);
-    if (frameID != IDENTIFY_NO_FRAME) {
-      SG_colFrameID = frameID;
-      if (frameID < MAX_NUMBER_FRAMES) {
-        SG_detected_scene = g_serumData.triggerIDs[frameID][0];
-      }
-    }
-    // ----------------------------------------------------------------------
-    // copy framedata for later use > SG_lastIncomingFrame
-    // ----------------------------------------------------------------------
-    memcpy(SG_lastIncomingFrame, frame,
-           g_serumData.fwidth * g_serumData.fheight);
-  } else if (SG_scene_running) {
-    // ----------------------------------------------------------------------
-    // SceneFrameRequested: No need to identify the sceneFrame since it's
-    // already set
-    // ----------------------------------------------------------------------
-    SG_colFrameID = SG_sceneFrameID;
-  }
-  if (g_serumData.sceneGenerator->isActive()) {
-    SG_seamless_loop = (sceneRepeatCount == 255);
-  }
-
+  // Let's first identify the incoming frame among the ones we have in the crom
+  uint32_t frameID = Identify_Frame(frame);
   uint32_t now = GetMonotonicTimeMs();
   bool rotationIsScene = false;
   if (is_real_machine() && !showStatusMessages) {
@@ -2229,7 +2198,8 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    monochromeMode = (g_serumData.triggerIDs[lastfound][0] == 65432);
+    monochromeMode =
+        (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
     if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
       g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
 
@@ -2241,15 +2211,6 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
         mySerum.triggerID = 0xffffffff;
       // Scene is active and not interruptable
       return IDENTIFY_NO_FRAME;
-    }
-
-    if (!sceneFrameRequested) {
-      if (g_serumData.triggerIDs[lastfound][0] != lasttriggerID &&
-          g_serumData.triggerIDs[lastfound][0] < 0xffffffff &&
-          lasttriggerID < 0xffffffff) {
-        // stop any scene
-        sceneFrameCount = 0;
-      }
     }
 
     // frame identified
@@ -2267,156 +2228,165 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
 
     mySerum.frameID = frameID;
     if (!sceneFrameRequested) {
-      mySerum.rotationtimer = 0;
-    }
-
-    // lastfound is set by Identify_Frame, check if we have a new PUP trigger
-    if (!monochromeMode && !sceneFrameRequested &&
-        (g_serumData.triggerIDs[lastfound][0] != lasttriggerID ||
-         lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT))) {
-      lasttriggerID = mySerum.triggerID = g_serumData.triggerIDs[lastfound][0];
-      lasttriggerTimestamp = now;
-
-      if (SG_scene_running && mySerum.triggerID == SG_current_scene &&
-          SG_seamless_loop) {
-        // ----------------------------------------------------------------------
-        // Same trigger found while seemles looping scene active -> leave scene
-        // settings untouched
-        // ----------------------------------------------------------------------
-        SG_colFrameID = SG_sceneFrameID;
+      if (sceneFrameCount > 0 && sceneRepeatCount == 255 &&
+          lastTriggerID < MONOCHROME_TRIGGER_ID &&
+          g_serumData.triggerIDs[lastfound][0] == lastTriggerID) {
+        // New frame has the same Trigger ID, continuing an already running
+        // seamless looped scene, but update lastFrame.
+        memcpy(lastFrame, frame, g_serumData.fwidth * g_serumData.fheight);
+        // Wait for the next rotation to have a smooth transition.
+        return IDENTIFY_SAME_FRAME;
       } else {
-        if (lasttriggerID < 0xffffffff) {
-          if (g_serumData.sceneGenerator->getSceneInfo(
-                  lasttriggerID, sceneFrameCount, sceneDurationPerFrame,
-                  sceneInterruptable, sceneStartImmediately, sceneRepeatCount,
-                  sceneEndFrame)) {
-            memcpy(lastFrame, frame, g_serumData.fwidth * g_serumData.fheight);
-            // Log(DMDUtil_LogLevel_DEBUG, "Serum: trigger ID %lu found in
-            // scenes, frame count=%d, duration=%dms",
-            //     m_pSerum->triggerID, sceneFrameCount, sceneDurationPerFrame);
-            // ----------------------------------------------------------------------
-            // Generate the scene frame (pup id, framenumber and group) ..
-            // ----------------------------------------------------------------------
-            SG_current_scene = SG_detected_scene;
-            g_serumData.sceneGenerator->generateFrame(
-                lasttriggerID, sceneCurrentFrame++, SG_sceneFrame, -1, true);
-            // ----------------------------------------------------------------------
-            // .. and identify the frame number
-            // ----------------------------------------------------------------------
-            SG_sceneFrameID = Identify_Frame(SG_sceneFrame);
+        // stop any scene
+        sceneFrameCount = 0;
+        mySerum.rotationtimer = 0;
 
-            sceneCurrentFrame = 0;
-            if (sceneStartImmediately) {
-              // Overwrite the current frame with the first scene frame, ignore
-              // the result
-              SG_colFrameID = SG_sceneFrameID;
+        // lastfound is set by Identify_Frame, check if we have a new PUP
+        // trigger
+        if (!monochromeMode &&
+            (g_serumData.triggerIDs[lastfound][0] != lastTriggerID ||
+             lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT))) {
+          lastTriggerID = mySerum.triggerID =
+              g_serumData.triggerIDs[lastfound][0];
+          lasttriggerTimestamp = now;
+
+          if (g_serumData.sceneGenerator->isActive() &&
+              lastTriggerID < 0xffffffff) {
+            if (g_serumData.sceneGenerator->getSceneInfo(
+                    lastTriggerID, sceneFrameCount, sceneDurationPerFrame,
+                    sceneInterruptable, sceneStartImmediately, sceneRepeatCount,
+                    sceneEndFrame)) {
+              memcpy(lastFrame, frame,
+                     g_serumData.fwidth * g_serumData.fheight);
+              // Log(DMDUtil_LogLevel_DEBUG, "Serum: trigger ID %lu found in
+              // scenes, frame count=%d, duration=%dms",
+              //     m_pSerum->triggerID, sceneFrameCount,
+              //     sceneDurationPerFrame);
+              sceneCurrentFrame = 0;
+              if (sceneStartImmediately) {
+                // Overwrite the current frame with the first scene frame,
+                // ignore the result
+                g_serumData.sceneGenerator->generateFrame(
+                    lastTriggerID, sceneCurrentFrame++, frame);
+              }
+              mySerum.rotationtimer = sceneDurationPerFrame;
+              rotationIsScene = true;
             }
-            mySerum.rotationtimer = sceneDurationPerFrame;
-            rotationIsScene = true;
           }
         }
       }
-    } else {
-      if (SG_scene_running && SG_sceneFrameID < 0xffffffff) {
-        SG_colFrameID = SG_sceneFrameID;
-      }
     }
 
+    bool isSeamlessLoopingScene =
+        (sceneFrameRequested && sceneFrameCount > 0 && sceneRepeatCount == 255);
     uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
     uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
         spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
         wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
     memset(nosprite, 255, MAX_SPRITES_PER_FRAME);
 
-    bool isspr = Check_Spritesv2(frame, SG_colFrameID, nosprite, &nspr, frx,
-                                 fry, spx, spy, wid, hei);
-    if (((SG_colFrameID < MAX_NUMBER_FRAMES) || isspr) &&
-        g_serumData.activeframes[SG_colFrameID][0] != 0) {
+    bool isspr =
+        (sceneFrameRequested && !isSeamlessLoopingScene)
+            ? false
+            : Check_Spritesv2(isSeamlessLoopingScene ? lastFrame : frame,
+                              lastfound, nosprite, &nspr, frx, fry, spx, spy,
+                              wid, hei);
+    if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
+        g_serumData.activeframes[lastfound][0] != 0) {
       // the frame identified is not the same as the preceding
-      Colorize_Framev2(frame, SG_colFrameID);
-      uint8_t ti = 0;
-      while (ti < nspr) {
-        Colorize_Spritev2(frame, nosprite[ti], frx[ti], fry[ti], spx[ti],
-                          spy[ti], wid[ti], hei[ti], SG_colFrameID);
-        ti++;
+      Colorize_Framev2(frame, lastfound);
+      if (isSeamlessLoopingScene) {
+        Colorize_Framev2(frame, lastfound, true);
       }
-
-      uint16_t *pcr32, *pcr64;
-      if (g_serumData.fheight == 32) {
-        pcr32 = g_serumData.colorrotations_v2[SG_colFrameID];
-        pcr64 = g_serumData.colorrotations_v2_extra[SG_colFrameID];
-      } else {
-        pcr32 = g_serumData.colorrotations_v2_extra[SG_colFrameID];
-        pcr64 = g_serumData.colorrotations_v2[SG_colFrameID];
-      }
-
-      bool isRotation = false;
-
-      if (mySerum.frame32) {
-        memcpy(mySerum.rotations32, pcr32,
-               MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
-        for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
-          if (mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION] == 0 ||
-              mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1] == 0) {
-            colorrotnexttime32[ti] = 0;
-            continue;
-          }
-          // Reset the timer if the previous frame had this rotation inactive
-          // or if the last init time is more than a new rotation away.
-          // Otherwise, we keep the already running timings for subsequent
-          // frames like blinking PUSH START or GAME OVER.
-          if (colorshiftinittime32[ti] +
-                  mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1] <=
-              now) {
-            colorshiftinittime32[ti] = now;
-            colorrotnexttime32[ti] =
-                colorshiftinittime32[ti] +
-                mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1];
-          }
-
-          if (colorrotnexttime32[ti] <= now)
-            colorrotnexttime32[ti] =
-                colorshiftinittime32[ti] +
-                mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1];
-
-          isRotation = true;
-        }
-      }
-      if (mySerum.frame64) {
-        memcpy(mySerum.rotations64, pcr64,
-               MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
-        for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
-          if (mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION] == 0 ||
-              mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1] == 0) {
-            colorrotnexttime64[ti] = 0;
-            continue;
-          }
-          // Reset the timer if the previous frame had this rotation inactive
-          // or if the last init time is more than a new rotation away.
-          // Otherwise, we keep the already running timings for subsequent
-          // frames like blinking PUSH START or GAME OVER.
-          if (colorshiftinittime64[ti] +
-                  mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1] <=
-              now) {
-            colorshiftinittime64[ti] = now;
-            colorrotnexttime64[ti] =
-                colorshiftinittime64[ti] +
-                mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1];
-          }
-
-          if (colorrotnexttime64[ti] <= now)
-            colorrotnexttime64[ti] =
-                colorshiftinittime64[ti] +
-                mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1];
-
-          isRotation = true;
+      if (isspr) {
+        uint8_t ti = 0;
+        while (ti < nspr) {
+          Colorize_Spritev2(isSeamlessLoopingScene ? lastFrame : frame,
+                            nosprite[ti], frx[ti], fry[ti], spx[ti], spy[ti],
+                            wid[ti], hei[ti], lastfound);
+          ti++;
         }
       }
 
-      if (isRotation) {
-        mySerum.rotationtimer = Calc_Next_Rotationv2(now);
-      } else {
-        mySerum.rotationtimer = 0;
+      // Skip rotations if the scene is active
+      if (sceneCurrentFrame >= sceneFrameCount) {
+        uint16_t *pcr32, *pcr64;
+        if (g_serumData.fheight == 32) {
+          pcr32 = g_serumData.colorrotations_v2[lastfound];
+          pcr64 = g_serumData.colorrotations_v2_extra[lastfound];
+        } else {
+          pcr32 = g_serumData.colorrotations_v2_extra[lastfound];
+          pcr64 = g_serumData.colorrotations_v2[lastfound];
+        }
+
+        bool isRotation = false;
+
+        if (mySerum.frame32) {
+          memcpy(mySerum.rotations32, pcr32,
+                 MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
+          for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
+            if (mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION] == 0 ||
+                mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1] == 0) {
+              colorrotnexttime32[ti] = 0;
+              continue;
+            }
+            // Reset the timer if the previous frame had this rotation inactive
+            // or if the last init time is more than a new rotation away.
+            // Otherwise, we keep the already running timings for subsequent
+            // frames like blinking PUSH START or GAME OVER.
+            if (colorshiftinittime32[ti] +
+                    mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1] <=
+                now) {
+              colorshiftinittime32[ti] = now;
+              colorrotnexttime32[ti] =
+                  colorshiftinittime32[ti] +
+                  mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1];
+            }
+
+            if (colorrotnexttime32[ti] <= now)
+              colorrotnexttime32[ti] =
+                  colorshiftinittime32[ti] +
+                  mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1];
+
+            isRotation = true;
+          }
+        }
+        if (mySerum.frame64) {
+          memcpy(mySerum.rotations64, pcr64,
+                 MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
+          for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
+            if (mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION] == 0 ||
+                mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1] == 0) {
+              colorrotnexttime64[ti] = 0;
+              continue;
+            }
+            // Reset the timer if the previous frame had this rotation inactive
+            // or if the last init time is more than a new rotation away.
+            // Otherwise, we keep the already running timings for subsequent
+            // frames like blinking PUSH START or GAME OVER.
+            if (colorshiftinittime64[ti] +
+                    mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1] <=
+                now) {
+              colorshiftinittime64[ti] = now;
+              colorrotnexttime64[ti] =
+                  colorshiftinittime64[ti] +
+                  mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1];
+            }
+
+            if (colorrotnexttime64[ti] <= now)
+              colorrotnexttime64[ti] =
+                  colorshiftinittime64[ti] +
+                  mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1];
+
+            isRotation = true;
+          }
+        }
+
+        if (isRotation) {
+          mySerum.rotationtimer = Calc_Next_Rotationv2(now);
+        } else {
+          mySerum.rotationtimer = 0;
+        }
       }
 
       if (0 == mySerum.rotationtimer &&
@@ -2528,17 +2498,15 @@ uint32_t Serum_ApplyRotationsv2(void) {
 
   if (g_serumData.sceneGenerator->isActive() &&
       sceneCurrentFrame < sceneFrameCount) {
-    // Generate a scene ID frame and find the frame number
     uint16_t result = g_serumData.sceneGenerator->generateFrame(
-        lasttriggerID, sceneCurrentFrame, SG_sceneFrame);
+        lastTriggerID, sceneCurrentFrame, sceneFrame);
     // if result is 0xffff, the frame was generated and we can go
     if (0xffff == result) {
-      SG_sceneFrameID = SG_colFrameID = Identify_Frame(SG_sceneFrame);
       mySerum.rotationtimer = sceneDurationPerFrame;
-      Serum_ColorizeWithMetadatav2(SG_lastIncomingFrame, true);
+      Serum_ColorizeWithMetadatav2(sceneFrame, true);
       sceneCurrentFrame++;
       if (sceneCurrentFrame >= sceneFrameCount && sceneRepeatCount > 0) {
-        if (sceneRepeatCount == 1 || SG_seamless_loop) {
+        if (sceneRepeatCount == 1 || sceneRepeatCount == 255) {
           sceneCurrentFrame = 0;  // loop
         } else {
           sceneCurrentFrame = 0;  // repeat the scene
