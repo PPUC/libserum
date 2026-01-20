@@ -1136,13 +1136,13 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   bool useRomSubdir = true;
 
   if (!alt.empty()) {
-    std::filesystem::path altPath = std::filesystem::u8path(alt);
+    std::filesystem::path altPath(alt);
     if (std::filesystem::is_regular_file(altPath)) {
       std::filesystem::path dir = altPath.parent_path();
       if (rom.empty()) {
         rom = altPath.stem().string();
       }
-      pathbuf = dir.u8string();
+      pathbuf = dir.string();
       if (!pathbuf.empty() && pathbuf.back() != '\\' && pathbuf.back() != '/')
         pathbuf += '/';
       useRomSubdir = false;
