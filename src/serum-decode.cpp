@@ -52,6 +52,7 @@ int strcat_s(char* dest, size_t destsz, const char* src) {
 
 #define PUP_TRIGGER_REPEAT_TIMEOUT 500  // 500 ms
 #define PUP_TRIGGER_MAX_THRESHOLD 50000
+#define MONOCHROME_TRIGGER_ID 65432
 
 #pragma warning(disable : 4996)
 
@@ -77,8 +78,9 @@ bool sceneInterruptable = false;
 bool sceneStartImmediately = false;
 uint8_t sceneRepeatCount = 0;
 uint8_t sceneEndFrame = 0;
-uint8_t sceneFrame[192 * 64] = {0};
-uint8_t lastFrame[192 * 64] = {0};
+uint8_t sceneFrame[256 * 64] = {0};
+uint8_t lastFrame[256 * 64] = {0};
+uint16_t sceneBackgroundFrame[256 * 64] = {0};
 bool monochromeMode = false;
 bool showStatusMessages = false;
 bool keepTriggersInternal = false;
@@ -119,7 +121,7 @@ bool generateCRomC = true;
 uint32_t lastfound = 0;  // last frame ID identified
 uint32_t lastframe_full_crc = 0;
 uint32_t lastframe_found = GetMonotonicTimeMs();
-uint32_t lasttriggerID = 0xffffffff;  // last trigger ID found
+uint32_t lastTriggerID = 0xffffffff;  // last trigger ID found
 uint32_t lasttriggerTimestamp = 0;
 bool isrotation = true;     // are there rotations to send
 bool crc32_ready = false;   // is the crc32 table filled?
@@ -1632,9 +1634,11 @@ bool CheckExtraFrameAvailable(uint32_t frID) {
   return true;
 }
 
-void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
+void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
+                      bool applySceneBackground = false) {
   bool isextra = CheckExtraFrameAvailable(IDfound);
   mySerum.flags &= 0b11111100;
+
   if (mySerum.frame32) mySerum.width32 = 0;
   if (mySerum.frame64) mySerum.width64 = 0;
 
@@ -1648,18 +1652,21 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
     uint16_t* prot = nullptr;
     uint16_t* prt = g_serumData.colorrotations_v2[IDfound];
     uint32_t* cshft = nullptr;
+    uint16_t* pSceneBackgroundFrame = nullptr;
     if (g_serumData.fheight == 32) {
       pfr = mySerum.frame32;
       prot = mySerum.rotationsinframe32;
       mySerum.width32 = g_serumData.fwidth;
       mySerum.flags |= FLAG_RETURNED_32P_FRAME_OK;
       cshft = colorshifts32;
+      pSceneBackgroundFrame = mySerum.frame32;
     } else {
       pfr = mySerum.frame64;
       prot = mySerum.rotationsinframe64;
       mySerum.width64 = g_serumData.fwidth;
       mySerum.flags |= FLAG_RETURNED_64P_FRAME_OK;
       cshft = colorshifts64;
+      pSceneBackgroundFrame = mySerum.frame64;
     }
 
     SerumV2RenderFrameInput input{};
@@ -1674,7 +1681,13 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
     input.dyna_colors = g_serumData.dyna4cols_v2[IDfound];
     if (has_background) {
       input.background_mask = g_serumData.backgroundmask[IDfound];
-      input.background_frame = g_serumData.backgroundframes_v2[background_id];
+      if (applySceneBackground) {
+        memcpy(sceneBackgroundFrame, pSceneBackgroundFrame,
+               g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
+        input.background_frame = sceneBackgroundFrame;
+      } else {
+        input.background_frame = g_serumData.backgroundframes_v2[background_id];
+      }
     }
     input.dynashadows_dir = g_serumData.dynashadowsdir[IDfound];
     input.dynashadows_col = g_serumData.dynashadowscol[IDfound];
@@ -1691,18 +1704,21 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
     uint16_t* prot = nullptr;
     uint16_t* prt = g_serumData.colorrotations_v2_extra[IDfound];
     uint32_t* cshft = nullptr;
+    uint16_t* pSceneBackgroundFrame = nullptr;
     if (g_serumData.fheight_extra == 32) {
       pfr = mySerum.frame32;
       prot = mySerum.rotationsinframe32;
       mySerum.width32 = g_serumData.fwidth_extra;
       mySerum.flags |= FLAG_RETURNED_32P_FRAME_OK;
       cshft = colorshifts32;
+      pSceneBackgroundFrame = mySerum.frame32;
     } else {
       pfr = mySerum.frame64;
       prot = mySerum.rotationsinframe64;
       mySerum.width64 = g_serumData.fwidth_extra;
       mySerum.flags |= FLAG_RETURNED_64P_FRAME_OK;
       cshft = colorshifts64;
+      pSceneBackgroundFrame = mySerum.frame64;
     }
 
     SerumV2RenderFrameInput input{};
@@ -1717,8 +1733,15 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound) {
     input.dyna_colors = g_serumData.dyna4cols_v2_extra[IDfound];
     if (has_background) {
       input.background_mask = g_serumData.backgroundmask_extra[IDfound];
-      input.background_frame =
-          g_serumData.backgroundframes_v2_extra[background_id];
+      if (applySceneBackground) {
+        memcpy(sceneBackgroundFrame, pSceneBackgroundFrame,
+               g_serumData.fwidth_extra * g_serumData.fheight_extra *
+                   sizeof(uint16_t));
+        input.background_frame = sceneBackgroundFrame;
+      } else {
+        input.background_frame =
+            g_serumData.backgroundframes_v2_extra[background_id];
+      }
     }
     input.dynashadows_dir = g_serumData.dynashadowsdir_extra[IDfound];
     input.dynashadows_col = g_serumData.dynashadowscol_extra[IDfound];
@@ -1890,7 +1913,8 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    monochromeMode = (g_serumData.triggerIDs[lastfound][0] == 65432);
+    monochromeMode =
+        (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
     if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
       g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
 
@@ -1954,9 +1978,9 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
 
       mySerum.rotationtimer = Calc_Next_Rotationv1(now);
 
-      if (g_serumData.triggerIDs[lastfound][0] != lasttriggerID ||
+      if (g_serumData.triggerIDs[lastfound][0] != lastTriggerID ||
           lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT)) {
-        lasttriggerID = mySerum.triggerID =
+        lastTriggerID = mySerum.triggerID =
             g_serumData.triggerIDs[lastfound][0];
         lasttriggerTimestamp = now;
       }
@@ -2027,7 +2051,8 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    monochromeMode = (g_serumData.triggerIDs[lastfound][0] == 65432);
+    monochromeMode =
+        (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
     if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
       g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
 
@@ -2039,11 +2064,6 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
         mySerum.triggerID = 0xffffffff;
       // Scene is active and not interruptable
       return IDENTIFY_NO_FRAME;
-    }
-
-    if (!sceneFrameRequested) {
-      // stop any scene
-      sceneFrameCount = 0;
     }
 
     // frame identified
@@ -2061,56 +2081,84 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
 
     mySerum.frameID = frameID;
     if (!sceneFrameRequested) {
-      mySerum.rotationtimer = 0;
-    }
+      if (sceneFrameCount > 0 && sceneRepeatCount == 255 &&
+          lastTriggerID < MONOCHROME_TRIGGER_ID &&
+          g_serumData.triggerIDs[lastfound][0] == lastTriggerID) {
+        // New frame has the same Trigger ID, continuing an already running
+        // seamless looped scene, but update lastFrame.
+        memcpy(lastFrame, frame, g_serumData.fwidth * g_serumData.fheight);
+        // Wait for the next rotation to have a smooth transition.
+        return IDENTIFY_SAME_FRAME;
+      } else {
+        // stop any scene
+        sceneFrameCount = 0;
+        mySerum.rotationtimer = 0;
 
-    // lastfound is set by Identify_Frame, check if we have a new PUP trigger
-    if (!monochromeMode && !sceneFrameRequested &&
-        (g_serumData.triggerIDs[lastfound][0] != lasttriggerID ||
-         lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT))) {
-      lasttriggerID = mySerum.triggerID = g_serumData.triggerIDs[lastfound][0];
-      lasttriggerTimestamp = now;
+        // lastfound is set by Identify_Frame, check if we have a new PUP
+        // trigger
+        if (!monochromeMode &&
+            (g_serumData.triggerIDs[lastfound][0] != lastTriggerID ||
+             lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT))) {
+          lastTriggerID = mySerum.triggerID =
+              g_serumData.triggerIDs[lastfound][0];
+          lasttriggerTimestamp = now;
 
-      if (g_serumData.sceneGenerator->isActive() &&
-          lasttriggerID < 0xffffffff) {
-        if (g_serumData.sceneGenerator->getSceneInfo(
-                lasttriggerID, sceneFrameCount, sceneDurationPerFrame,
-                sceneInterruptable, sceneStartImmediately, sceneRepeatCount,
-                sceneEndFrame)) {
-          memcpy(lastFrame, frame, g_serumData.fwidth * g_serumData.fheight);
-          // Log(DMDUtil_LogLevel_DEBUG, "Serum: trigger ID %lu found in scenes,
-          // frame count=%d, duration=%dms",
-          //     m_pSerum->triggerID, sceneFrameCount, sceneDurationPerFrame);
-          sceneCurrentFrame = 0;
-          if (sceneStartImmediately) {
-            // Overwrite the current frame with the first scene frame, ignore
-            // the result
-            g_serumData.sceneGenerator->generateFrame(
-                lasttriggerID, sceneCurrentFrame++, frame);
+          if (g_serumData.sceneGenerator->isActive() &&
+              lastTriggerID < 0xffffffff) {
+            if (g_serumData.sceneGenerator->getSceneInfo(
+                    lastTriggerID, sceneFrameCount, sceneDurationPerFrame,
+                    sceneInterruptable, sceneStartImmediately, sceneRepeatCount,
+                    sceneEndFrame)) {
+              memcpy(lastFrame, frame,
+                     g_serumData.fwidth * g_serumData.fheight);
+              // Log(DMDUtil_LogLevel_DEBUG, "Serum: trigger ID %lu found in
+              // scenes, frame count=%d, duration=%dms",
+              //     m_pSerum->triggerID, sceneFrameCount,
+              //     sceneDurationPerFrame);
+              sceneCurrentFrame = 0;
+              if (sceneStartImmediately) {
+                // Overwrite the current frame with the first scene frame,
+                // ignore the result
+                g_serumData.sceneGenerator->generateFrame(
+                    lastTriggerID, sceneCurrentFrame++, frame);
+              }
+              mySerum.rotationtimer = sceneDurationPerFrame;
+              rotationIsScene = true;
+            }
           }
-          mySerum.rotationtimer = sceneDurationPerFrame;
-          rotationIsScene = true;
         }
       }
     }
 
+    bool isSeamlessLoopingScene =
+        (sceneFrameRequested && sceneFrameCount > 0 && sceneRepeatCount == 255);
     uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
     uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
         spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
         wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
     memset(nosprite, 255, MAX_SPRITES_PER_FRAME);
 
-    bool isspr = Check_Spritesv2(frame, lastfound, nosprite, &nspr, frx, fry,
-                                 spx, spy, wid, hei);
+    bool isspr =
+        (sceneFrameRequested && !isSeamlessLoopingScene)
+            ? false
+            : Check_Spritesv2(isSeamlessLoopingScene ? lastFrame : frame,
+                              lastfound, nosprite, &nspr, frx, fry, spx, spy,
+                              wid, hei);
     if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
         g_serumData.activeframes[lastfound][0] != 0) {
       // the frame identified is not the same as the preceding
       Colorize_Framev2(frame, lastfound);
-      uint8_t ti = 0;
-      while (ti < nspr) {
-        Colorize_Spritev2(frame, nosprite[ti], frx[ti], fry[ti], spx[ti],
-                          spy[ti], wid[ti], hei[ti], lastfound);
-        ti++;
+      if (isSeamlessLoopingScene) {
+        Colorize_Framev2(frame, lastfound, true);
+      }
+      if (isspr) {
+        uint8_t ti = 0;
+        while (ti < nspr) {
+          Colorize_Spritev2(isSeamlessLoopingScene ? lastFrame : frame,
+                            nosprite[ti], frx[ti], fry[ti], spx[ti], spy[ti],
+                            wid[ti], hei[ti], lastfound);
+          ti++;
+        }
       }
 
       // Skip rotations if the scene is active
@@ -2304,14 +2352,14 @@ uint32_t Serum_ApplyRotationsv2(void) {
   if (g_serumData.sceneGenerator->isActive() &&
       sceneCurrentFrame < sceneFrameCount) {
     uint16_t result = g_serumData.sceneGenerator->generateFrame(
-        lasttriggerID, sceneCurrentFrame, sceneFrame);
+        lastTriggerID, sceneCurrentFrame, sceneFrame);
     // if result is 0xffff, the frame was generated and we can go
     if (0xffff == result) {
       mySerum.rotationtimer = sceneDurationPerFrame;
       Serum_ColorizeWithMetadatav2(sceneFrame, true);
       sceneCurrentFrame++;
       if (sceneCurrentFrame >= sceneFrameCount && sceneRepeatCount > 0) {
-        if (sceneRepeatCount == 1) {
+        if (sceneRepeatCount == 1 || sceneRepeatCount == 255) {
           sceneCurrentFrame = 0;  // loop
         } else {
           sceneCurrentFrame = 0;  // repeat the scene
@@ -2397,9 +2445,9 @@ uint32_t Serum_ApplyRotationsv2(void) {
   if (mySerum.rotationtimer > 2048)
     mySerum.rotationtimer =
         0;  // more than 2048ms is not possible, stop the rotation
-  // if there was a rotation in the 32P frame, the first bit of the high word is
-  // set (0x10000) and if there was a rotation in the 64P frame, the second bit
-  // of the high word is set (0x20000)
+            // if there was a rotation in the 32P frame, the first bit of the
+            // high word is set (0x10000) and if there was a rotation in the 64P
+            // frame, the second bit of the high word is set (0x20000)
   return mySerum.rotationtimer |
          isrotation;  // returns the time in ms until the next rotation in the
                       // lowest word
