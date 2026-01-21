@@ -114,6 +114,8 @@ const uint16_t greyscale_16[16] = {
     0xFFFF   // White (31, 63, 31)
 };
 
+uint32_t Serum_RenderScene(void);
+
 // variables
 bool cromloaded = false;  // is there a crom loaded?
 bool generateCRomC = true;
@@ -2264,10 +2266,9 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
               //     sceneDurationPerFrame);
               sceneCurrentFrame = 0;
               if (sceneStartImmediately) {
-                // Overwrite the current frame with the first scene frame,
-                // ignore the result
-                g_serumData.sceneGenerator->generateFrame(
-                    lastTriggerID, sceneCurrentFrame++, frame);
+                uint32_t sceneRotationResult = Serum_RenderScene();
+                if (sceneRotationResult & FLAG_RETURNED_V2_SCENE)
+                  return sceneRotationResult;
               }
               mySerum.rotationtimer = sceneDurationPerFrame;
               rotationIsScene = true;
@@ -2491,7 +2492,7 @@ uint32_t Serum_ApplyRotationsv1(void) {
                         // if not, just the delay to the next rotation
 }
 
-uint32_t Serum_ApplyRotationsv2(void) {
+uint32_t Serum_RenderScene(void) {
   // rotation[0] = number of colors in rotation
   // rotation[1] = delay in ms between each color change
   // rotation[2..n] = color indexes
@@ -2558,6 +2559,17 @@ uint32_t Serum_ApplyRotationsv2(void) {
            FLAG_RETURNED_V2_SCENE;  // scene frame, so we consider both frames
                                     // changed
   }
+
+  return 0;
+}
+
+uint32_t Serum_ApplyRotationsv2(void) {
+  uint32_t sceneRotationResult = Serum_RenderScene();
+  if (sceneRotationResult & FLAG_RETURNED_V2_SCENE) return sceneRotationResult;
+
+  // rotation[0] = number of colors in rotation
+  // rotation[1] = delay in ms between each color change
+  // rotation[2..n] = color indexes
 
   uint32_t isrotation = 0;
   uint32_t sizeframe;
