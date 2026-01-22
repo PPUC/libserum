@@ -2310,8 +2310,8 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
         (sceneFrameRequested && !isSeamlessLoopingScene)
             ? false
             : Check_Spritesv2(isSeamlessLoopingScene ? lastFrame : frame,
-                              lastfound, nosprite, &nspr, frx, fry, spx, spy,
-                              wid, hei);
+                              isSeamlessLoopingScene ? lastFrameId : lastfound,
+                              nosprite, &nspr, frx, fry, spx, spy, wid, hei);
     if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
         g_serumData.activeframes[lastfound][0] != 0) {
       // the frame identified is not the same as the preceding
