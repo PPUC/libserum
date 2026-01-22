@@ -80,6 +80,7 @@ uint8_t sceneRepeatCount = 0;
 uint8_t sceneEndFrame = 0;
 uint8_t sceneFrame[256 * 64] = {0};
 uint8_t lastFrame[256 * 64] = {0};
+uint32_t lastFrameId = 0;  // last frame ID identified
 uint16_t sceneBackgroundFrame[256 * 64] = {0};
 bool monochromeMode = false;
 bool showStatusMessages = false;
@@ -2089,6 +2090,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
         // New frame has the same Trigger ID, continuing an already running
         // seamless looped scene, but update lastFrame.
         memcpy(lastFrame, frame, g_serumData.fwidth * g_serumData.fheight);
+        lastFrameId = frameID;
         // Wait for the next rotation to have a smooth transition.
         return IDENTIFY_SAME_FRAME;
       } else {
@@ -2113,6 +2115,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
                     sceneEndFrame)) {
               memcpy(lastFrame, frame,
                      g_serumData.fwidth * g_serumData.fheight);
+              lastFrameId = frameID;
               // Log(DMDUtil_LogLevel_DEBUG, "Serum: trigger ID %lu found in
               // scenes, frame count=%d, duration=%dms",
               //     m_pSerum->triggerID, sceneFrameCount,
@@ -2150,14 +2153,15 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
       // the frame identified is not the same as the preceding
       Colorize_Framev2(frame, lastfound);
       if (isSeamlessLoopingScene) {
-        Colorize_Framev2(frame, lastfound, true);
+        Colorize_Framev2(lastFrame, lastFrameId, true);
       }
       if (isspr) {
         uint8_t ti = 0;
         while (ti < nspr) {
           Colorize_Spritev2(isSeamlessLoopingScene ? lastFrame : frame,
                             nosprite[ti], frx[ti], fry[ti], spx[ti], spy[ti],
-                            wid[ti], hei[ti], lastfound);
+                            wid[ti], hei[ti],
+                            isSeamlessLoopingScene ? lastFrameId : lastfound);
           ti++;
         }
       }
@@ -2346,10 +2350,6 @@ uint32_t Serum_ApplyRotationsv1(void) {
 }
 
 uint32_t Serum_RenderScene(void) {
-  // rotation[0] = number of colors in rotation
-  // rotation[1] = delay in ms between each color change
-  // rotation[2..n] = color indexes
-
   if (g_serumData.sceneGenerator->isActive() &&
       sceneCurrentFrame < sceneFrameCount) {
     uint16_t result = g_serumData.sceneGenerator->generateFrame(
