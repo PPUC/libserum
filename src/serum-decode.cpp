@@ -1688,7 +1688,8 @@ void CheckDynaShadow(uint16_t* pfr, uint32_t nofr, uint8_t dynacouche,
 }
 
 void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
-                      bool applySceneBackground = false) {
+                      bool applySceneBackground = false,
+                      bool blackOutStaticContent = false) {
   uint16_t tj, ti;
   // Generate the colorized version of a frame once identified in the crom
   // frames
@@ -1751,13 +1752,21 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
           uint8_t dynacouche = g_serumData.dynamasks[IDfound][tk];
           if (dynacouche == 255) {
             if (isdynapix[tk] == 0) {
-              pfr[tk] = g_serumData.cframes_v2[IDfound][tk];
-              if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                  &prot[tk * 2 + 1], false))
-                pfr[tk] =
-                    prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                        (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                            prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
+              if (blackOutStaticContent &&
+                  (g_serumData.backgroundIDs[IDfound][0] <
+                   g_serumData.nbackgrounds) &&
+                  (frame[tk] > 0) &&
+                  (g_serumData.backgroundmask[IDfound][tk] > 0)) {
+                pfr[tk] = sceneBackgroundFrame[tk];
+              } else {
+                pfr[tk] = g_serumData.cframes_v2[IDfound][tk];
+                if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
+                                    &prot[tk * 2 + 1], false))
+                  pfr[tk] =
+                      prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
+                          (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
+                              prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
+              }
             }
           } else {
             if (frame[tk] > 0) {
@@ -1838,13 +1847,21 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
           uint8_t dynacouche = g_serumData.dynamasks_extra[IDfound][tk];
           if (dynacouche == 255) {
             if (isdynapix[tk] == 0) {
-              pfr[tk] = g_serumData.cframes_v2_extra[IDfound][tk];
-              if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                  &prot[tk * 2 + 1], true)) {
-                pfr[tk] =
-                    prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                        (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                            prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
+              if (blackOutStaticContent &&
+                  (g_serumData.backgroundIDs[IDfound][0] <
+                   g_serumData.nbackgrounds) &&
+                  (frame[tl] > 0) &&
+                  (g_serumData.backgroundmask_extra[IDfound][tk] > 0)) {
+                pfr[tk] = sceneBackgroundFrame[tk];
+              } else {
+                pfr[tk] = g_serumData.cframes_v2_extra[IDfound][tk];
+                if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
+                                    &prot[tk * 2 + 1], true)) {
+                  pfr[tk] =
+                      prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
+                          (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
+                              prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
+                }
               }
             }
           } else {
@@ -2231,7 +2248,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
 
     mySerum.frameID = frameID;
     if (!sceneFrameRequested) {
-      if (sceneFrameCount > 0 && sceneRepeatCount == 255 &&
+      if (sceneFrameCount > 0 && sceneRepeatCount >= 254 &&
           lastTriggerID < MONOCHROME_TRIGGER_ID &&
           g_serumData.triggerIDs[lastfound][0] == lastTriggerID) {
         // New frame has the same Trigger ID, continuing an already running
@@ -2282,7 +2299,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
     }
 
     bool isSeamlessLoopingScene =
-        (sceneFrameRequested && sceneFrameCount > 0 && sceneRepeatCount == 255);
+        (sceneFrameRequested && sceneFrameCount > 0 && sceneRepeatCount >= 254);
     uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
     uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
         spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
@@ -2300,7 +2317,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
       // the frame identified is not the same as the preceding
       Colorize_Framev2(frame, lastfound);
       if (isSeamlessLoopingScene) {
-        Colorize_Framev2(lastFrame, lastFrameId, true);
+        Colorize_Framev2(lastFrame, lastFrameId, true, sceneRepeatCount == 255);
       }
       if (isspr) {
         uint8_t ti = 0;
@@ -2507,7 +2524,7 @@ uint32_t Serum_RenderScene(void) {
       Serum_ColorizeWithMetadatav2(sceneFrame, true);
       sceneCurrentFrame++;
       if (sceneCurrentFrame >= sceneFrameCount && sceneRepeatCount > 0) {
-        if (sceneRepeatCount == 1 || sceneRepeatCount == 255) {
+        if (sceneRepeatCount == 1 || sceneRepeatCount >= 254) {
           sceneCurrentFrame = 0;  // loop
         } else {
           sceneCurrentFrame = 0;  // repeat the scene

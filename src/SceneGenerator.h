@@ -15,18 +15,23 @@ struct SceneData {
   uint16_t durationPerFrame;
   bool interruptable = false;
   bool immediateStart = false;
-  uint8_t repeat = 0;  // 0 - play once, 1 - loop, >= 2 - repeat x times
+  // 0 - play once
+  // 1 - loop
+  // >= 2 - repeat x times
+  // 254 - seamless loop
+  // 255 - seamless loop with static content black out
+  uint8_t repeat = 0;
   uint8_t frameGroups = 0;
-  uint8_t currentGroup =
-      0;  // Current group for frame generation, used internally
+  // Current group for frame generation, used internally
+  uint8_t currentGroup = 0;
   bool random = false;
-  uint8_t autoStart = 0;  // 0 - no autostart, >= 1 - start this scene after x
-                          // seconds of inactivity (no new frames), only use
-                          // once, could be combined with frame groups
-  uint8_t endFrame = 0;   // 0 - when scene is finished, show last frame of the
-                          // scene until a new frame is matched, 1 - black
-                          // screen, 2 - show last frame before scene started
-
+  // 0 - no autostart
+  // >= 1 - start this scene after x seconds of inactivity (no new frames), only
+  // use once, could be combined with frame groups
+  uint8_t autoStart = 0;
+  // 0 - when scene is finished, show last frame of the scene until a new frame
+  // is matched 1 - black screen 2 - show last frame before scene started
+  uint8_t endFrame = 0;
   // Serialisierungsfunktion für cereal
   template <class Archive>
   void serialize(Archive &ar) {
