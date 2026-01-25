@@ -1155,26 +1155,34 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
 #endif
   }
   Serum_Frame_Struc* result = NULL;
-  std::optional<std::string> pFoundFile =
-      find_case_insensitive_file(pathbuf, std::string(romname) + ".cROMc");
 
-  if (pFoundFile) {
-    Log("Found %s", pFoundFile->c_str());
-    result = Serum_LoadConcentrate(pFoundFile->c_str(), flags);
-    if (result) {
-      Log("Loaded %s", pFoundFile->c_str());
-      if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
-          g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str())) {
-#ifdef WRITE_CROMC
-        // Update the concentrate file with new PUP data
-        if (generateCRomC) Serum_SaveConcentrate(pFoundFile->c_str());
-#endif
+  std::optional<std::string> skipFoundFile =
+      find_case_insensitive_file(pathbuf, std::string(romname) + "skip-cromc.txt");
+  if (skipFoundFile) {
+    Log("Skipping .cROMc load due to presence of %s",
+        skipFoundFile->c_str());
+  } else {
+    std::optional<std::string> pFoundFile =
+        find_case_insensitive_file(pathbuf, std::string(romname) + ".cROMc");
+
+    if (pFoundFile) {
+      Log("Found %s", pFoundFile->c_str());
+      result = Serum_LoadConcentrate(pFoundFile->c_str(), flags);
+      if (result) {
+        Log("Loaded %s", pFoundFile->c_str());
+        if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
+            g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str())) {
+  #ifdef WRITE_CROMC
+          // Update the concentrate file with new PUP data
+          if (generateCRomC) Serum_SaveConcentrate(pFoundFile->c_str());
+  #endif
+        }
+      } else {
+        Log("Failed to load %s", pFoundFile->c_str());
       }
-    } else {
-      Log("Failed to load %s", pFoundFile->c_str());
     }
   }
-
+  
   if (!result) {
 #ifdef WRITE_CROMC
     // by default, we request both frame types
