@@ -116,13 +116,13 @@ SERUM_API bool Serum_Scene_GenerateDump(const char* const dump_filename,
  * @param interruptable: Receives if scene can be interrupted
  * @param startImmediately: Receives if scene starts immediately
  * @param repeat: Receives repeat count
- * @param endFrame: Receives end frame behavior
+ * @param sceneOptions: Receives end frame behavior
  * @return true if scene info was found
  */
 SERUM_API bool Serum_Scene_GetInfo(uint16_t sceneId, uint16_t* frameCount,
                                    uint16_t* durationPerFrame,
                                    bool* interruptable, bool* startImmediately,
-                                   uint8_t* repeat, uint8_t* endFrame);
+                                   uint8_t* repeat, uint8_t* sceneOptions);
 
 /** @brief Generate a frame for a scene
  *

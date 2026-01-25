@@ -29,14 +29,12 @@ struct SceneData {
   // >= 1 - start this scene after x seconds of inactivity (no new frames), only
   // use once, could be combined with frame groups
   uint8_t autoStart = 0;
-  // 0 - when scene is finished, show last frame of the scene until a new frame
-  // is matched 1 - black screen 2 - show last frame before scene started
-  uint8_t endFrame = 0;
-  // Serialisierungsfunktion für cereal
+  uint8_t sceneOptions = 0;
+  // Serialisation using cereal
   template <class Archive>
   void serialize(Archive &ar) {
     ar(sceneId, frameCount, durationPerFrame, interruptable, immediateStart,
-       repeat, frameGroups, currentGroup, random, autoStart, endFrame);
+       repeat, frameGroups, currentGroup, random, autoStart, sceneOptions);
   }
 };
 
@@ -54,10 +52,10 @@ class SceneGenerator {
   bool getSceneInfo(uint16_t sceneId, uint16_t &frameCount,
                     uint16_t &durationPerFrame, bool &interruptable,
                     bool &startImmediately, uint8_t &repeat,
-                    uint8_t &endFrame) const;
+                    uint8_t &sceneOptions) const;
   bool getAutoStartSceneInfo(uint16_t &frameCount, uint16_t &durationPerFrame,
                              bool &interruptable, bool &startImmediately,
-                             uint8_t &repeat, uint8_t &endFrame) const;
+                             uint8_t &repeat, uint8_t &sceneOptions) const;
   uint16_t generateFrame(uint16_t sceneId, uint16_t frameIndex, uint8_t *buffer,
                          int group = -1, bool disableTimer = false);
   void setDepth(uint8_t depth);

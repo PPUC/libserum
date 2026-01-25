@@ -102,7 +102,7 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
           m_autoStartSceneId = data.sceneId;
         }
       }
-      if (row.size() >= 10) data.endFrame = (uint8_t)std::stoi(row[9]);
+      if (row.size() >= 10) data.sceneOptions = (uint8_t)std::stoi(row[9]);
 
       m_sceneData.push_back(data);
     } catch (...) {
@@ -170,7 +170,7 @@ bool SceneGenerator::generateDump(const std::string &dump_filename, int id) {
 bool SceneGenerator::getSceneInfo(uint16_t sceneId, uint16_t &frameCount,
                                   uint16_t &durationPerFrame,
                                   bool &interruptable, bool &startImmediately,
-                                  uint8_t &repeat, uint8_t &endFrame) const {
+                                  uint8_t &repeat, uint8_t &sceneOptions) const {
   auto it = std::find_if(
       m_sceneData.begin(), m_sceneData.end(),
       [sceneId](const SceneData &data) { return data.sceneId == sceneId; });
@@ -181,7 +181,7 @@ bool SceneGenerator::getSceneInfo(uint16_t sceneId, uint16_t &frameCount,
     interruptable = 0;
     startImmediately = false;
     repeat = 0;
-    endFrame = 0;
+    sceneOptions = 0;
     return false;
   }
 
@@ -190,16 +190,16 @@ bool SceneGenerator::getSceneInfo(uint16_t sceneId, uint16_t &frameCount,
   interruptable = it->interruptable;
   startImmediately = it->immediateStart;
   repeat = it->repeat;
-  endFrame = it->endFrame;
+  sceneOptions = it->sceneOptions;
   return true;
 }
 
 bool SceneGenerator::getAutoStartSceneInfo(
     uint16_t &frameCount, uint16_t &durationPerFrame, bool &interruptable,
-    bool &startImmediately, uint8_t &repeat, uint8_t &endFrame) const {
+    bool &startImmediately, uint8_t &repeat, uint8_t &sceneOptions) const {
   if (m_autoStartSceneId > 0) {
     return getSceneInfo(m_autoStartSceneId, frameCount, durationPerFrame,
-                        interruptable, startImmediately, repeat, endFrame);
+                        interruptable, startImmediately, repeat, sceneOptions);
   }
 
   return false;

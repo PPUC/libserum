@@ -13,6 +13,19 @@ typedef void(SERUM_CALLBACK* Serum_LogCallback)(const char* format,
                                                 va_list args,
                                                 const void* userData);
 
+enum {
+  // default: when scene is finished, show last frame of the scene until a
+  // new frame is matched.
+
+  // black screen after scene is finished
+  FLAG_SCENE_BLACK_WHEN_FINISHED = 1,
+  // show last frame before scene started
+  FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED = 2,
+  // run scene as background
+  FLAG_SCENE_AS_BACKGROUND = 4,
+  FLAG_SCENE_ONLY_DYNAMIC_CONTENT = 8,
+};
+
 enum  // returned by Serum_Load in *SerumVersion
 {
   SERUM_V1 = 1,
