@@ -18,8 +18,6 @@ struct SceneData {
   // 0 - play once
   // 1 - loop
   // >= 2 - repeat x times
-  // 254 - seamless loop
-  // 255 - seamless loop with static content black out
   uint8_t repeat = 0;
   uint8_t frameGroups = 0;
   // Current group for frame generation, used internally

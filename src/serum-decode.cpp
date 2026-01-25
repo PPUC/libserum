@@ -1157,7 +1157,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   Serum_Frame_Struc* result = NULL;
   std::optional<std::string> pFoundFile;
   std::optional<std::string> skipFoundFile = find_case_insensitive_file(
-      pathbuf, std::string(romname) + "skip-cromc.txt");
+      pathbuf, "skip-cromc.txt");
   if (skipFoundFile) {
     Log("Skipping .cROMc load due to presence of %s", skipFoundFile->c_str());
   } else {
