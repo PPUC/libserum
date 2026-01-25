@@ -1155,14 +1155,13 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
 #endif
   }
   Serum_Frame_Struc* result = NULL;
-
-  std::optional<std::string> skipFoundFile =
-      find_case_insensitive_file(pathbuf, std::string(romname) + "skip-cromc.txt");
+  std::optional<std::string> pFoundFile;
+  std::optional<std::string> skipFoundFile = find_case_insensitive_file(
+      pathbuf, std::string(romname) + "skip-cromc.txt");
   if (skipFoundFile) {
-    Log("Skipping .cROMc load due to presence of %s",
-        skipFoundFile->c_str());
+    Log("Skipping .cROMc load due to presence of %s", skipFoundFile->c_str());
   } else {
-    std::optional<std::string> pFoundFile =
+    pFoundFile =
         find_case_insensitive_file(pathbuf, std::string(romname) + ".cROMc");
 
     if (pFoundFile) {
@@ -1172,17 +1171,17 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
         Log("Loaded %s", pFoundFile->c_str());
         if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
             g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str())) {
-  #ifdef WRITE_CROMC
+#ifdef WRITE_CROMC
           // Update the concentrate file with new PUP data
           if (generateCRomC) Serum_SaveConcentrate(pFoundFile->c_str());
-  #endif
+#endif
         }
       } else {
         Log("Failed to load %s", pFoundFile->c_str());
       }
     }
   }
-  
+
   if (!result) {
 #ifdef WRITE_CROMC
     // by default, we request both frame types
@@ -2262,7 +2261,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
       lastFrameId = frameID;
 
       if (sceneFrameCount > 0 &&
-          (sceneOptionFags & FLAG_SCENE_AS_BACKGROUND) ==
+          (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
               FLAG_SCENE_AS_BACKGROUND &&
           lastTriggerID < MONOCHROME_TRIGGER_ID &&
           g_serumData.triggerIDs[lastfound][0] == lastTriggerID) {
@@ -2271,7 +2270,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
         // Wait for the next rotation to have a smooth transition.
         return IDENTIFY_SAME_FRAME;
       } else if (sceneIsLastBackgroundFrame &&
-                 (sceneOptionFags & FLAG_SCENE_AS_BACKGROUND) ==
+                 (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
                      FLAG_SCENE_AS_BACKGROUND &&
                  lastTriggerID < MONOCHROME_TRIGGER_ID &&
                  g_serumData.triggerIDs[lastfound][0] == lastTriggerID) {
@@ -2316,7 +2315,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
     }
 
     bool isBackgroundScene = (sceneFrameRequested && sceneFrameCount > 0 &&
-                              (sceneOptionFags & FLAG_SCENE_AS_BACKGROUND) ==
+                              (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
                                   FLAG_SCENE_AS_BACKGROUND);
     uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
     uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
@@ -2338,7 +2337,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
       if (isBackgroundScene || sceneIsLastBackgroundFrame) {
         sceneLastBackgroundFrameID = mySerum.frameID;
         Colorize_Framev2(lastFrame, lastFrameId, true,
-                         (sceneOptionFags & FLAG_SCENE_ONLY_DYNAMIC_CONTENT) ==
+                         (sceneOptionFlags & FLAG_SCENE_ONLY_DYNAMIC_CONTENT) ==
                              FLAG_SCENE_ONLY_DYNAMIC_CONTENT);
       }
       if (isspr) {
