@@ -212,6 +212,14 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
       return false;
     }
 
+    if (concentrateFileVersion > SERUM_CONCENTRATE_VERSION) {
+      Log("The cROMc version of %s is newer than the maximum supported by this "
+          "version of libserum. Get a newer version of libserum.",
+          filename);
+      fclose(fp);
+      return false;
+    }
+
     // Read original size
     uint32_t littleEndianSize;
     if (fread(&littleEndianSize, sizeof(uint32_t), 1, fp) != 1) {
