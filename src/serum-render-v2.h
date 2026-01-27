@@ -19,6 +19,7 @@ struct SerumV2RenderFrameInput {
   const uint16_t* dyna_colors = nullptr;
   const uint8_t* background_mask = nullptr;
   const uint16_t* background_frame = nullptr;
+  bool black_out_static_content = false;
   const uint8_t* dynashadows_dir = nullptr;
   const uint16_t* dynashadows_col = nullptr;
 };
@@ -164,8 +165,8 @@ inline void SerumV2_RenderFrame(const SerumV2RenderFrameInput* input,
 
       const bool use_background =
           input->background_frame && input->background_mask &&
-          (input->background_mask[idx] > 0) && (original == 0);
-      if (use_background) {
+          (input->background_mask[idx] > 0);
+      if (use_background && (original == 0 || input->black_out_static_content)) {
         if (!isdynapix || isdynapix[idx] == 0) {
           out_frame[idx] = input->background_frame[idx];
           if (use_rotations) {

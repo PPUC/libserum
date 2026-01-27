@@ -76,8 +76,10 @@ uint16_t sceneCurrentFrame = 0;
 uint16_t sceneDurationPerFrame = 0;
 bool sceneInterruptable = false;
 bool sceneStartImmediately = false;
+bool sceneIsLastBackgroundFrame = false;
+uint32_t sceneLastBackgroundFrameID = 0;
 uint8_t sceneRepeatCount = 0;
-uint8_t sceneEndFrame = 0;
+uint8_t sceneOptionFlags = 0;
 uint8_t sceneFrame[256 * 64] = {0};
 uint8_t lastFrame[256 * 64] = {0};
 uint32_t lastFrameId = 0;  // last frame ID identified
@@ -1188,25 +1190,32 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
 #endif
   }
   Serum_Frame_Struc* result = NULL;
-  std::optional<std::string> pFoundFile =
+  std::optional<std::string> pFoundFile;
+  std::optional<std::string> skipFoundFile = find_case_insensitive_file(
+      pathbuf, "skip-cromc.txt");
+  if (skipFoundFile) {
+    Log("Skipping .cROMc load due to presence of %s", skipFoundFile->c_str());
+  } else {
+    pFoundFile =
       romQuery.empty()
           ? std::optional<std::string>()
           : find_case_insensitive_file(pathbuf, romQuery + ".cROMc");
 
-  if (pFoundFile) {
-    Log("Found %s", pFoundFile->c_str());
-    result = Serum_LoadConcentrate(pFoundFile->c_str(), flags);
-    if (result) {
-      Log("Loaded %s", pFoundFile->c_str());
-      if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
-          g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str())) {
+    if (pFoundFile) {
+      Log("Found %s", pFoundFile->c_str());
+      result = Serum_LoadConcentrate(pFoundFile->c_str(), flags);
+      if (result) {
+        Log("Loaded %s", pFoundFile->c_str());
+        if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
+            g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str())) {
 #ifdef WRITE_CROMC
-        // Update the concentrate file with new PUP data
-        if (generateCRomC) Serum_SaveConcentrate(pFoundFile->c_str());
+          // Update the concentrate file with new PUP data
+          if (generateCRomC) Serum_SaveConcentrate(pFoundFile->c_str());
 #endif
+        }
+      } else {
+        Log("Failed to load %s", pFoundFile->c_str());
       }
-    } else {
-      Log("Failed to load %s", pFoundFile->c_str());
     }
   }
 
@@ -1638,7 +1647,15 @@ bool CheckExtraFrameAvailable(uint32_t frID) {
 }
 
 void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
+<<<<<<< HEAD
                       bool applySceneBackground = false) {
+=======
+                      bool applySceneBackground = false,
+                      bool blackOutStaticContent = false) {
+  uint16_t tj, ti;
+  // Generate the colorized version of a frame once identified in the crom
+  // frames
+>>>>>>> master
   bool isextra = CheckExtraFrameAvailable(IDfound);
   mySerum.flags &= 0b11111100;
 
@@ -1688,6 +1705,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         memcpy(sceneBackgroundFrame, pSceneBackgroundFrame,
                g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
         input.background_frame = sceneBackgroundFrame;
+        input.blackout_static_content = blackOutStaticContent;
       } else {
         input.background_frame = g_serumData.backgroundframes_v2[background_id];
       }
@@ -1741,6 +1759,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                g_serumData.fwidth_extra * g_serumData.fheight_extra *
                    sizeof(uint16_t));
         input.background_frame = sceneBackgroundFrame;
+        input.black_out_static_content = blackOutStaticContent;
       } else {
         input.background_frame =
             g_serumData.backgroundframes_v2_extra[background_id];
@@ -2084,18 +2103,28 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
 
     mySerum.frameID = frameID;
     if (!sceneFrameRequested) {
-      if (sceneFrameCount > 0 && sceneRepeatCount == 255 &&
+      memcpy(lastFrame, frame, g_serumData.fwidth * g_serumData.fheight);
+      lastFrameId = frameID;
+
+      if (sceneFrameCount > 0 &&
+          (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
+              FLAG_SCENE_AS_BACKGROUND &&
           lastTriggerID < MONOCHROME_TRIGGER_ID &&
           g_serumData.triggerIDs[lastfound][0] == lastTriggerID) {
         // New frame has the same Trigger ID, continuing an already running
-        // seamless looped scene, but update lastFrame.
-        memcpy(lastFrame, frame, g_serumData.fwidth * g_serumData.fheight);
-        lastFrameId = frameID;
+        // seamless looped scene.
         // Wait for the next rotation to have a smooth transition.
         return IDENTIFY_SAME_FRAME;
+      } else if (sceneIsLastBackgroundFrame &&
+                 (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
+                     FLAG_SCENE_AS_BACKGROUND &&
+                 lastTriggerID < MONOCHROME_TRIGGER_ID &&
+                 g_serumData.triggerIDs[lastfound][0] == lastTriggerID) {
+        // New frame has the same Trigger ID, continuing an already running.
       } else {
         // stop any scene
         sceneFrameCount = 0;
+        sceneIsLastBackgroundFrame = false;
         mySerum.rotationtimer = 0;
 
         // lastfound is set by Identify_Frame, check if we have a new PUP
@@ -2112,10 +2141,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
             if (g_serumData.sceneGenerator->getSceneInfo(
                     lastTriggerID, sceneFrameCount, sceneDurationPerFrame,
                     sceneInterruptable, sceneStartImmediately, sceneRepeatCount,
-                    sceneEndFrame)) {
-              memcpy(lastFrame, frame,
-                     g_serumData.fwidth * g_serumData.fheight);
-              lastFrameId = frameID;
+                    sceneOptionFlags)) {
               // Log(DMDUtil_LogLevel_DEBUG, "Serum: trigger ID %lu found in
               // scenes, frame count=%d, duration=%dms",
               //     m_pSerum->triggerID, sceneFrameCount,
@@ -2134,8 +2160,9 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
       }
     }
 
-    bool isSeamlessLoopingScene =
-        (sceneFrameRequested && sceneFrameCount > 0 && sceneRepeatCount == 255);
+    bool isBackgroundScene = (sceneFrameRequested && sceneFrameCount > 0 &&
+                              (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
+                                  FLAG_SCENE_AS_BACKGROUND);
     uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
     uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
         spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
@@ -2143,25 +2170,29 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
     memset(nosprite, 255, MAX_SPRITES_PER_FRAME);
 
     bool isspr =
-        (sceneFrameRequested && !isSeamlessLoopingScene)
+        (sceneFrameRequested && !isBackgroundScene)
             ? false
-            : Check_Spritesv2(isSeamlessLoopingScene ? lastFrame : frame,
-                              lastfound, nosprite, &nspr, frx, fry, spx, spy,
-                              wid, hei);
+            : Check_Spritesv2(isBackgroundScene ? lastFrame : frame,
+                              isBackgroundScene ? lastFrameId : lastfound,
+                              nosprite, &nspr, frx, fry, spx, spy, wid, hei);
     if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
         g_serumData.activeframes[lastfound][0] != 0) {
-      // the frame identified is not the same as the preceding
-      Colorize_Framev2(frame, lastfound);
-      if (isSeamlessLoopingScene) {
-        Colorize_Framev2(lastFrame, lastFrameId, true);
+      Colorize_Framev2(
+          sceneIsLastBackgroundFrame ? sceneFrame : frame,
+          sceneIsLastBackgroundFrame ? sceneLastBackgroundFrameID : lastfound);
+      if (isBackgroundScene || sceneIsLastBackgroundFrame) {
+        sceneLastBackgroundFrameID = mySerum.frameID;
+        Colorize_Framev2(lastFrame, lastFrameId, true,
+                         (sceneOptionFlags & FLAG_SCENE_ONLY_DYNAMIC_CONTENT) ==
+                             FLAG_SCENE_ONLY_DYNAMIC_CONTENT);
       }
       if (isspr) {
         uint8_t ti = 0;
         while (ti < nspr) {
-          Colorize_Spritev2(isSeamlessLoopingScene ? lastFrame : frame,
-                            nosprite[ti], frx[ti], fry[ti], spx[ti], spy[ti],
-                            wid[ti], hei[ti],
-                            isSeamlessLoopingScene ? lastFrameId : lastfound);
+          Colorize_Spritev2(isBackgroundScene ? lastFrame : frame, nosprite[ti],
+                            frx[ti], fry[ti], spx[ti], spy[ti], wid[ti],
+                            hei[ti],
+                            isBackgroundScene ? lastFrameId : lastfound);
           ti++;
         }
       }
@@ -2252,7 +2283,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
           sceneCurrentFrame >= sceneFrameCount &&
           g_serumData.sceneGenerator->getAutoStartSceneInfo(
               sceneFrameCount, sceneDurationPerFrame, sceneInterruptable,
-              sceneStartImmediately, sceneRepeatCount, sceneEndFrame)) {
+              sceneStartImmediately, sceneRepeatCount, sceneOptionFlags)) {
         mySerum.rotationtimer = g_serumData.sceneGenerator->getAutoStartTimer();
         rotationIsScene = true;
       }
@@ -2360,7 +2391,7 @@ uint32_t Serum_RenderScene(void) {
       Serum_ColorizeWithMetadatav2(sceneFrame, true);
       sceneCurrentFrame++;
       if (sceneCurrentFrame >= sceneFrameCount && sceneRepeatCount > 0) {
-        if (sceneRepeatCount == 1 || sceneRepeatCount == 255) {
+        if (sceneRepeatCount == 1) {
           sceneCurrentFrame = 0;  // loop
         } else {
           sceneCurrentFrame = 0;  // repeat the scene
@@ -2374,15 +2405,15 @@ uint32_t Serum_RenderScene(void) {
         sceneFrameCount = 0;  // scene ended
         mySerum.rotationtimer = 0;
 
-        switch (sceneEndFrame) {
-          case 1:  // black frame
+        switch (sceneOptionFlags) {
+          case FLAG_SCENE_BLACK_WHEN_FINISHED:
             if (mySerum.frame32)
               memset(mySerum.frame32, 0, 32 * mySerum.width32);
             if (mySerum.frame64)
               memset(mySerum.frame64, 0, 64 * mySerum.width64);
             break;
 
-          case 2:  // previous frame before the scene
+          case FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED:
             if (lastfound < MAX_NUMBER_FRAMES &&
                 g_serumData.activeframes[lastfound][0] != 0) {
               Serum_ColorizeWithMetadatav2(lastFrame);
@@ -2396,6 +2427,9 @@ uint32_t Serum_RenderScene(void) {
 
           case 0:  // keep the last frame of the scene
           default:
+            if (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) {
+              sceneIsLastBackgroundFrame = true;
+            }
             break;
         }
       }
@@ -2496,11 +2530,11 @@ SERUM_API bool Serum_Scene_GenerateDump(const char* const dump_filename,
 SERUM_API bool Serum_Scene_GetInfo(uint16_t sceneId, uint16_t* frameCount,
                                    uint16_t* durationPerFrame,
                                    bool* interruptable, bool* startImmediately,
-                                   uint8_t* repeat, uint8_t* endFrame) {
+                                   uint8_t* repeat, uint8_t* sceneOptions) {
   if (!g_serumData.sceneGenerator) return false;
   return g_serumData.sceneGenerator->getSceneInfo(
       sceneId, *frameCount, *durationPerFrame, *interruptable,
-      *startImmediately, *repeat, *endFrame);
+      *startImmediately, *repeat, *sceneOptions);
 }
 
 SERUM_API bool Serum_Scene_GenerateFrame(uint16_t sceneId, uint16_t frameIndex,
