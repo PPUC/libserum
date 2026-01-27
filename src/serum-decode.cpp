@@ -2334,8 +2334,10 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
       Colorize_Framev2(
           sceneIsLastBackgroundFrame ? sceneFrame : frame,
           sceneIsLastBackgroundFrame ? sceneLastBackgroundFrameID : lastfound);
-      if (isBackgroundScene || sceneIsLastBackgroundFrame) {
+      if (isBackgroundScene) {
         sceneLastBackgroundFrameID = mySerum.frameID;
+      }
+      if (isBackgroundScene || sceneIsLastBackgroundFrame) {
         Colorize_Framev2(lastFrame, lastFrameId, true,
                          (sceneOptionFlags & FLAG_SCENE_ONLY_DYNAMIC_CONTENT) ==
                              FLAG_SCENE_ONLY_DYNAMIC_CONTENT);
