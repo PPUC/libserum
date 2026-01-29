@@ -1718,7 +1718,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         memcpy(sceneBackgroundFrame, pSceneBackgroundFrame,
                g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
         input.background_frame = sceneBackgroundFrame;
-        input.blackout_static_content = blackOutStaticContent;
+        input.black_out_static_content = blackOutStaticContent;
       } else {
         input.background_frame = g_serumData.backgroundframes_v2[background_id];
       }
