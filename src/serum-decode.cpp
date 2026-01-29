@@ -1665,15 +1665,10 @@ bool CheckExtraFrameAvailable(uint32_t frID) {
 }
 
 void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
-<<<<<<< HEAD
-                      bool applySceneBackground = false) {
-=======
                       bool applySceneBackground = false,
                       bool blackOutStaticContent = false) {
-  uint16_t tj, ti;
   // Generate the colorized version of a frame once identified in the crom
   // frames
->>>>>>> master
   bool isextra = CheckExtraFrameAvailable(IDfound);
   mySerum.flags &= 0b11111100;
 
