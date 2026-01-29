@@ -123,8 +123,11 @@ uint32_t Serum_RenderScene(void);
 // variables
 bool cromloaded = false;  // is there a crom loaded?
 bool generateCRomC = true;
-uint32_t lastfound = 0;  // last frame ID identified
-uint32_t lastframe_full_crc = 0;
+uint32_t lastfound = 0;  // last frame ID identified (current stream)
+uint32_t lastfound_normal = 0;  // last frame ID for non-scene frames
+uint32_t lastfound_scene = 0;   // last frame ID for scene frames
+uint32_t lastframe_full_crc_normal = 0;
+uint32_t lastframe_full_crc_scene = 0;
 uint32_t lastframe_found = GetMonotonicTimeMs();
 uint32_t lastTriggerID = 0xffffffff;  // last trigger ID found
 uint32_t lasttriggerTimestamp = 0;
@@ -271,6 +274,11 @@ void Serum_free(void) {
   Free_element((void**)&mySerum.modifiedelements64);
   Free_element((void**)&frameshape);
   cromloaded = false;
+  lastfound = 0;
+  lastfound_normal = 0;
+  lastfound_scene = 0;
+  lastframe_full_crc_normal = 0;
+  lastframe_full_crc_scene = 0;
 
   g_serumData.sceneGenerator->Reset();
 }
@@ -1257,14 +1265,21 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
 
 SERUM_API void Serum_Dispose(void) { Serum_free(); }
 
-uint32_t Identify_Frame(uint8_t* frame) {
+uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   // Usually the first frame has the ID 0, but lastfound is also initialized
   // with 0. So we need a helper to be able to detect frame 0 as new.
-  static bool first_match = true;
+  static bool first_match_normal = true;
+  static bool first_match_scene = true;
 
   if (!cromloaded) return IDENTIFY_NO_FRAME;
   memset(framechecked, false, g_serumData.nframes);
-  uint16_t tj = lastfound;  // we start from the frame we last found
+  uint32_t& lastfound_stream =
+      sceneFrameRequested ? lastfound_scene : lastfound_normal;
+  bool& first_match =
+      sceneFrameRequested ? first_match_scene : first_match_normal;
+  uint32_t& lastframe_full_crc =
+      sceneFrameRequested ? lastframe_full_crc_scene : lastframe_full_crc_normal;
+  uint16_t tj = lastfound_stream;  // we start from the frame we last found
   const uint32_t pixels = g_serumData.is256x64
                               ? (256 * 64)
                               : (g_serumData.fwidth * g_serumData.fheight);
@@ -1283,8 +1298,9 @@ uint32_t Identify_Frame(uint8_t* frame) {
           if ((g_serumData.compmaskID[ti][0] == mask) &&
               (g_serumData.shapecompmode[ti][0] == Shape)) {
             if (Hashc == g_serumData.hashcodes[ti][0]) {
-              if (first_match || ti != lastfound || mask < 255) {
+              if (first_match || ti != lastfound_stream || mask < 255) {
                 // Reset_ColorRotations();
+                lastfound_stream = ti;
                 lastfound = ti;
                 lastframe_full_crc = crc32_fast(frame, pixels);
                 first_match = false;
@@ -1294,9 +1310,11 @@ uint32_t Identify_Frame(uint8_t* frame) {
               uint32_t full_crc = crc32_fast(frame, pixels);
               if (full_crc != lastframe_full_crc) {
                 lastframe_full_crc = full_crc;
+                lastfound = ti;
                 return ti;  // we found the same frame with shape as before, but
                             // the full frame is different
               }
+              lastfound = ti;
               return IDENTIFY_SAME_FRAME;  // we found the frame, but it is the
                                            // same full frame as before (no
                                            // mask)
@@ -1308,7 +1326,7 @@ uint32_t Identify_Frame(uint8_t* frame) {
       } while (ti != tj);
     }
     if (++tj >= g_serumData.nframes) tj = 0;
-  } while (tj != lastfound);
+  } while (tj != lastfound_stream);
 
   return IDENTIFY_NO_FRAME;  // we found no corresponding frame
 }
@@ -1926,7 +1944,7 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
   }
 
   // Let's first identify the incoming frame among the ones we have in the crom
-  uint32_t frameID = Identify_Frame(frame);
+  uint32_t frameID = Identify_Frame(frame, false);
   mySerum.frameID = IDENTIFY_NO_FRAME;
   uint32_t now = GetMonotonicTimeMs();
   if (is_real_machine() && !showStatusMessages) {
@@ -2064,7 +2082,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
   mySerum.frameID = IDENTIFY_NO_FRAME;
 
   // Let's first identify the incoming frame among the ones we have in the crom
-  uint32_t frameID = Identify_Frame(frame);
+  uint32_t frameID = Identify_Frame(frame, sceneFrameRequested);
   uint32_t now = GetMonotonicTimeMs();
   bool rotationIsScene = false;
   if (is_real_machine() && !showStatusMessages) {
@@ -2180,8 +2198,10 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
       Colorize_Framev2(
           sceneIsLastBackgroundFrame ? sceneFrame : frame,
           sceneIsLastBackgroundFrame ? sceneLastBackgroundFrameID : lastfound);
-      if (isBackgroundScene || sceneIsLastBackgroundFrame) {
+      if (isBackgroundScene) {
         sceneLastBackgroundFrameID = mySerum.frameID;
+      }
+      if (isBackgroundScene || sceneIsLastBackgroundFrame) {
         Colorize_Framev2(lastFrame, lastFrameId, true,
                          (sceneOptionFlags & FLAG_SCENE_ONLY_DYNAMIC_CONTENT) ==
                              FLAG_SCENE_ONLY_DYNAMIC_CONTENT);
