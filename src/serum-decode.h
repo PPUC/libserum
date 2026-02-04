@@ -39,6 +39,10 @@ SERUM_API void Serum_SetLogCallback(Serum_LogCallback callback,
 SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
                                         const char* const romname,
                                         uint8_t flags);
+SERUM_API uint32_t Serum_CalcFrameHash(const uint8_t* frame,
+                                       const uint8_t* mask,
+                                       uint32_t pixels,
+                                       uint8_t shape);
 SERUM_API void Serum_SetIgnoreUnknownFramesTimeout(uint16_t milliseconds);
 
 SERUM_API void Serum_SetMaximumUnknownFramesToSkip(uint8_t maximum);

@@ -350,23 +350,6 @@ SERUM_EDITOR_API void SerumEditor_InitRotationState(
                             state->active, now_ms);
 }
 
-SERUM_EDITOR_API uint32_t SerumEditor_ApplyRotations(
-    const uint16_t* rotations, const uint16_t* input_frame,
-    uint16_t* output_frame, uint32_t width, uint32_t height,
-    SerumEditorRotationState* state, uint32_t now_ms) {
-  if (!rotations || !input_frame || !output_frame || width == 0 ||
-      height == 0 || !state) {
-    return 0;
-  }
-  std::memcpy(output_frame, input_frame,
-              static_cast<std::size_t>(width) * height * sizeof(uint16_t));
-
-  return SerumV2_ApplyRotations(
-      rotations, output_frame, nullptr, static_cast<uint32_t>(width) * height,
-      state->next_time_ms, state->shift, state->active, now_ms, nullptr,
-      nullptr, true, nullptr);
-}
-
 SERUM_EDITOR_API uint32_t SerumEditor_ApplyRotationsMasked(
     const uint16_t* rotations, const uint16_t* input_frame,
     uint16_t* output_frame, uint16_t* rotations_in_frame, uint32_t width,

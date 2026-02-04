@@ -367,6 +367,26 @@ uint32_t calc_crc32(uint8_t* source, uint8_t mask, uint32_t n, uint8_t Shape) {
   return crc32_fast(source, pixels);
 }
 
+uint32_t Serum_CalcFrameHash(const uint8_t* frame,
+                             const uint8_t* mask,
+                             uint32_t pixels,
+                             uint8_t shape) {
+  if (!frame || pixels == 0) return 0;
+  if (!crc32_ready) CRC32encode();
+  uint8_t* frameBuf = const_cast<uint8_t*>(frame);
+  if (mask) {
+    uint8_t* maskBuf = const_cast<uint8_t*>(mask);
+    if (shape == 1) {
+      return crc32_fast_mask_shape(frameBuf, maskBuf, pixels);
+    }
+    return crc32_fast_mask(frameBuf, maskBuf, pixels);
+  }
+  if (shape == 1) {
+    return crc32_fast_shape(frameBuf, pixels);
+  }
+  return crc32_fast(frameBuf, pixels);
+}
+
 bool unzip_crz(const char* const filename, const char* const extractpath,
                char* cromname, int cromsize) {
   bool ok = true;
@@ -2176,6 +2196,9 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
     bool isBackgroundScene = (sceneFrameRequested && sceneFrameCount > 0 &&
                               (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
                                   FLAG_SCENE_AS_BACKGROUND);
+    const bool useStoredBackground =
+        sceneIsLastBackgroundFrame &&
+        (sceneHasLastBackgroundFrame32 || sceneHasLastBackgroundFrame64);
     uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
     uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
         spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
@@ -2190,9 +2213,9 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
                               nosprite, &nspr, frx, fry, spx, spy, wid, hei);
     if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
         g_serumData.activeframes[lastfound][0] != 0) {
-      Colorize_Framev2(
-          sceneIsLastBackgroundFrame ? sceneFrame : frame,
-          sceneIsLastBackgroundFrame ? sceneLastBackgroundFrameID : lastfound);
+        Colorize_Framev2(
+            sceneIsLastBackgroundFrame ? sceneFrame : frame,
+            sceneIsLastBackgroundFrame ? sceneLastBackgroundFrameID : lastfound);
       if (isBackgroundScene) {
         sceneLastBackgroundFrameID = mySerum.frameID;
       }

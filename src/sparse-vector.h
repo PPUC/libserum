@@ -121,6 +121,26 @@ class SparseVector {
 
   size_t elementCount() const { return elementSize; }
 
+  bool isIndexStorage() const { return useIndex; }
+
+  std::vector<uint32_t> elementIds() const {
+    std::vector<uint32_t> ids;
+    if (useIndex) {
+      ids.reserve(index.size());
+      for (uint32_t i = 0; i < index.size(); ++i) {
+        if (!index[i].empty() && index[i][0] != noData[0]) {
+          ids.push_back(i);
+        }
+      }
+    } else {
+      ids.reserve(data.size());
+      for (const auto &entry : data) {
+        ids.push_back(entry.first);
+      }
+    }
+    return ids;
+  }
+
   void setIndex(uint32_t elementId, const T *values, size_t size) {
     if (!useIndex) {
       throw std::runtime_error("setIndex() only valid for index storage");

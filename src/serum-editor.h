@@ -106,11 +106,6 @@ SERUM_EDITOR_API void SerumEditor_InitRotationState(
     const uint16_t* rotations, SerumEditorRotationState* state,
     uint32_t now_ms);
 
-SERUM_EDITOR_API uint32_t SerumEditor_ApplyRotations(
-    const uint16_t* rotations, const uint16_t* input_frame,
-    uint16_t* output_frame, uint32_t width, uint32_t height,
-    SerumEditorRotationState* state, uint32_t now_ms);
-
 SERUM_EDITOR_API uint32_t SerumEditor_ApplyRotationsMasked(
     const uint16_t* rotations, const uint16_t* input_frame,
     uint16_t* output_frame, uint16_t* rotations_in_frame, uint32_t width,
