@@ -84,6 +84,12 @@ uint8_t sceneFrame[256 * 64] = {0};
 uint8_t lastFrame[256 * 64] = {0};
 uint32_t lastFrameId = 0;  // last frame ID identified
 uint16_t sceneBackgroundFrame[256 * 64] = {0};
+uint16_t sceneLastBackgroundFrame32[256 * 64] = {0};
+uint16_t sceneLastBackgroundFrame64[256 * 64] = {0};
+uint16_t sceneLastBackgroundWidth32 = 0;
+uint16_t sceneLastBackgroundWidth64 = 0;
+bool sceneHasLastBackgroundFrame32 = false;
+bool sceneHasLastBackgroundFrame64 = false;
 bool monochromeMode = false;
 bool showStatusMessages = false;
 bool keepTriggersInternal = false;
@@ -2213,11 +2219,44 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
                               nosprite, &nspr, frx, fry, spx, spy, wid, hei);
     if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
         g_serumData.activeframes[lastfound][0] != 0) {
+      if (!useStoredBackground) {
         Colorize_Framev2(
             sceneIsLastBackgroundFrame ? sceneFrame : frame,
             sceneIsLastBackgroundFrame ? sceneLastBackgroundFrameID : lastfound);
+      } else {
+        if (sceneHasLastBackgroundFrame32 && mySerum.frame32 &&
+            sceneLastBackgroundWidth32 > 0) {
+          memcpy(sceneBackgroundFrame, sceneLastBackgroundFrame32,
+                 32 * sceneLastBackgroundWidth32 * sizeof(uint16_t));
+          memcpy(mySerum.frame32, sceneBackgroundFrame,
+                 32 * sceneLastBackgroundWidth32 * sizeof(uint16_t));
+        }
+        if (sceneHasLastBackgroundFrame64 && mySerum.frame64 &&
+            sceneLastBackgroundWidth64 > 0) {
+          memcpy(sceneBackgroundFrame, sceneLastBackgroundFrame64,
+                 64 * sceneLastBackgroundWidth64 * sizeof(uint16_t));
+          memcpy(mySerum.frame64, sceneBackgroundFrame,
+                 64 * sceneLastBackgroundWidth64 * sizeof(uint16_t));
+        }
+      }
       if (isBackgroundScene) {
         sceneLastBackgroundFrameID = mySerum.frameID;
+        if (mySerum.frame32 && (mySerum.flags & FLAG_RETURNED_32P_FRAME_OK)) {
+          sceneLastBackgroundWidth32 = mySerum.width32;
+          if (sceneLastBackgroundWidth32 > 0) {
+            memcpy(sceneLastBackgroundFrame32, mySerum.frame32,
+                   32 * sceneLastBackgroundWidth32 * sizeof(uint16_t));
+            sceneHasLastBackgroundFrame32 = true;
+          }
+        }
+        if (mySerum.frame64 && (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK)) {
+          sceneLastBackgroundWidth64 = mySerum.width64;
+          if (sceneLastBackgroundWidth64 > 0) {
+            memcpy(sceneLastBackgroundFrame64, mySerum.frame64,
+                   64 * sceneLastBackgroundWidth64 * sizeof(uint16_t));
+            sceneHasLastBackgroundFrame64 = true;
+          }
+        }
       }
       if (isBackgroundScene || sceneIsLastBackgroundFrame) {
         Colorize_Framev2(lastFrame, lastFrameId, true,
