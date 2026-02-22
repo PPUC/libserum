@@ -118,11 +118,12 @@ const uint16_t greyscale_16[16] = {
 };
 
 uint32_t Serum_RenderScene(void);
+static void BuildFrameLookupVectors(void);
 
 // variables
 bool cromloaded = false;  // is there a crom loaded?
 bool generateCRomC = true;
-uint32_t lastfound = 0;  // last frame ID identified (current stream)
+uint32_t lastfound = 0;         // last frame ID identified (current stream)
 uint32_t lastfound_normal = 0;  // last frame ID for non-scene frames
 uint32_t lastfound_scene = 0;   // last frame ID for scene frames
 uint32_t lastframe_full_crc_normal = 0;
@@ -544,6 +545,7 @@ Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
   }
 
   mySerum.ntriggers = 0;
+  BuildFrameLookupVectors();
   for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
     // Every trigger ID greater than PUP_TRIGGER_MAX_THRESHOLD is an internal
     // trigger for rotation scenes and must not be communicated to the PUP
@@ -852,6 +854,7 @@ Serum_Frame_Struc* Serum_LoadFilev2(FILE* pfile, const uint8_t flags,
     if (g_serumData.triggerIDs[ti][0] < PUP_TRIGGER_MAX_THRESHOLD)
       mySerum.ntriggers++;
   }
+  BuildFrameLookupVectors();
   framechecked = (bool*)malloc(sizeof(bool) * g_serumData.nframes);
   if (!framechecked) {
     Serum_free();
@@ -1070,6 +1073,7 @@ Serum_Frame_Struc* Serum_LoadFilev1(const char* const filename,
   for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
     if (g_serumData.triggerIDs[ti][0] != 0xffffffff) mySerum.ntriggers++;
   }
+  BuildFrameLookupVectors();
   if (sizeheader >= 12 * sizeof(uint32_t))
     g_serumData.framespriteBB.readFromCRomFile(MAX_SPRITES_PER_FRAME * 4,
                                                g_serumData.nframes, pfile,
@@ -1164,8 +1168,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   }
   Serum_Frame_Struc* result = NULL;
   std::optional<std::string> pFoundFile;
-  std::optional<std::string> skipFoundFile = find_case_insensitive_file(
-      pathbuf, "skip-cromc.txt");
+  std::optional<std::string> skipFoundFile =
+      find_case_insensitive_file(pathbuf, "skip-cromc.txt");
   if (skipFoundFile) {
     Log("Skipping .cROMc load due to presence of %s", skipFoundFile->c_str());
   } else {
@@ -1228,6 +1232,41 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
 
 SERUM_API void Serum_Dispose(void) { Serum_free(); }
 
+static void BuildFrameLookupVectors(void) {
+  g_serumData.frameIsScene.clear();
+
+  if (g_serumData.nframes == 0) return;
+  g_serumData.frameIsScene.resize(g_serumData.nframes, 0);
+
+  // SceneGenerator contains the static left-half glyph template that scene
+  // frames are built from.
+  if (g_serumData.SerumVersion == SERUM_V2 && g_serumData.fwidth == 128 &&
+      g_serumData.fheight == 32 && g_serumData.sceneGenerator) {
+    for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
+      const uint16_t* frameData = g_serumData.cframes_v2[frameId];
+      if (g_serumData.sceneGenerator->matchesSceneMarkerRegion(frameData)) {
+        g_serumData.frameIsScene[frameId] = 1;
+      }
+    }
+  }
+
+  lastfound_scene = 0;
+  for (uint32_t frameId = g_serumData.nframes - 1; frameId > 0; frameId--) {
+    if (g_serumData.frameIsScene[frameId]) {
+      lastfound_scene = frameId;
+      break;
+    }
+  }
+
+  lastfound_normal = 0;
+  for (uint32_t frameId = g_serumData.nframes - 1; frameId > 0; frameId--) {
+    if (!g_serumData.frameIsScene[frameId]) {
+      lastfound_normal = frameId;
+      break;
+    }
+  }
+}
+
 uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   // Usually the first frame has the ID 0, but lastfound is also initialized
   // with 0. So we need a helper to be able to detect frame 0 as new.
@@ -1240,13 +1279,19 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
       sceneFrameRequested ? lastfound_scene : lastfound_normal;
   bool& first_match =
       sceneFrameRequested ? first_match_scene : first_match_normal;
-  uint32_t& lastframe_full_crc =
-      sceneFrameRequested ? lastframe_full_crc_scene : lastframe_full_crc_normal;
-  uint16_t tj = lastfound_stream;  // we start from the frame we last found
+  uint32_t& lastframe_full_crc = sceneFrameRequested
+                                     ? lastframe_full_crc_scene
+                                     : lastframe_full_crc_normal;
+  uint32_t tj =
+      lastfound_stream;  // we start from the last found frame in this stream
   const uint32_t pixels = g_serumData.is256x64
                               ? (256 * 64)
                               : (g_serumData.fwidth * g_serumData.fheight);
   do {
+    if (g_serumData.frameIsScene[tj] != (sceneFrameRequested ? 1 : 0)) {
+      if (++tj >= g_serumData.nframes) tj = 0;
+      continue;
+    }
     if (!framechecked[tj]) {
       // calculate the hashcode for the generated frame with the mask and
       // shapemode of the current crom frame
@@ -1255,8 +1300,12 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
       uint32_t Hashc = calc_crc32(frame, mask, pixels, Shape);
       // now we can compare with all the crom frames that share these same mask
       // and shapemode
-      uint16_t ti = tj;
+      uint32_t ti = tj;
       do {
+        if (g_serumData.frameIsScene[ti] != (sceneFrameRequested ? 1 : 0)) {
+          if (++ti >= g_serumData.nframes) ti = 0;
+          continue;
+        }
         if (!framechecked[ti]) {
           if ((g_serumData.compmaskID[ti][0] == mask) &&
               (g_serumData.shapecompmode[ti][0] == Shape)) {

@@ -114,6 +114,7 @@ void SerumData::Clear() {
   dynaspritemasks.clear();
   dynaspritemasks_extra.clear();
   sprshapemode.clear();
+  frameIsScene.clear();
 }
 
 bool SerumData::SaveToFile(const char *filename) {

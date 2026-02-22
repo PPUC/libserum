@@ -143,7 +143,8 @@ bool SceneGenerator::generateDump(const std::string &dump_filename, int id) {
         out_dump << hex_line << "\r\n";
 
         uint8_t frameBuffer[4096];
-        if (!generateFrame(scene.sceneId, frameIndex, frameBuffer, group, true)) {
+        if (!generateFrame(scene.sceneId, frameIndex, frameBuffer, group,
+                           true)) {
           // Log(DMDUtil_LogLevel_ERROR, "SceneGenerator: Error generating frame
           // %d for scene %d", frameIndex,
           //    scene.sceneId);
@@ -170,7 +171,8 @@ bool SceneGenerator::generateDump(const std::string &dump_filename, int id) {
 bool SceneGenerator::getSceneInfo(uint16_t sceneId, uint16_t &frameCount,
                                   uint16_t &durationPerFrame,
                                   bool &interruptable, bool &startImmediately,
-                                  uint8_t &repeat, uint8_t &sceneOptions) const {
+                                  uint8_t &repeat,
+                                  uint8_t &sceneOptions) const {
   auto it = std::find_if(
       m_sceneData.begin(), m_sceneData.end(),
       [sceneId](const SceneData &data) { return data.sceneId == sceneId; });
@@ -261,6 +263,26 @@ uint16_t SceneGenerator::generateFrame(uint16_t sceneId, uint16_t frameIndex,
   renderString(buffer, frameStr, NUM_X, FRAME_Y);
 
   return 0xffff;  // Success
+}
+
+bool SceneGenerator::matchesSceneMarkerRegion(const uint16_t *frameData) const {
+  // "PUP SCENE" rendered at y=2 with 5x7 font and 1px spacing:
+  // width = 9 chars * 6 - 1 = 53px, x in [0..52], y in [2..8].
+  constexpr uint32_t kWidth = 128;
+  constexpr uint32_t kX0 = 0;
+  constexpr uint32_t kX1 = 52;
+  constexpr uint32_t kY0 = 2;
+  constexpr uint32_t kY1 = 8;
+
+  for (uint32_t y = kY0; y <= kY1; ++y) {
+    const uint32_t rowOffset = y * kWidth;
+    for (uint32_t x = kX0; x <= kX1; ++x) {
+      const bool frameOn = frameData[rowOffset + x] > 0;
+      const bool templateOn = m_template.fullFrame[rowOffset + x] > 0;
+      if (frameOn != templateOn) return false;
+    }
+  }
+  return true;
 }
 
 void SceneGenerator::initializeTemplate() {

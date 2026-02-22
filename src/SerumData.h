@@ -124,6 +124,7 @@ class SerumData {
   SparseVector<uint8_t> dynaspritemasks;
   SparseVector<uint8_t> dynaspritemasks_extra;
   SparseVector<uint8_t> sprshapemode;
+  std::vector<uint8_t> frameIsScene;
 
   SceneGenerator *sceneGenerator;
 

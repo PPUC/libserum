@@ -56,6 +56,7 @@ class SceneGenerator {
                              uint8_t &repeat, uint8_t &sceneOptions) const;
   uint16_t generateFrame(uint16_t sceneId, uint16_t frameIndex, uint8_t *buffer,
                          int group = -1, bool disableTimer = false);
+  bool matchesSceneMarkerRegion(const uint16_t *frameData) const;
   void setDepth(uint8_t depth);
   int getDepth() const { return m_depth; }
   bool isActive() const { return m_active; }
