@@ -13,6 +13,7 @@
 #include <fstream>
 #include <optional>
 #include <random>
+#include <unordered_map>
 #include <vector>
 
 #include "SerumData.h"
@@ -119,6 +120,13 @@ const uint16_t greyscale_16[16] = {
 
 uint32_t Serum_RenderScene(void);
 static void BuildFrameLookupVectors(void);
+
+struct SceneResumeState {
+  uint16_t nextFrame = 0;
+  uint32_t timestampMs = 0;
+};
+static std::unordered_map<uint32_t, SceneResumeState> g_sceneResumeState;
+static constexpr uint32_t SCENE_RESUME_WINDOW_MS = 8000;
 
 // variables
 bool cromloaded = false;  // is there a crom loaded?
@@ -279,6 +287,7 @@ void Serum_free(void) {
   lastfound_scene = 0;
   lastframe_full_crc_normal = 0;
   lastframe_full_crc_scene = 0;
+  g_sceneResumeState.clear();
 
   g_serumData.sceneGenerator->Reset();
 }
@@ -2343,6 +2352,13 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
                  g_serumData.triggerIDs[lastfound][0] == lastTriggerID) {
         // New frame has the same Trigger ID, continuing an already running.
       } else {
+        if (sceneFrameCount > 0 &&
+            (sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
+                FLAG_SCENE_RESUME_IF_RETRIGGERED &&
+            lastTriggerID < 0xffffffff && sceneCurrentFrame < sceneFrameCount) {
+          g_sceneResumeState[lastTriggerID] = {sceneCurrentFrame, now};
+        }
+
         // stop any scene
         sceneFrameCount = 0;
         sceneIsLastBackgroundFrame = false;
@@ -2368,6 +2384,19 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
               //     m_pSerum->triggerID, sceneFrameCount,
               //     sceneDurationPerFrame);
               sceneCurrentFrame = 0;
+              if ((sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
+                  FLAG_SCENE_RESUME_IF_RETRIGGERED) {
+                auto it = g_sceneResumeState.find(lastTriggerID);
+                if (it != g_sceneResumeState.end()) {
+                  if ((now - it->second.timestampMs) <= SCENE_RESUME_WINDOW_MS &&
+                      it->second.nextFrame < sceneFrameCount) {
+                    sceneCurrentFrame = it->second.nextFrame;
+                  }
+                  g_sceneResumeState.erase(it);
+                }
+              } else {
+                g_sceneResumeState.erase(lastTriggerID);
+              }
               if (sceneStartImmediately) {
                 uint32_t sceneRotationResult = Serum_RenderScene();
                 if (sceneRotationResult & FLAG_RETURNED_V2_SCENE)

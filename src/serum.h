@@ -24,6 +24,7 @@ enum {
   // run scene as background
   FLAG_SCENE_AS_BACKGROUND = 4,
   FLAG_SCENE_ONLY_DYNAMIC_CONTENT = 8,
+  FLAG_SCENE_RESUME_IF_RETRIGGERED = 16,
 };
 
 enum  // returned by Serum_Load in *SerumVersion
