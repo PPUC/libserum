@@ -77,7 +77,6 @@ uint16_t sceneDurationPerFrame = 0;
 bool sceneInterruptable = false;
 bool sceneStartImmediately = false;
 bool sceneIsLastBackgroundFrame = false;
-uint32_t sceneLastBackgroundFrameID = 0;
 uint8_t sceneRepeatCount = 0;
 uint8_t sceneOptionFlags = 0;
 uint8_t sceneFrame[256 * 64] = {0};
@@ -2427,11 +2426,8 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
                               nosprite, &nspr, frx, fry, spx, spy, wid, hei);
     if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
         g_serumData.activeframes[lastfound][0] != 0) {
-      Colorize_Framev2(
-          sceneIsLastBackgroundFrame ? sceneFrame : frame,
-          sceneIsLastBackgroundFrame ? sceneLastBackgroundFrameID : lastfound);
-      if (isBackgroundScene) {
-        sceneLastBackgroundFrameID = mySerum.frameID;
+      if (!sceneIsLastBackgroundFrame) {
+        Colorize_Framev2(frame, lastfound);
       }
       if (isBackgroundScene || sceneIsLastBackgroundFrame) {
         Colorize_Framev2(lastFrame, lastFrameId, true,
