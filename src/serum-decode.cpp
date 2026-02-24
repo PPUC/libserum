@@ -553,7 +553,6 @@ Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
   }
 
   mySerum.ntriggers = 0;
-  BuildFrameLookupVectors();
   for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
     // Every trigger ID greater than PUP_TRIGGER_MAX_THRESHOLD is an internal
     // trigger for rotation scenes and must not be communicated to the PUP
@@ -862,7 +861,6 @@ Serum_Frame_Struc* Serum_LoadFilev2(FILE* pfile, const uint8_t flags,
     if (g_serumData.triggerIDs[ti][0] < PUP_TRIGGER_MAX_THRESHOLD)
       mySerum.ntriggers++;
   }
-  BuildFrameLookupVectors();
   framechecked = (bool*)malloc(sizeof(bool) * g_serumData.nframes);
   if (!framechecked) {
     Serum_free();
@@ -1081,7 +1079,6 @@ Serum_Frame_Struc* Serum_LoadFilev1(const char* const filename,
   for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
     if (g_serumData.triggerIDs[ti][0] != 0xffffffff) mySerum.ntriggers++;
   }
-  BuildFrameLookupVectors();
   if (sizeheader >= 12 * sizeof(uint32_t))
     g_serumData.framespriteBB.readFromCRomFile(MAX_SPRITES_PER_FRAME * 4,
                                                g_serumData.nframes, pfile,
@@ -1231,6 +1228,9 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   }
   if (result && g_serumData.sceneGenerator->isActive())
     g_serumData.sceneGenerator->setDepth(result->nocolors == 16 ? 4 : 2);
+  if (result) {
+    BuildFrameLookupVectors();
+  }
   if (is_real_machine()) {
     monochromeMode = true;
   }
@@ -1241,6 +1241,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
 SERUM_API void Serum_Dispose(void) { Serum_free(); }
 
 static void BuildFrameLookupVectors(void) {
+  uint32_t numSceneFrames = 0;
   g_serumData.frameIsScene.clear();
 
   if (g_serumData.nframes == 0) return;
@@ -1249,14 +1250,19 @@ static void BuildFrameLookupVectors(void) {
   // SceneGenerator contains the static left-half glyph template that scene
   // frames are built from.
   if (g_serumData.SerumVersion == SERUM_V2 && g_serumData.fwidth == 128 &&
-      g_serumData.fheight == 32 && g_serumData.sceneGenerator) {
+      g_serumData.fheight == 32 && g_serumData.sceneGenerator &&
+      g_serumData.sceneGenerator->isActive()) {
     for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
       const uint16_t* frameData = g_serumData.cframes_v2[frameId];
       if (g_serumData.sceneGenerator->matchesSceneMarkerRegion(frameData)) {
         g_serumData.frameIsScene[frameId] = 1;
+        numSceneFrames++;
       }
     }
   }
+
+  Log("Loaded %d frames and %d rotation scene frames",
+      g_serumData.nframes - numSceneFrames, numSceneFrames);
 
   lastfound_scene = 0;
   for (uint32_t frameId = g_serumData.nframes - 1; frameId > 0; frameId--) {
@@ -2387,7 +2393,8 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
                   FLAG_SCENE_RESUME_IF_RETRIGGERED) {
                 auto it = g_sceneResumeState.find(lastTriggerID);
                 if (it != g_sceneResumeState.end()) {
-                  if ((now - it->second.timestampMs) <= SCENE_RESUME_WINDOW_MS &&
+                  if ((now - it->second.timestampMs) <=
+                          SCENE_RESUME_WINDOW_MS &&
                       it->second.nextFrame < sceneFrameCount) {
                     sceneCurrentFrame = it->second.nextFrame;
                   }

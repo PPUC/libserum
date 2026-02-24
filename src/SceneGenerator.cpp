@@ -47,8 +47,7 @@ void SceneGenerator::setDepth(uint8_t depth) {
 bool SceneGenerator::parseCSV(const std::string &csv_filename) {
   std::ifstream in_csv(csv_filename);
   if (!in_csv.is_open()) {
-    // Log(DMDUtil_LogLevel_ERROR, "SceneGenerator: Could not open CSV file:
-    // %s", csv_filename.c_str());
+    Log("SceneGenerator: Could not open CSV file: %s", csv_filename.c_str());
     return false;
   }
 
@@ -78,8 +77,9 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
 
     // Need at least 3 columns, accept up to 4
     if (row.size() < 3) {
-      // Log(DMDUtil_LogLevel_ERROR, "SceneGenerator: Skipping invalid line %d -
-      // expected at least 3 columns", lineNum);
+      Log("SceneGenerator: Skipping invalid line %d - expected at least 3 "
+          "columns",
+          lineNum);
       continue;
     }
 
@@ -106,8 +106,8 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
 
       m_sceneData.push_back(data);
     } catch (...) {
-      // Log(DMDUtil_LogLevel_ERROR, "SceneGenerator: Skipping invalid line %d -
-      // non-integer value", lineNum);
+      Log("SceneGenerator: Skipping invalid line %d - non-integer value",
+          lineNum);
       continue;
     }
   }
@@ -120,8 +120,8 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
 bool SceneGenerator::generateDump(const std::string &dump_filename, int id) {
   std::ofstream out_dump(dump_filename, std::ios::binary);
   if (!out_dump.is_open()) {
-    // Log(DMDUtil_LogLevel_ERROR, "SceneGenerator: Could not create dump file:
-    // %s", dump_filename.c_str());
+    Log("SceneGenerator: Could not create dump file: %s",
+        dump_filename.c_str());
     return false;
   }
 
@@ -145,9 +145,8 @@ bool SceneGenerator::generateDump(const std::string &dump_filename, int id) {
         uint8_t frameBuffer[4096];
         if (!generateFrame(scene.sceneId, frameIndex, frameBuffer, group,
                            true)) {
-          // Log(DMDUtil_LogLevel_ERROR, "SceneGenerator: Error generating frame
-          // %d for scene %d", frameIndex,
-          //    scene.sceneId);
+          Log("SceneGenerator: Error generating frame %d for scene %d",
+              frameIndex, scene.sceneId);
           continue;
         }
 
