@@ -14,6 +14,7 @@
 #include <optional>
 #include <random>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "SerumData.h"
@@ -119,6 +120,8 @@ const uint16_t greyscale_16[16] = {
 
 uint32_t Serum_RenderScene(void);
 static void BuildFrameLookupVectors(void);
+static uint64_t MakeFrameSignature(uint8_t mask, uint8_t shape, uint32_t hash);
+static void InitFrameLookupRuntimeStateFromStoredData(void);
 
 struct SceneResumeState {
   uint16_t nextFrame = 0;
@@ -441,6 +444,7 @@ long serum_file_length;
 
 bool Serum_SaveConcentrate(const char* filename) {
   if (!cromloaded || is_real_machine()) return false;
+  BuildFrameLookupVectors();
 
   std::string concentratePath;
 
@@ -1172,6 +1176,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
 #endif
   }
   Serum_Frame_Struc* result = NULL;
+  bool loadedFromConcentrate = false;
+  bool sceneDataUpdatedFromCsv = false;
   std::optional<std::string> pFoundFile;
   std::optional<std::string> skipFoundFile =
       find_case_insensitive_file(pathbuf, "skip-cromc.txt");
@@ -1184,10 +1190,12 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     if (pFoundFile) {
       Log("Found %s", pFoundFile->c_str());
       result = Serum_LoadConcentrate(pFoundFile->c_str(), flags);
+      loadedFromConcentrate = (result != NULL);
       if (result) {
         Log("Loaded %s", pFoundFile->c_str());
         if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
             g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str())) {
+          sceneDataUpdatedFromCsv = true;
 #ifdef WRITE_CROMC
           // Update the concentrate file with new PUP data
           if (generateCRomC) Serum_SaveConcentrate(pFoundFile->c_str());
@@ -1217,8 +1225,10 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     result = Serum_LoadFilev1(pFoundFile->c_str(), flags);
     if (result) {
       Log("Loaded %s", pFoundFile->c_str());
-      if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2)
-        g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str());
+      if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2) {
+        sceneDataUpdatedFromCsv =
+            g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str());
+      }
 #ifdef WRITE_CROMC
       if (generateCRomC) Serum_SaveConcentrate(pFoundFile->c_str());
 #endif
@@ -1229,7 +1239,12 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   if (result && g_serumData.sceneGenerator->isActive())
     g_serumData.sceneGenerator->setDepth(result->nocolors == 16 ? 4 : 2);
   if (result) {
-    BuildFrameLookupVectors();
+    if (!loadedFromConcentrate || g_serumData.concentrateFileVersion < 6 ||
+        sceneDataUpdatedFromCsv) {
+      BuildFrameLookupVectors();
+    } else {
+      InitFrameLookupRuntimeStateFromStoredData();
+    }
   }
   if (is_real_machine()) {
     monochromeMode = true;
@@ -1243,19 +1258,67 @@ SERUM_API void Serum_Dispose(void) { Serum_free(); }
 static void BuildFrameLookupVectors(void) {
   uint32_t numSceneFrames = 0;
   g_serumData.frameIsScene.clear();
+  g_serumData.sceneFramesBySignature.clear();
 
   if (g_serumData.nframes == 0) return;
   g_serumData.frameIsScene.resize(g_serumData.nframes, 0);
+  const uint32_t pixels = g_serumData.is256x64
+                              ? (256 * 64)
+                              : (g_serumData.fwidth * g_serumData.fheight);
 
-  // SceneGenerator contains the static left-half glyph template that scene
-  // frames are built from.
+  // Build scene signatures in the same domain used by Identify_Frame:
+  // (mask, shape, crc32 over original frame pixels).
   if (g_serumData.SerumVersion == SERUM_V2 && g_serumData.fwidth == 128 &&
       g_serumData.fheight == 32 && g_serumData.sceneGenerator &&
       g_serumData.sceneGenerator->isActive()) {
+    std::unordered_set<uint16_t> uniqueMaskShapeKeys;
+    std::vector<std::pair<uint8_t, uint8_t>> uniqueMaskShapes;
+    uniqueMaskShapes.reserve(g_serumData.nframes);
+
     for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
-      const uint16_t* frameData = g_serumData.cframes_v2[frameId];
-      if (g_serumData.sceneGenerator->matchesSceneMarkerRegion(frameData)) {
+      const uint8_t mask = g_serumData.compmaskID[frameId][0];
+      const uint8_t shape = g_serumData.shapecompmode[frameId][0];
+      const uint16_t key = (uint16_t(mask) << 8) | shape;
+      if (uniqueMaskShapeKeys.insert(key).second) {
+        uniqueMaskShapes.emplace_back(mask, shape);
+      }
+    }
+
+    std::unordered_set<uint64_t> sceneSignatures;
+    sceneSignatures.reserve(uniqueMaskShapes.size() * 64);
+
+    uint8_t generatedSceneFrame[128 * 32];
+    const auto& scenes = g_serumData.sceneGenerator->getSceneData();
+    for (const auto& scene : scenes) {
+      const int groups = scene.frameGroups > 0 ? scene.frameGroups : 1;
+      for (int group = 1; group <= groups; ++group) {
+        for (uint16_t frameIndex = 0; frameIndex < scene.frameCount;
+             ++frameIndex) {
+          if (g_serumData.sceneGenerator->generateFrame(
+                  scene.sceneId, frameIndex, generatedSceneFrame, group,
+                  true) != 0xffff) {
+            continue;
+          }
+          for (const auto& maskShape : uniqueMaskShapes) {
+            uint32_t hash = calc_crc32(generatedSceneFrame, maskShape.first,
+                                       pixels, maskShape.second);
+            sceneSignatures.insert(
+                MakeFrameSignature(maskShape.first, maskShape.second, hash));
+          }
+        }
+      }
+    }
+
+    for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
+      const uint8_t mask = g_serumData.compmaskID[frameId][0];
+      const uint8_t shape = g_serumData.shapecompmode[frameId][0];
+      const uint32_t hash = g_serumData.hashcodes[frameId][0];
+      if (sceneSignatures.find(MakeFrameSignature(mask, shape, hash)) !=
+          sceneSignatures.end()) {
         g_serumData.frameIsScene[frameId] = 1;
+        g_serumData
+            .sceneFramesBySignature[MakeFrameSignature(mask, shape, hash)]
+            .push_back(frameId);
         numSceneFrames++;
       }
     }
@@ -1265,7 +1328,7 @@ static void BuildFrameLookupVectors(void) {
       g_serumData.nframes - numSceneFrames, numSceneFrames);
 
   lastfound_scene = 0;
-  for (uint32_t frameId = g_serumData.nframes - 1; frameId > 0; frameId--) {
+  for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
     if (g_serumData.frameIsScene[frameId]) {
       lastfound_scene = frameId;
       break;
@@ -1273,7 +1336,41 @@ static void BuildFrameLookupVectors(void) {
   }
 
   lastfound_normal = 0;
-  for (uint32_t frameId = g_serumData.nframes - 1; frameId > 0; frameId--) {
+  for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
+    if (!g_serumData.frameIsScene[frameId]) {
+      lastfound_normal = frameId;
+      break;
+    }
+  }
+}
+
+static uint64_t MakeFrameSignature(uint8_t mask, uint8_t shape, uint32_t hash) {
+  return (uint64_t(mask) << 40) | (uint64_t(shape) << 32) | hash;
+}
+
+static void InitFrameLookupRuntimeStateFromStoredData(void) {
+  if (g_serumData.frameIsScene.size() != g_serumData.nframes) {
+    BuildFrameLookupVectors();
+    return;
+  }
+
+  uint32_t numSceneFrames = 0;
+  for (uint8_t isScene : g_serumData.frameIsScene) {
+    if (isScene) numSceneFrames++;
+  }
+  Log("Loaded %d frames and %d rotation scene frames",
+      g_serumData.nframes - numSceneFrames, numSceneFrames);
+
+  lastfound_scene = 0;
+  for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
+    if (g_serumData.frameIsScene[frameId]) {
+      lastfound_scene = frameId;
+      break;
+    }
+  }
+
+  lastfound_normal = 0;
+  for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
     if (!g_serumData.frameIsScene[frameId]) {
       lastfound_normal = frameId;
       break;
@@ -1312,6 +1409,36 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
       uint8_t mask = g_serumData.compmaskID[tj][0];
       uint8_t Shape = g_serumData.shapecompmode[tj][0];
       uint32_t Hashc = calc_crc32(frame, mask, pixels, Shape);
+      if (sceneFrameRequested) {
+        auto sigIt = g_serumData.sceneFramesBySignature.find(
+            MakeFrameSignature(mask, Shape, Hashc));
+        if (sigIt == g_serumData.sceneFramesBySignature.end()) {
+          framechecked[tj] = true;
+          if (++tj >= g_serumData.nframes) tj = 0;
+          continue;
+        }
+        for (uint32_t ti : sigIt->second) {
+          if (first_match || ti != lastfound_stream || mask < 255) {
+            lastfound_stream = ti;
+            lastfound = ti;
+            lastframe_full_crc = crc32_fast(frame, pixels);
+            first_match = false;
+            return ti;
+          }
+
+          uint32_t full_crc = crc32_fast(frame, pixels);
+          if (full_crc != lastframe_full_crc) {
+            lastframe_full_crc = full_crc;
+            lastfound = ti;
+            return ti;
+          }
+          lastfound = ti;
+          return IDENTIFY_SAME_FRAME;
+        }
+        framechecked[tj] = true;
+        if (++tj >= g_serumData.nframes) tj = 0;
+        continue;
+      }
       // now we can compare with all the crom frames that share these same mask
       // and shapemode
       uint32_t ti = tj;
