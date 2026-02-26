@@ -2968,6 +2968,80 @@ SERUM_API bool Serum_Scene_GenerateFrame(uint16_t sceneId, uint16_t frameIndex,
                         sceneId, frameIndex, buffer, group, true));
 }
 
+SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
+  if (!g_serumData.sceneGenerator || g_serumData.SerumVersion != SERUM_V2) {
+    return 0;
+  }
+
+  // Do not interrupt an already running non-interruptable scene, unless it's
+  // the same scene being retriggered and we are allowed to resume it.
+  if (sceneFrameCount > 0 && sceneCurrentFrame < sceneFrameCount &&
+      !sceneInterruptable && sceneId != lastTriggerID) {
+    uint32_t wait =
+        mySerum.rotationtimer ? mySerum.rotationtimer : sceneDurationPerFrame;
+    return (wait & 0xffff) | FLAG_RETURNED_V2_SCENE;
+  }
+
+  uint16_t frameCount = 0;
+  uint16_t durationPerFrame = 0;
+  bool interruptable = false;
+  bool startImmediately = false;
+  uint8_t repeat = 0;
+  uint8_t options = 0;
+
+  if (!g_serumData.sceneGenerator->getSceneInfo(
+          sceneId, frameCount, durationPerFrame, interruptable,
+          startImmediately, repeat, options)) {
+    return 0;
+  }
+
+  uint32_t now = GetMonotonicTimeMs();
+
+  if (sceneFrameCount > 0 &&
+      (sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
+          FLAG_SCENE_RESUME_IF_RETRIGGERED &&
+      lastTriggerID < 0xffffffff && sceneCurrentFrame < sceneFrameCount) {
+    g_sceneResumeState[lastTriggerID] = {sceneCurrentFrame, now};
+  }
+
+  sceneFrameCount = frameCount;
+  sceneDurationPerFrame = durationPerFrame;
+  sceneInterruptable = interruptable;
+  sceneStartImmediately = startImmediately;
+  sceneRepeatCount = repeat;
+  sceneOptionFlags = options;
+  sceneIsLastBackgroundFrame = false;
+  sceneCurrentFrame = 0;
+
+  if ((sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
+      FLAG_SCENE_RESUME_IF_RETRIGGERED) {
+    auto it = g_sceneResumeState.find(sceneId);
+    if (it != g_sceneResumeState.end()) {
+      if ((now - it->second.timestampMs) <= SCENE_RESUME_WINDOW_MS &&
+          it->second.nextFrame < sceneFrameCount) {
+        sceneCurrentFrame = it->second.nextFrame;
+      }
+      g_sceneResumeState.erase(it);
+    }
+  } else {
+    g_sceneResumeState.erase(sceneId);
+  }
+
+  lastTriggerID = sceneId;
+  lasttriggerTimestamp = now;
+  mySerum.triggerID = sceneId;
+  if (keepTriggersInternal || mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD) {
+    mySerum.triggerID = 0xffffffff;
+  }
+
+  if (sceneStartImmediately) {
+    return Serum_RenderScene();
+  }
+
+  mySerum.rotationtimer = sceneDurationPerFrame;
+  return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_SCENE;
+}
+
 SERUM_API void Serum_Scene_SetDepth(uint8_t depth) {
   if (g_serumData.sceneGenerator) g_serumData.sceneGenerator->setDepth(depth);
 }

@@ -37,13 +37,34 @@ SERUM_API void Serum_SetLogCallback(Serum_LogCallback callback,
 SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
                                         const char* const romname,
                                         uint8_t flags);
+
+/** @brief Set timeout for skipping unknown frames
+ *
+ * Unknown frames are ignored until this timeout elapses and a full lookup is
+ * retried.
+ *
+ * @param milliseconds: Timeout in milliseconds (0 disables timeout handling)
+ */
 SERUM_API void Serum_SetIgnoreUnknownFramesTimeout(uint16_t milliseconds);
 
+/** @brief Set maximum number of consecutive unknown frames to skip
+ *
+ * @param maximum: Maximum number of unknown frames before forcing lookup
+ */
 SERUM_API void Serum_SetMaximumUnknownFramesToSkip(uint8_t maximum);
 
+/** @brief Set fallback monochrome palette used by libserum
+ *
+ * @param palette: Pointer to palette data (RGB triplets)
+ * @param bitDepth: Bit depth of source frames (typically 2 or 4)
+ */
 SERUM_API void Serum_SetStandardPalette(const uint8_t* palette,
                                         const int bitDepth);
 
+/** @brief Enable or disable automatic cROMc generation
+ *
+ * @param generate: true to generate/save cROMc data, false to disable
+ */
 SERUM_API void Serum_SetGenerateCRomC(bool generate);
 
 /** @brief Release the content and memory of the loaded Serum file.
@@ -72,12 +93,20 @@ SERUM_API uint32_t Serum_Colorize(uint8_t* frame);
  */
 SERUM_API uint32_t Serum_Rotate(void);
 
+/** @brief Disable frame colorization output
+ */
 SERUM_API void Serum_DisableColorization(void);
 
+/** @brief Enable frame colorization output
+ */
 SERUM_API void Serum_EnableColorization(void);
 
+/** @brief Suppress external PUP trigger reporting
+ */
 SERUM_API void Serum_DisablePupTriggers(void);
 
+/** @brief Enable external PUP trigger reporting
+ */
 SERUM_API void Serum_EnablePupTrigers(void);
 
 /** @brief Get the full version of this library
@@ -134,6 +163,18 @@ SERUM_API bool Serum_Scene_GetInfo(uint16_t sceneId, uint16_t* frameCount,
  */
 SERUM_API bool Serum_Scene_GenerateFrame(uint16_t sceneId, uint16_t frameIndex,
                                          uint8_t* buffer, int group);
+
+/** @brief Trigger a scene by ID from outside of frame matching
+ *
+ * Starts the given scene immediately in the internal scene pipeline.
+ * The return value follows the same convention as Serum_Rotate():
+ * - low word: milliseconds until next rotation/scene step
+ * - high-word scene bit: FLAG_RETURNED_V2_SCENE when a scene is active
+ *
+ * @param sceneId: Scene ID to trigger
+ * @return Timing/flags value similar to Serum_Rotate()
+ */
+SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId);
 
 /** @brief Set rendering depth for scenes
  *

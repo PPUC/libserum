@@ -149,3 +149,31 @@ typedef void (*Serum_DisposeFunc)(void);
 typedef uint32_t (*Serum_ColorizeFunc)(uint8_t* frame);
 typedef uint32_t (*Serum_RotateFunc)(void);
 typedef const char* (*Serum_GetVersionFunc)(void);
+typedef const char* (*Serum_GetMinorVersionFunc)(void);
+typedef void (*Serum_SetLogCallbackFunc)(Serum_LogCallback callback,
+                                         const void* userData);
+typedef void (*Serum_SetIgnoreUnknownFramesTimeoutFunc)(uint16_t milliseconds);
+typedef void (*Serum_SetMaximumUnknownFramesToSkipFunc)(uint8_t maximum);
+typedef void (*Serum_SetStandardPaletteFunc)(const uint8_t* palette,
+                                             int bitDepth);
+typedef void (*Serum_SetGenerateCRomCFunc)(bool generate);
+typedef void (*Serum_DisableColorizationFunc)(void);
+typedef void (*Serum_EnableColorizationFunc)(void);
+typedef void (*Serum_DisablePupTriggersFunc)(void);
+typedef void (*Serum_EnablePupTrigersFunc)(void);
+typedef bool (*Serum_Scene_ParseCSVFunc)(const char* const csv_filename);
+typedef bool (*Serum_Scene_GenerateDumpFunc)(const char* const dump_filename,
+                                             int id);
+typedef bool (*Serum_Scene_GetInfoFunc)(uint16_t sceneId, uint16_t* frameCount,
+                                        uint16_t* durationPerFrame,
+                                        bool* interruptable,
+                                        bool* startImmediately, uint8_t* repeat,
+                                        uint8_t* sceneOptions);
+typedef bool (*Serum_Scene_GenerateFrameFunc)(uint16_t sceneId,
+                                              uint16_t frameIndex,
+                                              uint8_t* buffer, int group);
+typedef uint32_t (*Serum_Scene_TriggerFunc)(uint16_t sceneId);
+typedef void (*Serum_Scene_SetDepthFunc)(uint8_t depth);
+typedef int (*Serum_Scene_GetDepthFunc)(void);
+typedef bool (*Serum_Scene_IsActiveFunc)(void);
+typedef void (*Serum_Scene_ResetFunc)(void);
