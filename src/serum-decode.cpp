@@ -54,6 +54,7 @@ int strcat_s(char* dest, size_t destsz, const char* src) {
 #define PUP_TRIGGER_REPEAT_TIMEOUT 500  // 500 ms
 #define PUP_TRIGGER_MAX_THRESHOLD 50000
 #define MONOCHROME_TRIGGER_ID 65432
+#define MONOCHROME_PALETTE_TRIGGER_ID 65431
 
 #pragma warning(disable : 4996)
 
@@ -85,6 +86,7 @@ uint8_t lastFrame[256 * 64] = {0};
 uint32_t lastFrameId = 0;  // last frame ID identified
 uint16_t sceneBackgroundFrame[256 * 64] = {0};
 bool monochromeMode = false;
+bool monochromePaletteMode = false;
 bool showStatusMessages = false;
 bool keepTriggersInternal = false;
 
@@ -117,12 +119,15 @@ const uint16_t greyscale_16[16] = {
     0xE71C,  // 14/15
     0xFFFF   // White (31, 63, 31)
 };
+uint16_t monochromePaletteV2[16] = {0};
+uint8_t monochromePaletteV2Length = 0;
 
 uint32_t Serum_RenderScene(void);
 static void BuildFrameLookupVectors(void);
 static uint64_t MakeFrameSignature(uint8_t mask, uint8_t shape, uint32_t hash);
 static void InitFrameLookupRuntimeStateFromStoredData(void);
 static void StopV2ColorRotations(void);
+static bool CaptureMonochromePaletteFromFrameV2(uint32_t frameId);
 
 struct SceneResumeState {
   uint16_t nextFrame = 0;
@@ -290,6 +295,9 @@ void Serum_free(void) {
   lastfound_scene = 0;
   lastframe_full_crc_normal = 0;
   lastframe_full_crc_scene = 0;
+  monochromeMode = false;
+  monochromePaletteMode = false;
+  monochromePaletteV2Length = 0;
   g_sceneResumeState.clear();
 
   g_serumData.sceneGenerator->Reset();
@@ -2298,8 +2306,9 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    monochromeMode =
-        (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
+    uint32_t triggerId = g_serumData.triggerIDs[lastfound][0];
+    monochromeMode = (triggerId == MONOCHROME_TRIGGER_ID);
+    monochromePaletteMode = false;
     if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
       g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
 
@@ -2436,6 +2445,26 @@ static void StopV2ColorRotations(void) {
   }
 }
 
+static bool CaptureMonochromePaletteFromFrameV2(uint32_t frameId) {
+  if (g_serumData.nocolors == 0 || g_serumData.nocolors > 16) {
+    monochromePaletteV2Length = 0;
+    return false;
+  }
+  const uint16_t* dyna = (g_serumData.fheight == 32)
+                             ? g_serumData.dyna4cols_v2[frameId]
+                             : g_serumData.dyna4cols_v2_extra[frameId];
+  if (!dyna) {
+    monochromePaletteV2Length = 0;
+    return false;
+  }
+  const uint8_t ncolors = (uint8_t)g_serumData.nocolors;
+  for (uint8_t i = 0; i < ncolors; i++) {
+    monochromePaletteV2[i] = dyna[i];
+  }
+  monochromePaletteV2Length = ncolors;
+  return true;
+}
+
 SERUM_API uint32_t
 Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
   // return IDENTIFY_NO_FRAME if no new frame detected
@@ -2455,8 +2484,13 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    monochromeMode =
-        (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
+    uint32_t triggerId = g_serumData.triggerIDs[lastfound][0];
+    monochromeMode = (triggerId == MONOCHROME_TRIGGER_ID);
+    monochromePaletteMode = false;
+    if (triggerId == MONOCHROME_PALETTE_TRIGGER_ID) {
+      monochromePaletteMode = CaptureMonochromePaletteFromFrameV2(lastfound);
+      monochromeMode = false;
+    }
     if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
       g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
 
@@ -2720,20 +2754,23 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
 
   mySerum.triggerID = 0xffffffff;
 
-  if (monochromeMode ||
+  if (monochromeMode || monochromePaletteMode ||
       (ignoreUnknownFramesTimeout &&
        (now - lastframe_found) >= ignoreUnknownFramesTimeout) ||
       (maxFramesToSkip && (frameID == IDENTIFY_NO_FRAME) &&
        (++framesSkippedCounter >= maxFramesToSkip))) {
-    // apply standard palette
+    // apply monochrome frame colors
     for (uint16_t y = 0; y < g_serumData.fheight; y++) {
       for (uint16_t x = 0; x < g_serumData.fwidth; x++) {
-        if (g_serumData.nocolors < 16)
-          mySerum.frame32[y * g_serumData.fwidth + x] =
-              greyscale_4[frame[y * g_serumData.fwidth + x]];
-        else
-          mySerum.frame32[y * g_serumData.fwidth + x] =
-              greyscale_16[frame[y * g_serumData.fwidth + x]];
+        uint8_t src = frame[y * g_serumData.fwidth + x];
+        if (monochromePaletteMode && monochromePaletteV2Length > 0 &&
+            src < monochromePaletteV2Length) {
+          mySerum.frame32[y * g_serumData.fwidth + x] = monochromePaletteV2[src];
+        } else if (g_serumData.nocolors < 16) {
+          mySerum.frame32[y * g_serumData.fwidth + x] = greyscale_4[src];
+        } else {
+          mySerum.frame32[y * g_serumData.fwidth + x] = greyscale_16[src];
+        }
       }
     }
 

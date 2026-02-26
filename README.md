@@ -11,6 +11,22 @@ Some of these new features are
 - rotation scenes
 - monochrome mode for not colorized frames like error messages, system diagnostics, settings menu, tools like motor adjustments, coin door open warnings or older or patched ROM versions
 
+## monochrome triggers
+
+libserum supports two dedicated trigger IDs:
+
+- `65432` (`MONOCHROME_TRIGGER_ID`):
+  - Enables monochrome fallback mode.
+  - In v2, incoming ROM shades are rendered with fixed `greyscale_4` / `greyscale_16`.
+  - In v1, the configured standard monochrome palette is used.
+
+- `65431` (`MONOCHROME_PALETTE_TRIGGER_ID`):
+  - Enables palette-based monochrome fallback mode (v2 only).
+  - The monochrome palette is captured from dynamic color set `0` of the triggering frame.
+  - Subsequent monochrome frames use this captured palette instead of `greyscale_4` / `greyscale_16`.
+
+Both modes remain active while frames are unknown/not colorized and are reevaluated when a new frame is identified.
+
 ## rotation scenes
 
 Format of a PUP scene line:
