@@ -125,6 +125,7 @@ class SerumData {
   SparseVector<uint8_t> dynaspritemasks_extra;
   SparseVector<uint8_t> sprshapemode;
   std::vector<uint8_t> frameIsScene;
+  std::unordered_map<uint64_t, std::vector<uint32_t>> sceneFramesBySignature;
 
   SceneGenerator *sceneGenerator;
 
@@ -156,6 +157,19 @@ class SerumData {
        dynashadowsdir_extra, dynashadowscol_extra, dynasprite4cols,
        dynasprite4cols_extra, dynaspritemasks, dynaspritemasks_extra,
        sprshapemode);
+
+    if constexpr (Archive::is_saving::value) {
+      if (concentrateFileVersion >= 6) {
+        ar(frameIsScene, sceneFramesBySignature);
+      }
+    } else {
+      if (concentrateFileVersion >= 6) {
+        ar(frameIsScene, sceneFramesBySignature);
+      } else {
+        frameIsScene.clear();
+        sceneFramesBySignature.clear();
+      }
+    }
 
     if constexpr (Archive::is_saving::value) {
       ar(sceneGenerator ? sceneGenerator->getSceneData()
