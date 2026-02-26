@@ -122,6 +122,7 @@ uint32_t Serum_RenderScene(void);
 static void BuildFrameLookupVectors(void);
 static uint64_t MakeFrameSignature(uint8_t mask, uint8_t shape, uint32_t hash);
 static void InitFrameLookupRuntimeStateFromStoredData(void);
+static void StopV2ColorRotations(void);
 
 struct SceneResumeState {
   uint16_t nextFrame = 0;
@@ -1586,24 +1587,24 @@ bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
                     (uint16_t)(sprx -
                                (frax - minxBB));  // display sprite from point
                 pfrx[*nspr] = (uint16_t)minxBB;
-                pwid[*nspr] = MIN((uint16_t)(spw - pspx[*nspr]),
-                                  (uint16_t)(maxxBB - minxBB + 1));
+                pwid[*nspr] = std::min((uint16_t)(spw - pspx[*nspr]),
+                                       (uint16_t)(maxxBB - minxBB + 1));
               } else {
                 pspx[*nspr] = 0;
                 pfrx[*nspr] = (uint16_t)(frax - sprx);
-                pwid[*nspr] =
-                    MIN((uint16_t)(maxxBB - pfrx[*nspr] + 1), (uint16_t)spw);
+                pwid[*nspr] = std::min((uint16_t)(maxxBB - pfrx[*nspr] + 1),
+                                       (uint16_t)spw);
               }
               if (fray - minyBB < spry) {
                 pspy[*nspr] = (uint16_t)(spry - (fray - minyBB));
                 pfry[*nspr] = (uint16_t)minyBB;
-                phei[*nspr] = MIN((uint16_t)(sph - pspy[*nspr]),
-                                  (uint16_t)(maxyBB - minyBB + 1));
+                phei[*nspr] = std::min((uint16_t)(sph - pspy[*nspr]),
+                                       (uint16_t)(maxyBB - minyBB + 1));
               } else {
                 pspy[*nspr] = 0;
                 pfry[*nspr] = (uint16_t)(fray - spry);
-                phei[*nspr] =
-                    MIN((uint16_t)(maxyBB - pfry[*nspr] + 1), (uint16_t)sph);
+                phei[*nspr] = std::min((uint16_t)(maxyBB - pfry[*nspr] + 1),
+                                       (uint16_t)sph);
               }
               // we check the identical sprites as there may be duplicate due to
               // the multi detection zones
@@ -1730,24 +1731,24 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                     (uint16_t)(sprx -
                                (frax - minxBB));  // display sprite from point
                 pfrx[*nspr] = (uint16_t)minxBB;
-                pwid[*nspr] = MIN((uint16_t)(spw - pspx[*nspr]),
-                                  (uint16_t)(maxxBB - minxBB + 1));
+                pwid[*nspr] = std::min((uint16_t)(spw - pspx[*nspr]),
+                                       (uint16_t)(maxxBB - minxBB + 1));
               } else {
                 pspx[*nspr] = 0;
                 pfrx[*nspr] = (uint16_t)(frax - sprx);
-                pwid[*nspr] =
-                    MIN((uint16_t)(maxxBB - pfrx[*nspr] + 1), (uint16_t)spw);
+                pwid[*nspr] = std::min((uint16_t)(maxxBB - pfrx[*nspr] + 1),
+                                       (uint16_t)spw);
               }
               if (fray - minyBB < spry) {
                 pspy[*nspr] = (uint16_t)(spry - (fray - minyBB));
                 pfry[*nspr] = (uint16_t)minyBB;
-                phei[*nspr] = MIN((uint16_t)(sph - pspy[*nspr]),
-                                  (uint16_t)(maxyBB - minyBB + 1));
+                phei[*nspr] = std::min((uint16_t)(sph - pspy[*nspr]),
+                                       (uint16_t)(maxyBB - minyBB + 1));
               } else {
                 pspy[*nspr] = 0;
                 pfry[*nspr] = (uint16_t)(fray - spry);
-                phei[*nspr] =
-                    MIN((uint16_t)(maxyBB - pfry[*nspr] + 1), (uint16_t)sph);
+                phei[*nspr] = std::min((uint16_t)(maxyBB - pfry[*nspr] + 1),
+                                       (uint16_t)sph);
               }
               // we check the identical sprites as there may be duplicate due to
               // the multi detection zones
@@ -2416,6 +2417,25 @@ uint32_t Calc_Next_Rotationv2(uint32_t now) {
   return nextrot - now;
 }
 
+static void StopV2ColorRotations(void) {
+  if (mySerum.rotations32) {
+    std::memset(
+        mySerum.rotations32, 0,
+        MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * sizeof(uint16_t));
+  }
+  if (mySerum.rotations64) {
+    std::memset(
+        mySerum.rotations64, 0,
+        MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * sizeof(uint16_t));
+  }
+  for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
+    colorrotnexttime32[ti] = 0;
+    colorrotnexttime64[ti] = 0;
+    colorshifts32[ti] = 0;
+    colorshifts64[ti] = 0;
+  }
+}
+
 SERUM_API uint32_t
 Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
   // return IDENTIFY_NO_FRAME if no new frame detected
@@ -2511,6 +2531,16 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
                     lastTriggerID, sceneFrameCount, sceneDurationPerFrame,
                     sceneInterruptable, sceneStartImmediately, sceneRepeatCount,
                     sceneOptionFlags)) {
+              const bool sceneIsBackground =
+                  (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
+                  FLAG_SCENE_AS_BACKGROUND;
+              if (sceneIsBackground) {
+                // Background scenes should not preempt rendering immediately.
+                sceneStartImmediately = false;
+              } else {
+                // Foreground scenes and color rotations are mutually exclusive.
+                StopV2ColorRotations();
+              }
               // Log(DMDUtil_LogLevel_DEBUG, "Serum: trigger ID %lu found in
               // scenes, frame count=%d, duration=%dms",
               //     m_pSerum->triggerID, sceneFrameCount,
@@ -2579,8 +2609,11 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
         }
       }
 
-      // Skip rotations if the scene is active
-      if (sceneCurrentFrame >= sceneFrameCount) {
+      bool allowParallelRotations =
+          (sceneFrameCount == 0) ||
+          ((sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
+           FLAG_SCENE_AS_BACKGROUND);
+      if (!sceneFrameRequested && allowParallelRotations) {
         uint16_t *pcr32, *pcr64;
         if (g_serumData.fheight == 32) {
           pcr32 = g_serumData.colorrotations_v2[lastfound];
@@ -2653,10 +2686,16 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
           }
         }
 
-        if (isRotation) {
-          mySerum.rotationtimer = Calc_Next_Rotationv2(now);
+        uint32_t rotationTimer = isRotation ? Calc_Next_Rotationv2(now) : 0;
+        if (rotationIsScene && mySerum.rotationtimer > 0) {
+          if (rotationTimer == 0) {
+            // Scene timer only.
+          } else {
+            mySerum.rotationtimer =
+                std::min(mySerum.rotationtimer, rotationTimer);
+          }
         } else {
-          mySerum.rotationtimer = 0;
+          mySerum.rotationtimer = rotationTimer;
         }
       }
 
@@ -2834,13 +2873,22 @@ uint32_t Serum_RenderScene(void) {
 
 uint32_t Serum_ApplyRotationsv2(void) {
   uint32_t sceneRotationResult = Serum_RenderScene();
-  if (sceneRotationResult & FLAG_RETURNED_V2_SCENE) return sceneRotationResult;
+  bool sceneIsActive = (sceneRotationResult & FLAG_RETURNED_V2_SCENE) != 0;
+  bool sceneIsBackground =
+      (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) == FLAG_SCENE_AS_BACKGROUND;
+  if (sceneIsActive && !sceneIsBackground) {
+    // Foreground scenes own the output; no parallel color rotations.
+    return sceneRotationResult;
+  }
+
+  uint32_t sceneTimer = sceneRotationResult & 0xffff;
+  uint32_t isrotation = sceneRotationResult & (FLAG_RETURNED_V2_ROTATED32 |
+                                               FLAG_RETURNED_V2_ROTATED64);
 
   // rotation[0] = number of colors in rotation
   // rotation[1] = delay in ms between each color change
   // rotation[2..n] = color indexes
 
-  uint32_t isrotation = 0;
   uint32_t sizeframe;
   uint32_t now = GetMonotonicTimeMs();
   if (mySerum.frame32) {
@@ -2909,18 +2957,23 @@ uint32_t Serum_ApplyRotationsv2(void) {
       }
     }
   }
-  mySerum.rotationtimer = Calc_Next_Rotationv2(now) &
-                          0xffff;  // can't be more than 2048ms, so val is
-                                   // contained in the lower word of val
-  if (mySerum.rotationtimer > 2048)
-    mySerum.rotationtimer =
-        0;  // more than 2048ms is not possible, stop the rotation
-            // if there was a rotation in the 32P frame, the first bit of the
-            // high word is set (0x10000) and if there was a rotation in the 64P
-            // frame, the second bit of the high word is set (0x20000)
-  return mySerum.rotationtimer |
-         isrotation;  // returns the time in ms until the next rotation in the
-                      // lowest word
+  uint32_t rotationTimer = Calc_Next_Rotationv2(now) &
+                           0xffff;  // can't be more than 2048ms, so val is
+                                    // contained in the lower word of val
+  if (rotationTimer > 2048)
+    rotationTimer = 0;  // more than 2048ms is not possible, stop the rotation
+
+  uint32_t nextTimer = 0;
+  if (sceneTimer == 0)
+    nextTimer = rotationTimer;
+  else if (rotationTimer == 0)
+    nextTimer = sceneTimer;
+  else
+    nextTimer = std::min(sceneTimer, rotationTimer);
+
+  mySerum.rotationtimer = nextTimer;
+  return mySerum.rotationtimer | isrotation |
+         (sceneIsActive ? FLAG_RETURNED_V2_SCENE : 0);
 }
 
 SERUM_API uint32_t Serum_Rotate(void) {
@@ -3010,6 +3063,12 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
   sceneStartImmediately = startImmediately;
   sceneRepeatCount = repeat;
   sceneOptionFlags = options;
+  if ((sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
+      FLAG_SCENE_AS_BACKGROUND) {
+    sceneStartImmediately = false;
+  } else {
+    StopV2ColorRotations();
+  }
   sceneIsLastBackgroundFrame = false;
   sceneCurrentFrame = 0;
 

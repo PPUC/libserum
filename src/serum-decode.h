@@ -6,8 +6,6 @@
 #define SERUM_API extern "C" __attribute__((visibility("default")))
 #endif
 
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-
 #include "serum.h"
 
 /** @brief Set the log callback
