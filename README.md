@@ -40,7 +40,7 @@ Format of a PUP scene line:
 7: 0 - no frame groups, >= 2 - create x frame groups (you get x times the number of frames entered in 2 to play changing scenes)
 8: 0 - play frame group in order, 1 - play random frame group
 9: 0 - no autostart, >= 1 - start this scene after x seconds of inactivity (no new frames), only use once, could be combined with frame groups.
-       if scene flag 0 is used for a non-interruptable scene, this value is used as end-hold duration (seconds) instead
+       if scene flag 0 is used for a non-interruptable scene, this value is used as end-hold duration in seconds instead
 10: scene flags. When no flags are provided and scene is finished, the last frame of the scene is shown until a new frame is matched.
    1 - black screen when scene finished
    2 - show last frame before scene started when scene finished

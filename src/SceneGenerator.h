@@ -3,6 +3,7 @@
 #include <cereal/access.hpp>
 #include <cereal/types/vector.hpp>
 #include <cstdint>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -53,7 +54,7 @@ class SceneGenerator {
                     uint16_t &durationPerFrame, bool &interruptable,
                     bool &startImmediately, uint8_t &repeat,
                     uint8_t &sceneOptions) const;
-  bool getSceneAutoStartSeconds(uint16_t sceneId, uint8_t &autoStart) const;
+  bool getSceneEndHoldDurationMs(uint16_t sceneId, uint32_t &durationMs) const;
   bool getAutoStartSceneInfo(uint16_t &frameCount, uint16_t &durationPerFrame,
                              bool &interruptable, bool &startImmediately,
                              uint8_t &repeat, uint8_t &sceneOptions) const;
@@ -69,6 +70,7 @@ class SceneGenerator {
     m_sceneData.clear();
     m_autoStartTimer = 0;
     m_autoStartSceneId = 0;
+    m_sceneEndHoldDurationMs.clear();
     m_depth = 2;
     m_templateInitialized = false;
     initializeTemplate();
@@ -107,4 +109,5 @@ class SceneGenerator {
 
   uint8_t m_autoStartTimer = 0;     // Timer for auto-start scenes
   uint16_t m_autoStartSceneId = 0;  // Scene ID to auto-start
+  std::unordered_map<uint16_t, uint32_t> m_sceneEndHoldDurationMs;
 };

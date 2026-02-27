@@ -82,7 +82,7 @@ bool sceneIsLastBackgroundFrame = false;
 uint8_t sceneRepeatCount = 0;
 uint8_t sceneOptionFlags = 0;
 uint32_t sceneEndHoldUntilMs = 0;
-uint32_t sceneEndHoldDurationMs = 0;
+  uint32_t sceneEndHoldDurationMs = 0;
 uint8_t sceneFrame[256 * 64] = {0};
 uint8_t lastFrame[256 * 64] = {0};
 uint32_t lastFrameId = 0;  // last frame ID identified
@@ -135,6 +135,7 @@ static bool CaptureMonochromePaletteFromFrameV2(uint32_t frameId);
 static bool IsFullBlackFrame(const uint8_t* frame, uint32_t size);
 static void ConfigureSceneEndHold(uint16_t sceneId, bool interruptable,
                                   uint8_t sceneOptions);
+static void ForceNormalFrameRefreshAfterSceneEnd(void);
 static bool ValidateLoadedGeometry(bool isV2, const char* sourceTag);
 
 struct SceneResumeState {
@@ -2553,12 +2554,17 @@ static void ConfigureSceneEndHold(uint16_t sceneId, bool interruptable,
     return;
   }
 
-  uint8_t autoStartSeconds = 0;
-  if (g_serumData.sceneGenerator->getSceneAutoStartSeconds(sceneId,
-                                                            autoStartSeconds) &&
-      autoStartSeconds > 0) {
-    sceneEndHoldDurationMs = (uint32_t)autoStartSeconds * 1000;
+  uint32_t holdMs = 0;
+  if (g_serumData.sceneGenerator->getSceneEndHoldDurationMs(sceneId, holdMs) &&
+      holdMs > 0) {
+    sceneEndHoldDurationMs = holdMs;
   }
+}
+
+static void ForceNormalFrameRefreshAfterSceneEnd(void) {
+  // Force Identify_Frame(normal) to emit a concrete frame ID once after
+  // scene teardown, even when the underlying DMD frame did not change.
+  lastframe_full_crc_normal = 0xffffffff;
 }
 
 SERUM_API uint32_t
@@ -2969,6 +2975,7 @@ uint32_t Serum_RenderScene(void) {
       sceneEndHoldUntilMs = 0;
       sceneFrameCount = 0;
       mySerum.rotationtimer = 0;
+      ForceNormalFrameRefreshAfterSceneEnd();
 
       switch (sceneOptionFlags) {
         case FLAG_SCENE_BLACK_WHEN_FINISHED:
@@ -3030,6 +3037,7 @@ uint32_t Serum_RenderScene(void) {
 
         sceneFrameCount = 0;  // scene ended
         mySerum.rotationtimer = 0;
+        ForceNormalFrameRefreshAfterSceneEnd();
 
         switch (sceneOptionFlags) {
           case FLAG_SCENE_BLACK_WHEN_FINISHED:
@@ -3070,6 +3078,7 @@ uint32_t Serum_RenderScene(void) {
     } else {
       sceneFrameCount = 0;  // error generating scene frame, stop the scene
       mySerum.rotationtimer = 0;
+      ForceNormalFrameRefreshAfterSceneEnd();
     }
     return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_ROTATED32 |
            FLAG_RETURNED_V2_ROTATED64 |

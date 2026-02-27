@@ -54,6 +54,7 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
   m_sceneData.clear();
   m_autoStartTimer = 0;
   m_autoStartSceneId = 0;
+  m_sceneEndHoldDurationMs.clear();
   std::string line;
   int lineNum = 0;
   while (std::getline(in_csv, line)) {
@@ -97,15 +98,25 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
         data.frameGroups =
             (uint8_t)std::stoi(row[6]) == 0 ? 1 : std::stoi(row[6]);
       if (row.size() >= 8) data.random = (std::stoi(row[7]) == 1);
-      if (row.size() >= 9) data.autoStart = (uint8_t)std::stoi(row[8]);
+      int autoStartRaw = 0;
+      if (row.size() >= 9) {
+        autoStartRaw = std::stoi(row[8]);
+        if (autoStartRaw < 0) autoStartRaw = 0;
+        data.autoStart =
+            (uint8_t)(autoStartRaw > 255 ? 255 : autoStartRaw);  // legacy field
+      }
       if (row.size() >= 10) data.sceneOptions = (uint8_t)std::stoi(row[9]);
 
       const bool useAutoStartAsEndHold =
-          (data.autoStart > 0) && !data.interruptable &&
+          (autoStartRaw > 0) && !data.interruptable &&
           (data.sceneOptions == 0);
       if (data.autoStart > 0 && !useAutoStartAsEndHold) {
         m_autoStartTimer = data.autoStart;
         m_autoStartSceneId = data.sceneId;
+      }
+      if (useAutoStartAsEndHold) {
+        // End-hold duration is interpreted in seconds.
+        m_sceneEndHoldDurationMs[data.sceneId] = (uint32_t)autoStartRaw * 1000;
       }
 
       m_sceneData.push_back(data);
@@ -199,16 +210,27 @@ bool SceneGenerator::getSceneInfo(uint16_t sceneId, uint16_t &frameCount,
   return true;
 }
 
-bool SceneGenerator::getSceneAutoStartSeconds(uint16_t sceneId,
-                                              uint8_t &autoStart) const {
+bool SceneGenerator::getSceneEndHoldDurationMs(uint16_t sceneId,
+                                               uint32_t &durationMs) const {
+  auto holdIt = m_sceneEndHoldDurationMs.find(sceneId);
+  if (holdIt != m_sceneEndHoldDurationMs.end()) {
+    durationMs = holdIt->second;
+    return true;
+  }
+
   auto it = std::find_if(
       m_sceneData.begin(), m_sceneData.end(),
       [sceneId](const SceneData &data) { return data.sceneId == sceneId; });
   if (it == m_sceneData.end()) {
-    autoStart = 0;
+    durationMs = 0;
     return false;
   }
-  autoStart = it->autoStart;
+
+  if (!it->interruptable && it->sceneOptions == 0 && it->autoStart > 0) {
+    durationMs = (uint32_t)it->autoStart * 1000;
+    return true;
+  }
+  durationMs = 0;
   return true;
 }
 
