@@ -93,6 +93,8 @@ bool showStatusMessages = false;
 bool keepTriggersInternal = false;
 
 const int pathbuflen = 4096;
+const uint32_t MAX_FRAME_WIDTH = 256;
+const uint32_t MAX_FRAME_HEIGHT = 64;
 
 const uint32_t MAX_NUMBER_FRAMES = 0x7fffffff;
 
@@ -133,6 +135,7 @@ static bool CaptureMonochromePaletteFromFrameV2(uint32_t frameId);
 static bool IsFullBlackFrame(const uint8_t* frame, uint32_t size);
 static void ConfigureSceneEndHold(uint16_t sceneId, bool interruptable,
                                   uint8_t sceneOptions);
+static bool ValidateLoadedGeometry(bool isV2, const char* sourceTag);
 
 struct SceneResumeState {
   uint16_t nextFrame = 0;
@@ -235,6 +238,50 @@ bool is_real_machine() {
   return *cached;
 }
 #endif
+
+static bool ValidateLoadedGeometry(bool isV2, const char* sourceTag) {
+  auto is_valid_frame = [](uint32_t width, uint32_t height) -> bool {
+    return width > 0 && height > 0 && width <= MAX_FRAME_WIDTH &&
+           height <= MAX_FRAME_HEIGHT;
+  };
+
+  if (!is_valid_frame(g_serumData.fwidth, g_serumData.fheight)) {
+    Log("Invalid frame size in %s: %ux%u", sourceTag, g_serumData.fwidth,
+        g_serumData.fheight);
+    return false;
+  }
+
+  if (isV2) {
+    if (g_serumData.fheight != 32 && g_serumData.fheight != 64) {
+      Log("Invalid base frame height in %s: %u (expected 32 or 64)", sourceTag,
+          g_serumData.fheight);
+      return false;
+    }
+
+    const bool hasExtra =
+        (g_serumData.fwidth_extra > 0 || g_serumData.fheight_extra > 0);
+    if (hasExtra) {
+      if (!is_valid_frame(g_serumData.fwidth_extra, g_serumData.fheight_extra)) {
+        Log("Invalid extra frame size in %s: %ux%u", sourceTag,
+            g_serumData.fwidth_extra, g_serumData.fheight_extra);
+        return false;
+      }
+      if (g_serumData.fheight_extra != 32 && g_serumData.fheight_extra != 64) {
+        Log("Invalid extra frame height in %s: %u (expected 32 or 64)",
+            sourceTag, g_serumData.fheight_extra);
+        return false;
+      }
+    }
+  } else {
+    if (g_serumData.nccolors == 0 || g_serumData.nccolors > 64) {
+      Log("Invalid palette size in %s: nccolors=%u", sourceTag,
+          g_serumData.nccolors);
+      return false;
+    }
+  }
+
+  return true;
+}
 
 static std::string to_lower(const std::string& str) {
   std::string lower_str;
@@ -488,6 +535,13 @@ Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
   mySerum.flags = flags;
   mySerum.nocolors = g_serumData.nocolors;
 
+  if (!ValidateLoadedGeometry(g_serumData.SerumVersion == SERUM_V2,
+                              "cROMc")) {
+    fclose(pfile);
+    enabled = false;
+    return NULL;
+  }
+
   // Set requested frame types
   isoriginalrequested = false;
   isextrarequested = false;
@@ -630,8 +684,8 @@ Serum_Frame_Struc* Serum_LoadFilev2(FILE* pfile, const uint8_t flags,
   fread(&g_serumData.nframes, 4, 1, pfile);
   fread(&g_serumData.nocolors, 4, 1, pfile);
   mySerum.nocolors = g_serumData.nocolors;
-  if ((g_serumData.fwidth == 0) || (g_serumData.fheight == 0) ||
-      (g_serumData.nframes == 0) || (g_serumData.nocolors == 0)) {
+  if ((g_serumData.nframes == 0) || (g_serumData.nocolors == 0) ||
+      !ValidateLoadedGeometry(true, "cROM/v2")) {
     // incorrect file format
     fclose(pfile);
     enabled = false;
@@ -978,6 +1032,11 @@ Serum_Frame_Struc* Serum_LoadFilev1(const char* const filename,
       (g_serumData.nframes == 0) || (g_serumData.nocolors == 0) ||
       (g_serumData.nccolors == 0)) {
     // incorrect file format
+    fclose(pfile);
+    enabled = false;
+    return NULL;
+  }
+  if (!ValidateLoadedGeometry(false, "cROM/v1")) {
     fclose(pfile);
     enabled = false;
     return NULL;
