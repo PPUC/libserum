@@ -81,6 +81,8 @@ bool sceneStartImmediately = false;
 bool sceneIsLastBackgroundFrame = false;
 uint8_t sceneRepeatCount = 0;
 uint8_t sceneOptionFlags = 0;
+uint32_t sceneEndHoldUntilMs = 0;
+uint32_t sceneEndHoldDurationMs = 0;
 uint8_t sceneFrame[256 * 64] = {0};
 uint8_t lastFrame[256 * 64] = {0};
 uint32_t lastFrameId = 0;  // last frame ID identified
@@ -129,6 +131,8 @@ static void InitFrameLookupRuntimeStateFromStoredData(void);
 static void StopV2ColorRotations(void);
 static bool CaptureMonochromePaletteFromFrameV2(uint32_t frameId);
 static bool IsFullBlackFrame(const uint8_t* frame, uint32_t size);
+static void ConfigureSceneEndHold(uint16_t sceneId, bool interruptable,
+                                  uint8_t sceneOptions);
 
 struct SceneResumeState {
   uint16_t nextFrame = 0;
@@ -296,6 +300,8 @@ void Serum_free(void) {
   lastfound_scene = 0;
   lastframe_full_crc_normal = 0;
   lastframe_full_crc_scene = 0;
+  sceneEndHoldUntilMs = 0;
+  sceneEndHoldDurationMs = 0;
   monochromeMode = false;
   monochromePaletteMode = false;
   monochromePaletteV2Length = 0;
@@ -2480,6 +2486,22 @@ static bool IsFullBlackFrame(const uint8_t* frame, uint32_t size) {
   return true;
 }
 
+static void ConfigureSceneEndHold(uint16_t sceneId, bool interruptable,
+                                  uint8_t sceneOptions) {
+  sceneEndHoldUntilMs = 0;
+  sceneEndHoldDurationMs = 0;
+  if (sceneOptions != 0 || interruptable || !g_serumData.sceneGenerator) {
+    return;
+  }
+
+  uint8_t autoStartSeconds = 0;
+  if (g_serumData.sceneGenerator->getSceneAutoStartSeconds(sceneId,
+                                                            autoStartSeconds) &&
+      autoStartSeconds > 0) {
+    sceneEndHoldDurationMs = (uint32_t)autoStartSeconds * 1000;
+  }
+}
+
 SERUM_API uint32_t
 Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
   // return IDENTIFY_NO_FRAME if no new frame detected
@@ -2514,9 +2536,10 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
       if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
         g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
 
-      if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
-          !sceneFrameRequested && sceneCurrentFrame < sceneFrameCount &&
-          !sceneInterruptable) {
+    if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
+        !sceneFrameRequested &&
+        (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
+        !sceneInterruptable) {
         if (keepTriggersInternal ||
             mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
           mySerum.triggerID = 0xffffffff;
@@ -2569,6 +2592,8 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
           // stop any scene
           sceneFrameCount = 0;
           sceneIsLastBackgroundFrame = false;
+          sceneEndHoldUntilMs = 0;
+          sceneEndHoldDurationMs = 0;
           mySerum.rotationtimer = 0;
 
           // lastfound is set by Identify_Frame, check if we have a new PUP
@@ -2597,6 +2622,8 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
                   // exclusive.
                   StopV2ColorRotations();
                 }
+                ConfigureSceneEndHold(lastTriggerID, sceneInterruptable,
+                                      sceneOptionFlags);
                 // Log(DMDUtil_LogLevel_DEBUG, "Serum: trigger ID %lu found in
                 // scenes, frame count=%d, duration=%dms",
                 //     m_pSerum->triggerID, sceneFrameCount,
@@ -2758,12 +2785,15 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
           }
         }
 
-        if (0 == mySerum.rotationtimer &&
-            g_serumData.sceneGenerator->isActive() && !sceneFrameRequested &&
-            sceneCurrentFrame >= sceneFrameCount &&
-            g_serumData.sceneGenerator->getAutoStartSceneInfo(
-                sceneFrameCount, sceneDurationPerFrame, sceneInterruptable,
-                sceneStartImmediately, sceneRepeatCount, sceneOptionFlags)) {
+      if (0 == mySerum.rotationtimer &&
+          g_serumData.sceneGenerator->isActive() && !sceneFrameRequested &&
+          sceneEndHoldUntilMs == 0 &&
+          sceneCurrentFrame >= sceneFrameCount &&
+          g_serumData.sceneGenerator->getAutoStartSceneInfo(
+              sceneFrameCount, sceneDurationPerFrame, sceneInterruptable,
+              sceneStartImmediately, sceneRepeatCount, sceneOptionFlags)) {
+        ConfigureSceneEndHold(g_serumData.sceneGenerator->getAutoStartSceneId(),
+                              sceneInterruptable, sceneOptionFlags);
           mySerum.rotationtimer =
               g_serumData.sceneGenerator->getAutoStartTimer();
           rotationIsScene = true;
@@ -2868,7 +2898,52 @@ uint32_t Serum_ApplyRotationsv1(void) {
 
 uint32_t Serum_RenderScene(void) {
   if (g_serumData.sceneGenerator->isActive() &&
-      sceneCurrentFrame < sceneFrameCount) {
+      (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0)) {
+    const uint32_t now = GetMonotonicTimeMs();
+    if (sceneEndHoldUntilMs > 0) {
+      if (now < sceneEndHoldUntilMs) {
+        mySerum.rotationtimer = sceneEndHoldUntilMs - now;
+        return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_SCENE;
+      }
+
+      // End hold elapsed: finish scene now.
+      sceneEndHoldUntilMs = 0;
+      sceneFrameCount = 0;
+      mySerum.rotationtimer = 0;
+
+      switch (sceneOptionFlags) {
+        case FLAG_SCENE_BLACK_WHEN_FINISHED:
+          if (mySerum.frame32) memset(mySerum.frame32, 0, 32 * mySerum.width32);
+          if (mySerum.frame64) memset(mySerum.frame64, 0, 64 * mySerum.width64);
+          break;
+
+        case FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED:
+          if (lastfound < MAX_NUMBER_FRAMES &&
+              g_serumData.activeframes[lastfound][0] != 0) {
+            Serum_ColorizeWithMetadatav2(lastFrame);
+          } else {
+            if (mySerum.frame32)
+              memset(mySerum.frame32, 0, 32 * mySerum.width32);
+            if (mySerum.frame64)
+              memset(mySerum.frame64, 0, 64 * mySerum.width64);
+          }
+          break;
+
+        case 0:  // keep the last frame of the scene
+        default:
+          if (sceneEndHoldDurationMs > 0 && !sceneInterruptable) {
+            // autoStart+flag0 for non-interruptable scene means timed end-hold.
+            break;
+          }
+          if (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) {
+            sceneIsLastBackgroundFrame = true;
+          }
+          break;
+      }
+
+      return FLAG_RETURNED_V2_SCENE;
+    }
+
     uint16_t result = g_serumData.sceneGenerator->generateFrame(
         lastTriggerID, sceneCurrentFrame, sceneFrame);
     // if result is 0xffff, the frame was generated and we can go
@@ -2888,6 +2963,12 @@ uint32_t Serum_RenderScene(void) {
       }
 
       if (sceneCurrentFrame >= sceneFrameCount) {
+        if (sceneEndHoldDurationMs > 0) {
+          sceneEndHoldUntilMs = now + sceneEndHoldDurationMs;
+          mySerum.rotationtimer = sceneEndHoldDurationMs;
+          return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_SCENE;
+        }
+
         sceneFrameCount = 0;  // scene ended
         mySerum.rotationtimer = 0;
 
@@ -2913,6 +2994,10 @@ uint32_t Serum_RenderScene(void) {
 
           case 0:  // keep the last frame of the scene
           default:
+            if (sceneEndHoldDurationMs > 0 && !sceneInterruptable) {
+              // autoStart+flag0 for non-interruptable scene means timed end-hold.
+              break;
+            }
             if (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) {
               sceneIsLastBackgroundFrame = true;
             }
@@ -3093,7 +3178,8 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
 
   // Do not interrupt an already running non-interruptable scene, unless it's
   // the same scene being retriggered and we are allowed to resume it.
-  if (sceneFrameCount > 0 && sceneCurrentFrame < sceneFrameCount &&
+  if (sceneFrameCount > 0 &&
+      (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
       !sceneInterruptable && sceneId != lastTriggerID) {
     uint32_t wait =
         mySerum.rotationtimer ? mySerum.rotationtimer : sceneDurationPerFrame;
@@ -3134,6 +3220,7 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
   } else {
     StopV2ColorRotations();
   }
+  ConfigureSceneEndHold(sceneId, sceneInterruptable, sceneOptionFlags);
   sceneIsLastBackgroundFrame = false;
   sceneCurrentFrame = 0;
 

@@ -52,6 +52,8 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
   }
 
   m_sceneData.clear();
+  m_autoStartTimer = 0;
+  m_autoStartSceneId = 0;
   std::string line;
   int lineNum = 0;
   while (std::getline(in_csv, line)) {
@@ -95,14 +97,16 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
         data.frameGroups =
             (uint8_t)std::stoi(row[6]) == 0 ? 1 : std::stoi(row[6]);
       if (row.size() >= 8) data.random = (std::stoi(row[7]) == 1);
-      if (row.size() >= 9) {
-        data.autoStart = (uint8_t)std::stoi(row[8]);
-        if (data.autoStart > 0) {
-          m_autoStartTimer = data.autoStart;
-          m_autoStartSceneId = data.sceneId;
-        }
-      }
+      if (row.size() >= 9) data.autoStart = (uint8_t)std::stoi(row[8]);
       if (row.size() >= 10) data.sceneOptions = (uint8_t)std::stoi(row[9]);
+
+      const bool useAutoStartAsEndHold =
+          (data.autoStart > 0) && !data.interruptable &&
+          (data.sceneOptions == 0);
+      if (data.autoStart > 0 && !useAutoStartAsEndHold) {
+        m_autoStartTimer = data.autoStart;
+        m_autoStartSceneId = data.sceneId;
+      }
 
       m_sceneData.push_back(data);
     } catch (...) {
@@ -192,6 +196,19 @@ bool SceneGenerator::getSceneInfo(uint16_t sceneId, uint16_t &frameCount,
   startImmediately = it->immediateStart;
   repeat = it->repeat;
   sceneOptions = it->sceneOptions;
+  return true;
+}
+
+bool SceneGenerator::getSceneAutoStartSeconds(uint16_t sceneId,
+                                              uint8_t &autoStart) const {
+  auto it = std::find_if(
+      m_sceneData.begin(), m_sceneData.end(),
+      [sceneId](const SceneData &data) { return data.sceneId == sceneId; });
+  if (it == m_sceneData.end()) {
+    autoStart = 0;
+    return false;
+  }
+  autoStart = it->autoStart;
   return true;
 }
 

@@ -26,6 +26,8 @@ struct SceneData {
   // 0 - no autostart
   // >= 1 - start this scene after x seconds of inactivity (no new frames), only
   // use once, could be combined with frame groups
+  // if scene flag 0 is used and scene is non-interruptable, this value is used
+  // as end-hold duration for the last frame instead of autostart
   uint8_t autoStart = 0;
   uint8_t sceneOptions = 0;
   // Serialisation using cereal
@@ -51,6 +53,7 @@ class SceneGenerator {
                     uint16_t &durationPerFrame, bool &interruptable,
                     bool &startImmediately, uint8_t &repeat,
                     uint8_t &sceneOptions) const;
+  bool getSceneAutoStartSeconds(uint16_t sceneId, uint8_t &autoStart) const;
   bool getAutoStartSceneInfo(uint16_t &frameCount, uint16_t &durationPerFrame,
                              bool &interruptable, bool &startImmediately,
                              uint8_t &repeat, uint8_t &sceneOptions) const;
@@ -61,6 +64,7 @@ class SceneGenerator {
   int getDepth() const { return m_depth; }
   bool isActive() const { return m_active; }
   uint32_t getAutoStartTimer() const { return 1000 * m_autoStartTimer; }
+  uint16_t getAutoStartSceneId() const { return m_autoStartSceneId; }
   void Reset() {
     m_sceneData.clear();
     m_autoStartTimer = 0;
