@@ -528,9 +528,6 @@ Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
 
   if (!g_serumData.LoadFromFile(filename, flags)) return NULL;
 
-  FILE* pfile = fopen(filename, "rb");
-  if (!pfile) return NULL;
-
   // Update mySerum structure
   mySerum.SerumVersion = g_serumData.SerumVersion;
   mySerum.flags = flags;
@@ -538,7 +535,6 @@ Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
 
   if (!ValidateLoadedGeometry(g_serumData.SerumVersion == SERUM_V2,
                               "cROMc")) {
-    fclose(pfile);
     enabled = false;
     return NULL;
   }
@@ -621,7 +617,6 @@ Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
     mySerum.rotations = (uint8_t*)malloc(MAX_COLOR_ROTATIONS * 3);
     if (!mySerum.frame || !mySerum.palette || !mySerum.rotations) {
       Serum_free();
-      fclose(pfile);
       enabled = false;
       return NULL;
     }
