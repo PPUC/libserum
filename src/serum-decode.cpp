@@ -1232,6 +1232,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   pathbuf += romname;
   pathbuf += '/';
 
+  Log("Searching colorization file for %s in %s", romname, pathbuf.c_str());
+
   // If no specific frame tyoe is requested, activate both
   if ((flags & (FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES)) == 0) {
     flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
