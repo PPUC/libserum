@@ -59,6 +59,7 @@ class SerumData {
   void Clear();
   bool SaveToFile(const char *filename);
   bool LoadFromFile(const char *filename, const uint8_t flags);
+  bool LoadFromBuffer(const uint8_t *data, size_t size, const uint8_t flags);
 
   // Header data
   char rname[64];

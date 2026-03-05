@@ -252,7 +252,7 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
     fseek(fp, headerSize, SEEK_SET);
 
     // Calculate compressed size
-    if (totalSize < headerSize) {
+    if (totalSize <= headerSize) {
       Log("File too small in %s", filename);
       fclose(fp);
       return false;
@@ -283,6 +283,82 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
     return false;
   } catch (...) {
     Log("Unknown exception when opening %s", filename);
+    return false;
+  }
+}
+
+bool SerumData::LoadFromBuffer(const uint8_t *data, size_t size,
+                               const uint8_t flags) {
+  m_loadFlags = flags;
+
+  try {
+    if (!data || size < (4 + sizeof(uint16_t) + sizeof(uint32_t))) {
+      Log("Buffer too small");
+      return false;
+    }
+
+    // Read and verify magic string
+    if (memcmp(data, "CROM", 4) != 0) {
+      Log("Wrong header");
+      return false;
+    }
+
+    uint16_t littleEndianVersion;
+    memcpy(&littleEndianVersion, data + 4, sizeof(uint16_t));
+    concentrateFileVersion = FromLittleEndian16(littleEndianVersion);
+    Log("cROMc version %d", concentrateFileVersion);
+
+    if (concentrateFileVersion < 5) {
+      Log("The cROMc version is too old. Get a newer version.");
+      return false;
+    }
+
+    if (concentrateFileVersion > SERUM_CONCENTRATE_VERSION) {
+      Log("The cROMc version is newer than supported by this libserum.");
+      return false;
+    }
+
+    uint32_t littleEndianSize;
+    memcpy(&littleEndianSize, data + 4 + sizeof(uint16_t), sizeof(uint32_t));
+    const uint32_t originalSize = FromLittleEndian32(littleEndianSize);
+    Log("cROMc size %u", originalSize);
+
+    const size_t headerSize = 4 + sizeof(uint16_t) + sizeof(uint32_t);
+    if (size <= headerSize) {
+      Log("File too small");
+      return false;
+    }
+
+    const size_t compressedSize = size - headerSize;
+    if (compressedSize == 0 || originalSize == 0) {
+      Log("Invalid file size detected");
+      return false;
+    }
+    Log("cROMc compressed size %u", (uint32_t)compressedSize);
+
+    std::string decompressed;
+    decompressed.resize(originalSize);
+    mz_ulong dstLen = originalSize;
+    const int status =
+        uncompress(reinterpret_cast<unsigned char *>(decompressed.data()),
+                   &dstLen, data + headerSize, (mz_ulong)compressedSize);
+    if (status != MZ_OK || dstLen != originalSize) {
+      Log("Decompression error: %d", status);
+      return false;
+    }
+
+    std::istringstream iss(decompressed, std::ios::binary);
+    {
+      cereal::PortableBinaryInputArchive archive(iss);
+      archive(*this);
+    }
+
+    return true;
+  } catch (const std::exception &e) {
+    Log("Exception when loading: %s", e.what());
+    return false;
+  } catch (...) {
+    Log("Unknown exception when loading");
     return false;
   }
 }
