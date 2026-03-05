@@ -108,8 +108,7 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
       if (row.size() >= 10) data.sceneOptions = (uint8_t)std::stoi(row[9]);
 
       const bool useAutoStartAsEndHold =
-          (autoStartRaw > 0) && !data.interruptable &&
-          (data.sceneOptions == 0);
+          (autoStartRaw > 0) && !data.interruptable && (data.sceneOptions == 0);
       if (data.autoStart > 0 && !useAutoStartAsEndHold) {
         m_autoStartTimer = data.autoStart;
         m_autoStartSceneId = data.sceneId;

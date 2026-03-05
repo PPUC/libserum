@@ -3,8 +3,8 @@
 #include <cereal/access.hpp>
 #include <cereal/types/vector.hpp>
 #include <cstdint>
-#include <unordered_map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "LZ4Stream.h"

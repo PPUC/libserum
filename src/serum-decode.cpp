@@ -82,7 +82,7 @@ bool sceneIsLastBackgroundFrame = false;
 uint8_t sceneRepeatCount = 0;
 uint8_t sceneOptionFlags = 0;
 uint32_t sceneEndHoldUntilMs = 0;
-  uint32_t sceneEndHoldDurationMs = 0;
+uint32_t sceneEndHoldDurationMs = 0;
 uint8_t sceneFrame[256 * 64] = {0};
 uint8_t lastFrame[256 * 64] = {0};
 uint32_t lastFrameId = 0;  // last frame ID identified
@@ -262,7 +262,8 @@ static bool ValidateLoadedGeometry(bool isV2, const char* sourceTag) {
     const bool hasExtra =
         (g_serumData.fwidth_extra > 0 || g_serumData.fheight_extra > 0);
     if (hasExtra) {
-      if (!is_valid_frame(g_serumData.fwidth_extra, g_serumData.fheight_extra)) {
+      if (!is_valid_frame(g_serumData.fwidth_extra,
+                          g_serumData.fheight_extra)) {
         Log("Invalid extra frame size in %s: %ux%u", sourceTag,
             g_serumData.fwidth_extra, g_serumData.fheight_extra);
         return false;
@@ -533,8 +534,7 @@ Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
   mySerum.flags = flags;
   mySerum.nocolors = g_serumData.nocolors;
 
-  if (!ValidateLoadedGeometry(g_serumData.SerumVersion == SERUM_V2,
-                              "cROMc")) {
+  if (!ValidateLoadedGeometry(g_serumData.SerumVersion == SERUM_V2, "cROMc")) {
     enabled = false;
     return NULL;
   }
@@ -2598,10 +2598,10 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
       if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
         g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
 
-    if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
-        !sceneFrameRequested &&
-        (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
-        !sceneInterruptable) {
+      if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
+          !sceneFrameRequested &&
+          (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
+          !sceneInterruptable) {
         if (keepTriggersInternal ||
             mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
           mySerum.triggerID = 0xffffffff;
@@ -2847,15 +2847,15 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
           }
         }
 
-      if (0 == mySerum.rotationtimer &&
-          g_serumData.sceneGenerator->isActive() && !sceneFrameRequested &&
-          sceneEndHoldUntilMs == 0 &&
-          sceneCurrentFrame >= sceneFrameCount &&
-          g_serumData.sceneGenerator->getAutoStartSceneInfo(
-              sceneFrameCount, sceneDurationPerFrame, sceneInterruptable,
-              sceneStartImmediately, sceneRepeatCount, sceneOptionFlags)) {
-        ConfigureSceneEndHold(g_serumData.sceneGenerator->getAutoStartSceneId(),
-                              sceneInterruptable, sceneOptionFlags);
+        if (0 == mySerum.rotationtimer &&
+            g_serumData.sceneGenerator->isActive() && !sceneFrameRequested &&
+            sceneEndHoldUntilMs == 0 && sceneCurrentFrame >= sceneFrameCount &&
+            g_serumData.sceneGenerator->getAutoStartSceneInfo(
+                sceneFrameCount, sceneDurationPerFrame, sceneInterruptable,
+                sceneStartImmediately, sceneRepeatCount, sceneOptionFlags)) {
+          ConfigureSceneEndHold(
+              g_serumData.sceneGenerator->getAutoStartSceneId(),
+              sceneInterruptable, sceneOptionFlags);
           mySerum.rotationtimer =
               g_serumData.sceneGenerator->getAutoStartTimer();
           rotationIsScene = true;
@@ -3059,7 +3059,8 @@ uint32_t Serum_RenderScene(void) {
           case 0:  // keep the last frame of the scene
           default:
             if (sceneEndHoldDurationMs > 0 && !sceneInterruptable) {
-              // autoStart+flag0 for non-interruptable scene means timed end-hold.
+              // autoStart+flag0 for non-interruptable scene means timed
+              // end-hold.
               break;
             }
             if (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) {
