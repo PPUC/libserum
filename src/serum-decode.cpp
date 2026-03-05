@@ -299,8 +299,10 @@ static std::optional<std::string> find_case_insensitive_file(
       dir_path;  // make a copy to avoid modifying the original string
 
   if (!std::filesystem::exists(path_copy) ||
-      !std::filesystem::is_directory(path_copy))
+      !std::filesystem::is_directory(path_copy)) {
+    Log("Directory does not exist: %s", dir_path.c_str());
     return std::nullopt;
+  }
 
   std::string lower_filename = to_lower(filename);
 
@@ -313,9 +315,11 @@ static std::optional<std::string> find_case_insensitive_file(
       }
     }
   } catch (const std::filesystem::filesystem_error& e) {
+    Log("Filesystem error when accessing %s: %s", dir_path.c_str(), e.what());
     return std::nullopt;
   }
 
+  Log("File not found: %s/%s", dir_path.c_str(), filename.c_str());
   return std::nullopt;
 }
 
