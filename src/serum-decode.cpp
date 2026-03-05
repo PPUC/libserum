@@ -5,6 +5,7 @@
 #include <miniz/miniz.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -523,18 +524,14 @@ bool Serum_SaveConcentrate(const char* filename) {
   return g_serumData.SaveToFile(concentratePath.c_str());
 }
 
-Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
-                                         const uint8_t flags) {
-  if (!crc32_ready) CRC32encode();
-
-  if (!g_serumData.LoadFromFile(filename, flags)) return NULL;
-
+static Serum_Frame_Struc* Serum_LoadConcentratePrepared(const uint8_t flags) {
   // Update mySerum structure
   mySerum.SerumVersion = g_serumData.SerumVersion;
   mySerum.flags = flags;
   mySerum.nocolors = g_serumData.nocolors;
 
   if (!ValidateLoadedGeometry(g_serumData.SerumVersion == SERUM_V2, "cROMc")) {
+    Log("Failed to vaildate cROMc geometry.");
     enabled = false;
     return NULL;
   }
@@ -644,6 +641,15 @@ Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
   enabled = true;
 
   return &mySerum;
+}
+
+Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
+                                         const uint8_t flags) {
+  if (!crc32_ready) CRC32encode();
+
+  if (!g_serumData.LoadFromFile(filename, flags)) return NULL;
+
+  return Serum_LoadConcentratePrepared(flags);
 }
 
 Serum_Frame_Struc* Serum_LoadFilev2(FILE* pfile, const uint8_t flags,
