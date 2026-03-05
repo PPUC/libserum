@@ -280,9 +280,11 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
     return true;
   } catch (const std::exception &e) {
     Log("Exception when opening %s: %s", filename, e.what());
+    if (fp) fclose(fp);
     return false;
   } catch (...) {
     Log("Unknown exception when opening %s", filename);
+    if (fp) fclose(fp);
     return false;
   }
 }
