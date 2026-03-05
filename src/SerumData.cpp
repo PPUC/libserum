@@ -180,9 +180,9 @@ bool SerumData::SaveToFile(const char *filename) {
 
 bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
   m_loadFlags = flags;
-
+  FILE *fp;
   try {
-    FILE *fp = fopen(filename, "rb");
+    fp = fopen(filename, "rb");
     if (!fp) {
       Log("Failed to open %s", filename);
       return false;
