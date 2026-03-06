@@ -319,7 +319,7 @@ static std::optional<std::string> find_case_insensitive_file(
     return std::nullopt;
   }
 
-  Log("File not found: %s/%s", dir_path.c_str(), filename.c_str());
+  Log("File %s not found in directory %s", filename.c_str(), dir_path.c_str());
   return std::nullopt;
 }
 
