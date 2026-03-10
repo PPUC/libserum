@@ -4,7 +4,9 @@
 #include <cereal/types/unordered_map.hpp>
 #include <cereal/types/vector.hpp>
 #include <algorithm>
+#include <cstring>
 #include <cstdint>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -38,12 +40,66 @@ class SparseVector {
   std::vector<T> decompBuffer;
   bool useIndex;
   bool useCompression;
+  bool useBinaryBitPacking;
+  T bitPackFalseValue;
+  T bitPackTrueValue;
   mutable uint32_t lastAccessedId = UINT32_MAX;
   mutable std::vector<T> lastDecompressed;
+  mutable std::vector<uint8_t> decodeScratch;
   std::vector<uint32_t> packedIds;
   std::vector<uint32_t> packedOffsets;
   std::vector<uint32_t> packedSizes;
   std::vector<uint8_t> packedBlob;
+
+  static constexpr uint8_t kBitPackedMagic = 0xB1;
+
+  size_t rawByteSize() const { return elementSize * sizeof(T); }
+
+  size_t bitPackedByteSize() const {
+    return 1 + ((elementSize + 7) / 8);
+  }
+
+  bool isBitPackedPayload(const uint8_t *payload, size_t size) const {
+    if (!useBinaryBitPacking || !payload) {
+      return false;
+    }
+    if (!std::is_same<T, uint8_t>::value) {
+      return false;
+    }
+    return size == bitPackedByteSize() && payload[0] == kBitPackedMagic;
+  }
+
+  void encodeBitPacked(const T *values, std::vector<uint8_t> &encoded) const {
+    if (!useBinaryBitPacking) {
+      encoded.clear();
+      return;
+    }
+    if (!std::is_same<T, uint8_t>::value) {
+      throw std::runtime_error("Binary bit packing is only supported for uint8_t");
+    }
+
+    encoded.assign(bitPackedByteSize(), 0);
+    encoded[0] = kBitPackedMagic;
+    for (size_t i = 0; i < elementSize; ++i) {
+      if (values[i] != bitPackFalseValue) {
+        encoded[1 + (i / 8)] |= (1u << (i % 8));
+      }
+    }
+  }
+
+  T *decodeBitPackedAndCache(uint32_t elementId, const uint8_t *payload) {
+    if (lastDecompressed.size() < elementSize) {
+      lastDecompressed.resize(elementSize);
+    }
+
+    for (size_t i = 0; i < elementSize; ++i) {
+      const bool isSet = (payload[1 + (i / 8)] & (1u << (i % 8))) != 0;
+      lastDecompressed[i] = isSet ? bitPackTrueValue : bitPackFalseValue;
+    }
+
+    lastAccessedId = elementId;
+    return lastDecompressed.data();
+  }
 
   void clearPacked() {
     packedIds.clear();
@@ -115,12 +171,27 @@ class SparseVector {
   }
 
  public:
-  SparseVector(T noDataSignature, bool index, bool compress = false)
-      : useIndex(index), useCompression(compress) {
+  SparseVector(T noDataSignature, bool index, bool compress = false,
+               bool binaryBitPack = false, T bitPackFalse = 0,
+               T bitPackTrue = 1)
+      : useIndex(index),
+        useCompression(compress),
+        useBinaryBitPacking(binaryBitPack),
+        bitPackFalseValue(bitPackFalse),
+        bitPackTrueValue(bitPackTrue) {
+    if (useBinaryBitPacking && !std::is_same<T, uint8_t>::value) {
+      throw std::runtime_error(
+          "Binary bit packing is only supported for uint8_t SparseVector");
+    }
     noData.resize(1, noDataSignature);
   }
 
-  SparseVector(T noDataSignature) : useIndex(false), useCompression(false) {
+  SparseVector(T noDataSignature)
+      : useIndex(false),
+        useCompression(false),
+        useBinaryBitPacking(false),
+        bitPackFalseValue(noDataSignature),
+        bitPackTrueValue(static_cast<T>(1)) {
     noData.resize(1, noDataSignature);
   }
 
@@ -149,34 +220,59 @@ class SparseVector {
       if (!payload) return noData.data();
 
       if (useCompression) {
-        // Cache-Hit
+        // Cache hit only applies to decoded cache-backed payloads.
         if (elementId == lastAccessedId) {
           return lastDecompressed.data();
         }
 
-        // ensure decompBuffer is large enough
-        if (lastDecompressed.size() < elementSize) {
-          lastDecompressed.resize(elementSize);
+        const size_t rawBytes = rawByteSize();
+        if (decodeScratch.size() < rawBytes) {
+          decodeScratch.resize(rawBytes);
         }
 
         int decompressedSize = LZ4_decompress_safe(
             reinterpret_cast<const char *>(payload),
-            reinterpret_cast<char *>(lastDecompressed.data()),
+            reinterpret_cast<char *>(decodeScratch.data()),
             static_cast<int>(payloadSize),
-            static_cast<int>(elementSize * sizeof(T)));
+            static_cast<int>(rawBytes));
 
         if (decompressedSize < 0) {
+          // Backward compatibility: some payloads may be stored raw.
+          if (isBitPackedPayload(payload, payloadSize)) {
+            return decodeBitPackedAndCache(elementId, payload);
+          }
+
           // Backward compatibility: older payloads may store raw bytes even if
-          // this vector now defaults to compression (e.g. legacy sprite data).
-          if (payloadSize == elementSize * sizeof(T)) {
+          // this vector now defaults to compression.
+          if (payloadSize == rawBytes) {
             return reinterpret_cast<T *>(const_cast<uint8_t *>(payload));
           }
           return noData.data();
         }
 
-        // Cache-Update
+        if (isBitPackedPayload(decodeScratch.data(),
+                               static_cast<size_t>(decompressedSize))) {
+          return decodeBitPackedAndCache(elementId, decodeScratch.data());
+        }
+
+        if (static_cast<size_t>(decompressedSize) != rawBytes) {
+          return noData.data();
+        }
+
+        if (lastDecompressed.size() < elementSize) {
+          lastDecompressed.resize(elementSize);
+        }
+        memcpy(lastDecompressed.data(), decodeScratch.data(), rawBytes);
         lastAccessedId = elementId;
         return lastDecompressed.data();
+      }
+
+      if (isBitPackedPayload(payload, payloadSize)) {
+        return decodeBitPackedAndCache(elementId, payload);
+      }
+
+      if (payloadSize != rawByteSize()) {
+        return noData.data();
       }
 
       return reinterpret_cast<T *>(const_cast<uint8_t *>(payload));
@@ -213,15 +309,25 @@ class SparseVector {
 
     if (parent == nullptr || parent->hasData(elementId)) {
       if (memcmp(values, noData.data(), elementSize * sizeof(T)) != 0) {
+        std::vector<uint8_t> bitPacked;
+        const uint8_t *storeBytes = reinterpret_cast<const uint8_t *>(values);
+        size_t storeByteSize = elementSize * sizeof(T);
+
+        if (useBinaryBitPacking) {
+          encodeBitPacked(values, bitPacked);
+          storeBytes = bitPacked.data();
+          storeByteSize = bitPacked.size();
+        }
+
         if (useCompression) {
           const size_t maxCompressedSize =
-              LZ4_compressBound(static_cast<int>(elementSize * sizeof(T)));
+              LZ4_compressBound(static_cast<int>(storeByteSize));
           std::vector<uint8_t> compBuffer(maxCompressedSize);
 
           int compressedSize =
-              LZ4_compress_HC(reinterpret_cast<const char *>(values),
+              LZ4_compress_HC(reinterpret_cast<const char *>(storeBytes),
                               reinterpret_cast<char *>(compBuffer.data()),
-                              static_cast<int>(elementSize * sizeof(T)),
+                              static_cast<int>(storeByteSize),
                               static_cast<int>(maxCompressedSize),
 #ifdef WRITE_CROMC
                               LZ4HC_CLEVEL_MAX  // max compression level
@@ -236,9 +342,7 @@ class SparseVector {
           }
         } else {
           // Without compression, store directly.
-          const uint8_t *byteValues = reinterpret_cast<const uint8_t *>(values);
-          data[elementId].assign(byteValues,
-                                 byteValues + elementSize * sizeof(T));
+          data[elementId].assign(storeBytes, storeBytes + storeByteSize);
         }
       }
     }
@@ -286,6 +390,7 @@ class SparseVector {
     noData.resize(1);
     lastAccessedId = UINT32_MAX;
     lastDecompressed.clear();
+    decodeScratch.clear();
   }
 
   template <typename U = T>
@@ -338,6 +443,7 @@ class SparseVector {
 
       lastAccessedId = UINT32_MAX;
       lastDecompressed.clear();
+      decodeScratch.clear();
       return;
     }
 
@@ -356,6 +462,7 @@ class SparseVector {
     // Clear cache
     lastAccessedId = UINT32_MAX;
     lastDecompressed.clear();
+    decodeScratch.clear();
   }
 
   friend class cereal::access;
@@ -367,7 +474,8 @@ class SparseVector {
         buildPackedFromData();
       }
 
-      ar(index, noData, elementSize, useIndex, useCompression);
+      ar(index, noData, elementSize, useIndex, useCompression,
+         useBinaryBitPacking, bitPackFalseValue, bitPackTrueValue);
       if (!useIndex) {
         ar(packedIds, packedOffsets, packedSizes, packedBlob);
       }
@@ -382,7 +490,8 @@ class SparseVector {
         buildPackedFromData();
       }
     } else {
-      ar(index, noData, elementSize, useIndex, useCompression);
+      ar(index, noData, elementSize, useIndex, useCompression,
+         useBinaryBitPacking, bitPackFalseValue, bitPackTrueValue);
       data.clear();
       decompBuffer.clear();
       clearPacked();
@@ -394,5 +503,6 @@ class SparseVector {
     // Clear cache
     lastAccessedId = UINT32_MAX;
     lastDecompressed.clear();
+    decodeScratch.clear();
   }
 };
