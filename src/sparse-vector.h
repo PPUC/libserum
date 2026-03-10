@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdint>
 #include <stdexcept>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -108,6 +109,74 @@ class SparseVector {
     packedBlob.clear();
   }
 
+  static uint64_t hashPayload(const uint8_t *bytes, size_t size) {
+    uint64_t hash = 1469598103934665603ull;  // FNV-1a 64-bit offset basis
+    for (size_t i = 0; i < size; ++i) {
+      hash ^= static_cast<uint64_t>(bytes[i]);
+      hash *= 1099511628211ull;  // FNV prime
+    }
+    hash ^= static_cast<uint64_t>(size);
+    hash *= 1099511628211ull;
+    return hash;
+  }
+
+  void deduplicatePackedBlob() {
+    if (packedIds.empty() || packedOffsets.size() != packedIds.size() ||
+        packedSizes.size() != packedIds.size()) {
+      return;
+    }
+
+    std::vector<uint8_t> dedupBlob;
+    dedupBlob.reserve(packedBlob.size());
+
+    // hash -> list of (offset,size) candidates in dedupBlob
+    std::unordered_map<uint64_t, std::vector<std::pair<uint32_t, uint32_t>>>
+        dedupIndex;
+    dedupIndex.reserve(packedIds.size());
+
+    for (size_t i = 0; i < packedIds.size(); ++i) {
+      const uint32_t oldOffset = packedOffsets[i];
+      const uint32_t size = packedSizes[i];
+      if (oldOffset > packedBlob.size() || size > packedBlob.size() - oldOffset) {
+        continue;
+      }
+
+      const uint8_t *payload = packedBlob.data() + oldOffset;
+      const uint64_t payloadHash = hashPayload(payload, size);
+
+      uint32_t foundOffset = UINT32_MAX;
+      auto it = dedupIndex.find(payloadHash);
+      if (it != dedupIndex.end()) {
+        for (const auto &candidate : it->second) {
+          const uint32_t candidateOffset = candidate.first;
+          const uint32_t candidateSize = candidate.second;
+          if (candidateSize != size) {
+            continue;
+          }
+          if (candidateOffset > dedupBlob.size() ||
+              size > dedupBlob.size() - candidateOffset) {
+            continue;
+          }
+          if (memcmp(payload, dedupBlob.data() + candidateOffset, size) == 0) {
+            foundOffset = candidateOffset;
+            break;
+          }
+        }
+      }
+
+      if (foundOffset == UINT32_MAX) {
+        foundOffset = static_cast<uint32_t>(dedupBlob.size());
+        dedupBlob.insert(dedupBlob.end(), payload, payload + size);
+        dedupIndex[payloadHash].push_back({foundOffset, size});
+      }
+
+      packedOffsets[i] = foundOffset;
+      packedSizes[i] = size;
+    }
+
+    packedBlob = std::move(dedupBlob);
+  }
+
   void buildPackedFromData() {
     if (useIndex || data.empty()) {
       return;
@@ -141,6 +210,7 @@ class SparseVector {
     }
 
     data.clear();
+    deduplicatePackedBlob();
   }
 
   const uint8_t *getPackedPayload(uint32_t elementId,
@@ -439,6 +509,7 @@ class SparseVector {
       packedOffsets = std::move(newOffsets);
       packedSizes = std::move(newSizes);
       packedBlob = std::move(newBlob);
+      deduplicatePackedBlob();
       data.clear();
 
       lastAccessedId = UINT32_MAX;
