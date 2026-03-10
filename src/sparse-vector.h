@@ -63,7 +63,15 @@ class SparseVector {
             static_cast<int>(compressed.size()),
             static_cast<int>(elementSize * sizeof(T)));
 
-        if (decompressedSize < 0) return noData.data();
+        if (decompressedSize < 0) {
+          // Backward compatibility: older payloads may store raw bytes even if
+          // this vector now defaults to compression (e.g. legacy sprite data).
+          if (compressed.size() == elementSize * sizeof(T)) {
+            return reinterpret_cast<T *>(
+                const_cast<uint8_t *>(compressed.data()));
+          }
+          return noData.data();
+        }
 
         // Cache-Update
         lastAccessedId = elementId;

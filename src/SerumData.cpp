@@ -28,10 +28,8 @@ SerumData::SerumData()
       spritedescriptionso(0),
       spritedescriptionsc(0),
       isextrasprite(0, true),
-      spriteoriginal(255),    // Do not compress because GetSpriteSize seems to
-                              // have an issue with it.
-      spritemask_extra(255),  // Do not compress because GetSpriteSize seems to
-                              // have an issue with it.
+      spriteoriginal(255, false, true),
+      spritemask_extra(255, false, true),
       spritecolored(0, false, true),
       spritecolored_extra(0, false, true),
       activeframes(1),
