@@ -1,14 +1,14 @@
 #pragma once
 
+#include <algorithm>
 #include <cereal/access.hpp>
 #include <cereal/types/unordered_map.hpp>
 #include <cereal/types/vector.hpp>
-#include <algorithm>
-#include <cstring>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
-#include <utility>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "LZ4Stream.h"
@@ -56,9 +56,7 @@ class SparseVector {
 
   size_t rawByteSize() const { return elementSize * sizeof(T); }
 
-  size_t bitPackedByteSize() const {
-    return 1 + ((elementSize + 7) / 8);
-  }
+  size_t bitPackedByteSize() const { return 1 + ((elementSize + 7) / 8); }
 
   bool isBitPackedPayload(const uint8_t *payload, size_t size) const {
     if (!useBinaryBitPacking || !payload) {
@@ -76,7 +74,8 @@ class SparseVector {
       return;
     }
     if (!std::is_same<T, uint8_t>::value) {
-      throw std::runtime_error("Binary bit packing is only supported for uint8_t");
+      throw std::runtime_error(
+          "Binary bit packing is only supported for uint8_t");
     }
 
     encoded.assign(bitPackedByteSize(), 0);
@@ -137,7 +136,8 @@ class SparseVector {
     for (size_t i = 0; i < packedIds.size(); ++i) {
       const uint32_t oldOffset = packedOffsets[i];
       const uint32_t size = packedSizes[i];
-      if (oldOffset > packedBlob.size() || size > packedBlob.size() - oldOffset) {
+      if (oldOffset > packedBlob.size() ||
+          size > packedBlob.size() - oldOffset) {
         continue;
       }
 
@@ -219,8 +219,8 @@ class SparseVector {
       return nullptr;
     }
 
-    const auto it = std::lower_bound(packedIds.begin(), packedIds.end(),
-                                     elementId);
+    const auto it =
+        std::lower_bound(packedIds.begin(), packedIds.end(), elementId);
     if (it == packedIds.end() || *it != elementId) {
       return nullptr;
     }
@@ -303,8 +303,7 @@ class SparseVector {
         int decompressedSize = LZ4_decompress_safe(
             reinterpret_cast<const char *>(payload),
             reinterpret_cast<char *>(decodeScratch.data()),
-            static_cast<int>(payloadSize),
-            static_cast<int>(rawBytes));
+            static_cast<int>(payloadSize), static_cast<int>(rawBytes));
 
         if (decompressedSize < 0) {
           // Backward compatibility: some payloads may be stored raw.
@@ -493,7 +492,8 @@ class SparseVector {
 
         const uint32_t oldOffset = packedOffsets[i];
         const uint32_t size = packedSizes[i];
-        if (oldOffset > packedBlob.size() || size > packedBlob.size() - oldOffset) {
+        if (oldOffset > packedBlob.size() ||
+            size > packedBlob.size() - oldOffset) {
           continue;
         }
 
