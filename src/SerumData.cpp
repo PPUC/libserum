@@ -269,6 +269,15 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
     DecompressingIStream decompStream(fp, compressedSize, originalSize);
 
     // Deserialize directly from the decompressing stream
+    struct LegacyLoadFlagGuard {
+      explicit LegacyLoadFlagGuard(bool legacy) {
+        sparse_vector_serialization::SetLegacyLoadExpected(legacy);
+      }
+      ~LegacyLoadFlagGuard() {
+        sparse_vector_serialization::SetLegacyLoadExpected(false);
+      }
+    } legacyLoadGuard(concentrateFileVersion <= 5);
+
     {
       cereal::PortableBinaryInputArchive archive(decompStream);
       archive(*this);
@@ -348,6 +357,15 @@ bool SerumData::LoadFromBuffer(const uint8_t *data, size_t size,
     }
 
     std::istringstream iss(decompressed, std::ios::binary);
+    struct LegacyLoadFlagGuard {
+      explicit LegacyLoadFlagGuard(bool legacy) {
+        sparse_vector_serialization::SetLegacyLoadExpected(legacy);
+      }
+      ~LegacyLoadFlagGuard() {
+        sparse_vector_serialization::SetLegacyLoadExpected(false);
+      }
+    } legacyLoadGuard(concentrateFileVersion <= 5);
+
     {
       cereal::PortableBinaryInputArchive archive(iss);
       archive(*this);
