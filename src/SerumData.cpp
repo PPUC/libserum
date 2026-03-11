@@ -4,6 +4,8 @@
 #include "miniz/miniz.h"
 #include "serum-version.h"
 
+bool is_real_machine();
+
 SerumData::SerumData()
     : SerumVersion(0),
       concentrateFileVersion(SERUM_CONCENTRATE_VERSION),
@@ -25,8 +27,12 @@ SerumData::SerumData()
       dyna4cols_v2(0, false, true),
       dyna4cols_v2_extra(0, false, true),
       framesprites(255),
-      spritedescriptionso(0, false, true),
-      spritedescriptionsc(0, false, true),
+      // Adding compression or bitpacking to these vectors may not be worth it
+      // due to their small size and the overhead of compression.
+      // spritedescriptionso(0, false, true),
+      // spritedescriptionsc(0, false, true),
+      spritedescriptionso(0),
+      spritedescriptionsc(0),
       isextrasprite(0, true),
       spriteoriginal(255, false, true),
       spritemask_extra(255, false, true, true, 255, 1),
@@ -59,6 +65,7 @@ SerumData::SerumData()
       dynaspritemasks_extra(255, false, true),
       sprshapemode(0) {
   sceneGenerator = new SceneGenerator();
+  if (is_real_machine()) storage.assign(384u * 1024u * 1024u, 0xA5);
 }
 
 SerumData::~SerumData() {}

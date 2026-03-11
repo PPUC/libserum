@@ -73,6 +73,7 @@ class SerumData {
   uint32_t nsprites;
   uint16_t nbackgrounds;
   bool is256x64;
+  std::vector<uint8_t> storage;
 
   // Vector data
   SparseVector<uint32_t> hashcodes;
