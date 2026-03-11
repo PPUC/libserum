@@ -213,6 +213,25 @@ class SparseVector {
     deduplicatePackedBlob();
   }
 
+  void restoreDataFromPacked() {
+    if (useIndex || packedIds.empty() || !data.empty()) {
+      return;
+    }
+
+    for (size_t i = 0; i < packedIds.size(); ++i) {
+      if (i >= packedOffsets.size() || i >= packedSizes.size()) {
+        continue;
+      }
+      const uint32_t offset = packedOffsets[i];
+      const uint32_t size = packedSizes[i];
+      if (offset > packedBlob.size() || size > packedBlob.size() - offset) {
+        continue;
+      }
+      data[packedIds[i]].assign(packedBlob.begin() + offset,
+                                packedBlob.begin() + offset + size);
+    }
+  }
+
   const uint8_t *getPackedPayload(uint32_t elementId,
                                   uint32_t *payloadSize) const {
     if (packedIds.empty()) {
@@ -365,6 +384,7 @@ class SparseVector {
       throw std::runtime_error("set() must not be used for index");
     }
 
+    restoreDataFromPacked();
     elementSize = size;
     clearPacked();
 
