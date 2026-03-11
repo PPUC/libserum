@@ -1989,7 +1989,8 @@ void CheckDynaShadow(uint16_t* pfr, uint32_t nofr, uint8_t dynacouche,
 
 void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                       bool applySceneBackground = false,
-                      bool blackOutStaticContent = false) {
+                      bool blackOutStaticContent = false,
+                      bool suppressFrameBackgroundImage = false) {
   uint16_t tj, ti;
   // Generate the colorized version of a frame once identified in the crom
   // frames
@@ -2037,7 +2038,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
               pfr[tk] = sceneBackgroundFrame[tk];
-            } else {
+            } else if (!suppressFrameBackgroundImage) {
               pfr[tk] = g_serumData.backgroundframes_v2
                             [g_serumData.backgroundIDs[IDfound][0]][tk];
               if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
@@ -2046,6 +2047,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                     prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
                         (cshft[prot[tk * 2]] + prot[tk * 2 + 1]) %
                             prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
+            } else {
+              // Keep current output pixel: background image is a placeholder.
             }
           }
         } else {
@@ -2131,7 +2134,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
               pfr[tk] = sceneBackgroundFrame[tk];
-            } else {
+            } else if (!suppressFrameBackgroundImage) {
               pfr[tk] = g_serumData.backgroundframes_v2_extra
                             [g_serumData.backgroundIDs[IDfound][0]][tk];
               if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
@@ -2141,6 +2144,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                         (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
                             prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
               }
+            } else {
+              // Keep current output pixel: background image is a placeholder.
             }
           }
         } else {
@@ -2728,9 +2733,13 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
         }
       }
 
-      bool isBackgroundScene = (sceneFrameRequested && sceneFrameCount > 0 &&
+      bool isBackgroundScene = (sceneFrameCount > 0 &&
                                 (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
                                     FLAG_SCENE_AS_BACKGROUND);
+      bool suppressPlaceholderBackground =
+          isBackgroundScene && !sceneFrameRequested;
+      bool isBackgroundSceneRequested =
+          isBackgroundScene && sceneFrameRequested;
       uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
       uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
           spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
@@ -2738,17 +2747,19 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
       memset(nosprite, 255, MAX_SPRITES_PER_FRAME);
 
       bool isspr =
-          (sceneFrameRequested && !isBackgroundScene)
+          (sceneFrameRequested && !isBackgroundSceneRequested)
               ? false
-              : Check_Spritesv2(isBackgroundScene ? lastFrame : frame,
-                                isBackgroundScene ? lastFrameId : lastfound,
-                                nosprite, &nspr, frx, fry, spx, spy, wid, hei);
+              : Check_Spritesv2(
+                    isBackgroundSceneRequested ? lastFrame : frame,
+                    isBackgroundSceneRequested ? lastFrameId : lastfound,
+                    nosprite, &nspr, frx, fry, spx, spy, wid, hei);
       if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
           g_serumData.activeframes[lastfound][0] != 0) {
         if (!sceneIsLastBackgroundFrame) {
-          Colorize_Framev2(frame, lastfound);
+          Colorize_Framev2(frame, lastfound, false, false,
+                           suppressPlaceholderBackground);
         }
-        if (isBackgroundScene || sceneIsLastBackgroundFrame) {
+        if ((isBackgroundSceneRequested) || sceneIsLastBackgroundFrame) {
           Colorize_Framev2(
               lastFrame, lastFrameId, true,
               (sceneOptionFlags & FLAG_SCENE_ONLY_DYNAMIC_CONTENT) ==
@@ -2757,10 +2768,10 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
         if (isspr) {
           uint8_t ti = 0;
           while (ti < nspr) {
-            Colorize_Spritev2(isBackgroundScene ? lastFrame : frame,
-                              nosprite[ti], frx[ti], fry[ti], spx[ti], spy[ti],
-                              wid[ti], hei[ti],
-                              isBackgroundScene ? lastFrameId : lastfound);
+            Colorize_Spritev2(
+                isBackgroundSceneRequested ? lastFrame : frame, nosprite[ti],
+                frx[ti], fry[ti], spx[ti], spy[ti], wid[ti], hei[ti],
+                isBackgroundSceneRequested ? lastFrameId : lastfound);
             ti++;
           }
         }
