@@ -191,3 +191,19 @@ if(BUILD_STATIC)
       target_link_libraries(serum_test_s PUBLIC serum_static)
    endif()
 endif()
+
+if(PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "macos" OR PLATFORM STREQUAL "linux")
+   set(SERUM_LOAD_LINK_TARGET "")
+   if(BUILD_SHARED)
+      set(SERUM_LOAD_LINK_TARGET serum_shared)
+   elseif(BUILD_STATIC)
+      set(SERUM_LOAD_LINK_TARGET serum_static)
+   endif()
+
+   if(SERUM_LOAD_LINK_TARGET)
+      add_executable(serum_load
+         src/serum_load_cli.cpp
+      )
+      target_link_libraries(serum_load PUBLIC ${SERUM_LOAD_LINK_TARGET})
+   endif()
+endif()
