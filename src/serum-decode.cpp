@@ -130,6 +130,8 @@ uint8_t monochromePaletteV2Length = 0;
 uint32_t Serum_RenderScene(void);
 static void BuildFrameLookupVectors(void);
 static uint64_t MakeFrameSignature(uint8_t mask, uint8_t shape, uint32_t hash);
+static uint64_t MakeSceneFrameKey(uint16_t sceneId, uint8_t group,
+                                  uint16_t frameIndex);
 static void InitFrameLookupRuntimeStateFromStoredData(void);
 static void StopV2ColorRotations(void);
 static bool CaptureMonochromePaletteFromFrameV2(uint32_t frameId);
@@ -154,7 +156,6 @@ uint32_t lastfound = 0;         // last frame ID identified (current stream)
 uint32_t lastfound_normal = 0;  // last frame ID for non-scene frames
 uint32_t lastfound_scene = 0;   // last frame ID for scene frames
 uint32_t lastframe_full_crc_normal = 0;
-uint32_t lastframe_full_crc_scene = 0;
 uint32_t lastframe_found = GetMonotonicTimeMs();
 uint32_t lastTriggerID = 0xffffffff;  // last trigger ID found
 uint32_t lasttriggerTimestamp = 0;
@@ -402,7 +403,6 @@ void Serum_free(void) {
   lastfound_normal = 0;
   lastfound_scene = 0;
   lastframe_full_crc_normal = 0;
-  lastframe_full_crc_scene = 0;
   sceneEndHoldUntilMs = 0;
   sceneEndHoldDurationMs = 0;
   monochromeMode = false;
@@ -1394,6 +1394,7 @@ static void BuildFrameLookupVectors(void) {
   uint32_t numSceneFrames = 0;
   g_serumData.frameIsScene.clear();
   g_serumData.sceneFramesBySignature.clear();
+  g_serumData.sceneFrameIdsBySceneKey.clear();
 
   if (g_serumData.nframes == 0) return;
   g_serumData.frameIsScene.resize(g_serumData.nframes, 0);
@@ -1409,6 +1410,8 @@ static void BuildFrameLookupVectors(void) {
     std::unordered_set<uint16_t> uniqueMaskShapeKeys;
     std::vector<std::pair<uint8_t, uint8_t>> uniqueMaskShapes;
     uniqueMaskShapes.reserve(g_serumData.nframes);
+    std::unordered_map<uint64_t, std::vector<uint32_t>> frameIdsBySignature;
+    frameIdsBySignature.reserve(g_serumData.nframes);
 
     for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
       const uint8_t mask = g_serumData.compmaskID[frameId][0];
@@ -1417,10 +1420,18 @@ static void BuildFrameLookupVectors(void) {
       if (uniqueMaskShapeKeys.insert(key).second) {
         uniqueMaskShapes.emplace_back(mask, shape);
       }
+      frameIdsBySignature[MakeFrameSignature(mask, shape,
+                                             g_serumData.hashcodes[frameId][0])]
+          .push_back(frameId);
     }
 
     std::unordered_set<uint64_t> sceneSignatures;
     sceneSignatures.reserve(uniqueMaskShapes.size() * 64);
+    auto append_unique = [](std::vector<uint32_t>& ids, uint32_t frameId) {
+      if (std::find(ids.begin(), ids.end(), frameId) == ids.end()) {
+        ids.push_back(frameId);
+      }
+    };
 
     uint8_t generatedSceneFrame[128 * 32];
     const auto& scenes = g_serumData.sceneGenerator->getSceneData();
@@ -1434,11 +1445,22 @@ static void BuildFrameLookupVectors(void) {
                   true) != 0xffff) {
             continue;
           }
+          std::vector<uint32_t>& matchedFrameIdsBySceneKey =
+              g_serumData.sceneFrameIdsBySceneKey[MakeSceneFrameKey(
+                  scene.sceneId, static_cast<uint8_t>(group), frameIndex)];
           for (const auto& maskShape : uniqueMaskShapes) {
             uint32_t hash = calc_crc32(generatedSceneFrame, maskShape.first,
                                        pixels, maskShape.second);
-            sceneSignatures.insert(
-                MakeFrameSignature(maskShape.first, maskShape.second, hash));
+            uint64_t signature =
+                MakeFrameSignature(maskShape.first, maskShape.second, hash);
+            sceneSignatures.insert(signature);
+            auto frameSigIt = frameIdsBySignature.find(signature);
+            if (frameSigIt == frameIdsBySignature.end()) {
+              continue;
+            }
+            for (uint32_t frameId : frameSigIt->second) {
+              append_unique(matchedFrameIdsBySceneKey, frameId);
+            }
           }
         }
       }
@@ -1456,6 +1478,12 @@ static void BuildFrameLookupVectors(void) {
             .push_back(frameId);
         numSceneFrames++;
       }
+    }
+
+    for (auto& entry : g_serumData.sceneFrameIdsBySceneKey) {
+      auto& ids = entry.second;
+      std::sort(ids.begin(), ids.end());
+      ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
     }
   }
 
@@ -1481,6 +1509,12 @@ static void BuildFrameLookupVectors(void) {
 
 static uint64_t MakeFrameSignature(uint8_t mask, uint8_t shape, uint32_t hash) {
   return (uint64_t(mask) << 40) | (uint64_t(shape) << 32) | hash;
+}
+
+static uint64_t MakeSceneFrameKey(uint16_t sceneId, uint8_t group,
+                                  uint16_t frameIndex) {
+  return (uint64_t(sceneId) << 24) | (uint64_t(group) << 16) |
+         uint64_t(frameIndex);
 }
 
 static void InitFrameLookupRuntimeStateFromStoredData(void) {
@@ -1517,24 +1551,19 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   // Usually the first frame has the ID 0, but lastfound is also initialized
   // with 0. So we need a helper to be able to detect frame 0 as new.
   static bool first_match_normal = true;
-  static bool first_match_scene = true;
 
   if (!cromloaded) return IDENTIFY_NO_FRAME;
+  if (sceneFrameRequested) return IDENTIFY_NO_FRAME;
   memset(framechecked, false, g_serumData.nframes);
-  uint32_t& lastfound_stream =
-      sceneFrameRequested ? lastfound_scene : lastfound_normal;
-  bool& first_match =
-      sceneFrameRequested ? first_match_scene : first_match_normal;
-  uint32_t& lastframe_full_crc = sceneFrameRequested
-                                     ? lastframe_full_crc_scene
-                                     : lastframe_full_crc_normal;
-  uint32_t tj =
-      lastfound_stream;  // we start from the last found frame in this stream
+  uint32_t& lastfound_stream = lastfound_normal;
+  bool& first_match = first_match_normal;
+  uint32_t& lastframe_full_crc = lastframe_full_crc_normal;
+  uint32_t tj = lastfound_stream;  // we start from the last found normal frame
   const uint32_t pixels = g_serumData.is256x64
                               ? (256 * 64)
                               : (g_serumData.fwidth * g_serumData.fheight);
   do {
-    if (g_serumData.frameIsScene[tj] != (sceneFrameRequested ? 1 : 0)) {
+    if (g_serumData.frameIsScene[tj]) {
       if (++tj >= g_serumData.nframes) tj = 0;
       continue;
     }
@@ -1544,41 +1573,11 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
       uint8_t mask = g_serumData.compmaskID[tj][0];
       uint8_t Shape = g_serumData.shapecompmode[tj][0];
       uint32_t Hashc = calc_crc32(frame, mask, pixels, Shape);
-      if (sceneFrameRequested) {
-        auto sigIt = g_serumData.sceneFramesBySignature.find(
-            MakeFrameSignature(mask, Shape, Hashc));
-        if (sigIt == g_serumData.sceneFramesBySignature.end()) {
-          framechecked[tj] = true;
-          if (++tj >= g_serumData.nframes) tj = 0;
-          continue;
-        }
-        for (uint32_t ti : sigIt->second) {
-          if (first_match || ti != lastfound_stream || mask < 255) {
-            lastfound_stream = ti;
-            lastfound = ti;
-            lastframe_full_crc = crc32_fast(frame, pixels);
-            first_match = false;
-            return ti;
-          }
-
-          uint32_t full_crc = crc32_fast(frame, pixels);
-          if (full_crc != lastframe_full_crc) {
-            lastframe_full_crc = full_crc;
-            lastfound = ti;
-            return ti;
-          }
-          lastfound = ti;
-          return IDENTIFY_SAME_FRAME;
-        }
-        framechecked[tj] = true;
-        if (++tj >= g_serumData.nframes) tj = 0;
-        continue;
-      }
       // now we can compare with all the crom frames that share these same mask
       // and shapemode
       uint32_t ti = tj;
       do {
-        if (g_serumData.frameIsScene[ti] != (sceneFrameRequested ? 1 : 0)) {
+        if (g_serumData.frameIsScene[ti]) {
           if (++ti >= g_serumData.nframes) ti = 0;
           continue;
         }
@@ -1690,8 +1689,8 @@ bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
                 (short)spriteDetAreas[tm * 4];  // position of the detection
                                                 // area in the sprite
             short dety = (short)spriteDetAreas[tm * 4 + 1];
-            short detw =
-                (short)spriteDetAreas[tm * 4 + 2];  // size of the detection area
+            short detw = (short)
+                spriteDetAreas[tm * 4 + 2];  // size of the detection area
             short deth = (short)spriteDetAreas[tm * 4 + 3];
             // if the detection area starts before the frame (left or top),
             // continue:
@@ -1841,8 +1840,8 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                 (short)spriteDetAreas[tm * 4];  // position of the detection
                                                 // area in the sprite
             short dety = (short)spriteDetAreas[tm * 4 + 1];
-            short detw =
-                (short)spriteDetAreas[tm * 4 + 2];  // size of the detection area
+            short detw = (short)
+                spriteDetAreas[tm * 4 + 2];  // size of the detection area
             short deth = (short)spriteDetAreas[tm * 4 + 3];
             // if the detection area starts before the frame (left or top),
             // continue:
@@ -2145,9 +2144,11 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
               CheckDynaShadow(pfr, IDfound, dynacouche, isdynapix, ti, tj,
                               g_serumData.fwidth, g_serumData.fheight, false);
               isdynapix[tk] = 1;
-              pfr[tk] = dyna4colsV2[dynacouche * g_serumData.nocolors + frame[tk]];
+              pfr[tk] =
+                  dyna4colsV2[dynacouche * g_serumData.nocolors + frame[tk]];
             } else if (isdynapix[tk] == 0)
-              pfr[tk] = dyna4colsV2[dynacouche * g_serumData.nocolors + frame[tk]];
+              pfr[tk] =
+                  dyna4colsV2[dynacouche * g_serumData.nocolors + frame[tk]];
             prot[tk * 2] = prot[tk * 2 + 1] = 0xffff;
           }
         }
@@ -2199,7 +2200,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         else
           tl = tj * 2 * g_serumData.fwidth + ti * 2;
 
-        if (hasBackground && (frame[tl] == 0) && (backgroundMaskExtra[tk] > 0)) {
+        if (hasBackground && (frame[tl] == 0) &&
+            (backgroundMaskExtra[tk] > 0)) {
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
               pfr[tk] = sceneBackgroundFrame[tk];
@@ -2240,11 +2242,11 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                               g_serumData.fwidth_extra,
                               g_serumData.fheight_extra, true);
               isdynapix[tk] = 1;
-              pfr[tk] =
-                  dyna4colsV2Extra[dynacouche * g_serumData.nocolors + frame[tl]];
+              pfr[tk] = dyna4colsV2Extra[dynacouche * g_serumData.nocolors +
+                                         frame[tl]];
             } else if (isdynapix[tk] == 0)
-              pfr[tk] =
-                  dyna4colsV2Extra[dynacouche * g_serumData.nocolors + frame[tl]];
+              pfr[tk] = dyna4colsV2Extra[dynacouche * g_serumData.nocolors +
+                                         frame[tl]];
             prot[tk * 2] = prot[tk * 2 + 1] = 0xffff;
           }
         }
@@ -2643,7 +2645,8 @@ static void ForceNormalFrameRefreshAfterSceneEnd(void) {
 }
 
 SERUM_API uint32_t
-Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
+Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false,
+                             uint32_t forcedFrameId = IDENTIFY_NO_FRAME) {
   // return IDENTIFY_NO_FRAME if no new frame detected
   // return 0 if new frame with no rotation detected
   // return > 0 if new frame with rotations detected, the value is the delay
@@ -2652,7 +2655,18 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
   mySerum.frameID = IDENTIFY_NO_FRAME;
 
   // Let's first identify the incoming frame among the ones we have in the crom
-  uint32_t frameID = Identify_Frame(frame, sceneFrameRequested);
+  uint32_t frameID = IDENTIFY_NO_FRAME;
+  if (forcedFrameId < MAX_NUMBER_FRAMES) {
+    frameID = forcedFrameId;
+    if (sceneFrameRequested) {
+      lastfound_scene = forcedFrameId;
+    } else {
+      lastfound_normal = forcedFrameId;
+    }
+    lastfound = forcedFrameId;
+  } else {
+    frameID = Identify_Frame(frame, sceneFrameRequested);
+  }
   uint32_t now = GetMonotonicTimeMs();
   bool rotationIsScene = false;
   if (is_real_machine() && !showStatusMessages) {
@@ -3096,7 +3110,33 @@ uint32_t Serum_RenderScene(void) {
     // if result is 0xffff, the frame was generated and we can go
     if (0xffff == result) {
       mySerum.rotationtimer = sceneDurationPerFrame;
-      Serum_ColorizeWithMetadatav2(sceneFrame, true);
+      uint32_t directSceneFrameId = IDENTIFY_NO_FRAME;
+      uint8_t currentGroup = 0;
+      if (g_serumData.sceneGenerator->getCurrentGroup(lastTriggerID,
+                                                      currentGroup)) {
+        auto sceneKeyIt = g_serumData.sceneFrameIdsBySceneKey.find(
+            MakeSceneFrameKey(lastTriggerID, currentGroup, sceneCurrentFrame));
+        if (sceneKeyIt != g_serumData.sceneFrameIdsBySceneKey.end() &&
+            !sceneKeyIt->second.empty()) {
+          const std::vector<uint32_t>& candidates = sceneKeyIt->second;
+          directSceneFrameId = candidates.front();
+          auto it =
+              std::find(candidates.begin(), candidates.end(), lastfound_scene);
+          if (it != candidates.end()) {
+            directSceneFrameId = *it;
+          }
+        }
+      }
+      if (directSceneFrameId >= MAX_NUMBER_FRAMES) {
+        Log("Missing direct scene frame lookup for sceneId=%u group=%u "
+            "frameIndex=%u",
+            lastTriggerID, currentGroup, sceneCurrentFrame);
+        sceneFrameCount = 0;
+        mySerum.rotationtimer = 0;
+        ForceNormalFrameRefreshAfterSceneEnd();
+        return 0;
+      }
+      Serum_ColorizeWithMetadatav2(sceneFrame, true, directSceneFrameId);
       sceneCurrentFrame++;
       if (sceneCurrentFrame >= sceneFrameCount && sceneRepeatCount > 0) {
         if (sceneRepeatCount == 1) {

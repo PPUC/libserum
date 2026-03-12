@@ -123,6 +123,7 @@ void SerumData::Clear() {
   sprshapemode.clear();
   frameIsScene.clear();
   sceneFramesBySignature.clear();
+  sceneFrameIdsBySceneKey.clear();
   spriteWidthV1.clear();
   spriteHeightV1.clear();
   spriteWidthV2.clear();

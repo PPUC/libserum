@@ -244,6 +244,19 @@ bool SceneGenerator::getAutoStartSceneInfo(
   return false;
 }
 
+bool SceneGenerator::getCurrentGroup(uint16_t sceneId, uint8_t &group) const {
+  auto it = std::find_if(
+      m_sceneData.begin(), m_sceneData.end(),
+      [sceneId](const SceneData &data) { return data.sceneId == sceneId; });
+  if (it == m_sceneData.end()) {
+    group = 0;
+    return false;
+  }
+
+  group = it->currentGroup;
+  return group > 0;
+}
+
 uint16_t SceneGenerator::generateFrame(uint16_t sceneId, uint16_t frameIndex,
                                        uint8_t *buffer, int group,
                                        bool disableTimer) {

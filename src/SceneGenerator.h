@@ -58,6 +58,7 @@ class SceneGenerator {
   bool getAutoStartSceneInfo(uint16_t &frameCount, uint16_t &durationPerFrame,
                              bool &interruptable, bool &startImmediately,
                              uint8_t &repeat, uint8_t &sceneOptions) const;
+  bool getCurrentGroup(uint16_t sceneId, uint8_t &group) const;
   uint16_t generateFrame(uint16_t sceneId, uint16_t frameIndex, uint8_t *buffer,
                          int group = -1, bool disableTimer = false);
   bool matchesSceneMarkerRegion(const uint16_t *frameData) const;
