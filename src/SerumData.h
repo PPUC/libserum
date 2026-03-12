@@ -62,17 +62,17 @@ class SerumData {
   bool LoadFromBuffer(const uint8_t *data, size_t size, const uint8_t flags);
 
   // Header data
-  char rname[64];
+  char romName[64];
   uint8_t SerumVersion;
   uint16_t concentrateFileVersion;
-  uint32_t fwidth, fheight;
-  uint32_t fwidth_extra, fheight_extra;
-  uint32_t nframes;
-  uint32_t nocolors, nccolors;
-  uint32_t ncompmasks, nmovmasks;
-  uint32_t nsprites;
-  uint16_t nbackgrounds;
-  bool is256x64;
+  uint32_t frameWidth, frameHeight;
+  uint32_t extraFrameWidth, extraFrameHeight;
+  uint32_t frameCount;
+  uint32_t colorCount, classicColorCount;
+  uint32_t comparisonMaskCount, movementMaskCount;
+  uint32_t spriteCount;
+  uint16_t backgroundCount;
+  bool isNative256x64;
   std::vector<uint8_t> storage;
 
   // Vector data
@@ -148,9 +148,10 @@ class SerumData {
 
   template <class Archive>
   void serialize(Archive &ar) {
-    ar(rname, SerumVersion, fwidth, fheight, fwidth_extra, fheight_extra,
-       nframes, nocolors, nccolors, ncompmasks, nmovmasks, nsprites,
-       nbackgrounds, is256x64, hashcodes, shapecompmode, compmaskID, movrctID,
+    ar(romName, SerumVersion, frameWidth, frameHeight, extraFrameWidth,
+       extraFrameHeight, frameCount, colorCount, classicColorCount,
+       comparisonMaskCount, movementMaskCount, spriteCount, backgroundCount,
+       isNative256x64, hashcodes, shapecompmode, compmaskID, movrctID,
        compmasks, movrcts, cpal, isextraframe, cframes, cframes_v2,
        cframes_v2_extra, dynamasks, dynamasks_extra, dyna4cols, dyna4cols_v2,
        dyna4cols_v2_extra, framesprites, spritedescriptionso,
@@ -190,8 +191,8 @@ class SerumData {
                         : std::vector<SceneData>{});
     } else {
       if (SERUM_V2 == SerumVersion &&
-          ((fheight == 32 && !(m_loadFlags & FLAG_REQUEST_64P_FRAMES)) ||
-           (fheight == 64 && !(m_loadFlags & FLAG_REQUEST_32P_FRAMES)))) {
+          ((frameHeight == 32 && !(m_loadFlags & FLAG_REQUEST_64P_FRAMES)) ||
+           (frameHeight == 64 && !(m_loadFlags & FLAG_REQUEST_32P_FRAMES)))) {
         isextraframe.clearIndex();
         isextrabackground.clearIndex();
         isextrasprite.clearIndex();
@@ -217,7 +218,7 @@ class SerumData {
       ar(loadedScenes);
       if (sceneGenerator) {
         sceneGenerator->setSceneData(std::move(loadedScenes));
-        sceneGenerator->setDepth(nocolors == 16 ? 4 : 2);
+        sceneGenerator->setDepth(colorCount == 16 ? 4 : 2);
       }
     }
   }

@@ -145,8 +145,8 @@ bool SceneGenerator::generateDump(const std::string &dump_filename, int id) {
       continue;  // Skip scenes that don't match the specified ID
     }
 
-    int goups = scene.frameGroups > 0 ? scene.frameGroups : 1;
-    for (int group = 1; group <= goups; group++) {
+    int groups = scene.frameGroups > 0 ? scene.frameGroups : 1;
+    for (int group = 1; group <= groups; group++) {
       for (int frameIndex = 0; frameIndex < scene.frameCount; frameIndex++) {
         cumulative_duration += static_cast<uint32_t>(scene.durationPerFrame);
 

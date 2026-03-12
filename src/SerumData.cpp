@@ -9,7 +9,7 @@ bool is_real_machine();
 SerumData::SerumData()
     : SerumVersion(0),
       concentrateFileVersion(SERUM_CONCENTRATE_VERSION),
-      is256x64(false),
+      isNative256x64(false),
       hashcodes(0, true),
       shapecompmode(0),
       compmaskID(255),
