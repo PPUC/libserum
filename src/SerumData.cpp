@@ -127,6 +127,11 @@ void SerumData::Clear() {
   sceneGroupFrameTableOffset.clear();
   sceneGroupFrameTableLength.clear();
   sceneGroupFrameIdsFlat.clear();
+  rotationLookupColorsV2.clear();
+  rotationLookupMetaV2.clear();
+  rotationLookupColorsV2Extra.clear();
+  rotationLookupMetaV2Extra.clear();
+  spriteDetectionPlanV2.clear();
   spriteWidthV1.clear();
   spriteHeightV1.clear();
   spriteWidthV2.clear();

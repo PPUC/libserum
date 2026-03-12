@@ -44,6 +44,23 @@ inline uint32_t FromLittleEndian32(uint32_t value) {
 
 class SerumData {
  public:
+  struct SpriteDetectionPlanEntryV2 {
+    uint8_t spriteId = 0;
+    uint16_t minX = 0;
+    uint16_t minY = 0;
+    uint16_t maxX = 0;
+    uint16_t maxY = 0;
+    uint16_t spriteWidth = 0;
+    uint16_t spriteHeight = 0;
+    bool shapeCheck = false;
+
+    template <class Archive>
+    void serialize(Archive &ar) {
+      ar(spriteId, minX, minY, maxX, maxY, spriteWidth, spriteHeight,
+         shapeCheck);
+    }
+  };
+
   SerumData();
   ~SerumData();
 
@@ -132,6 +149,11 @@ class SerumData {
   std::unordered_map<uint32_t, uint32_t> sceneGroupFrameTableOffset;
   std::unordered_map<uint32_t, uint16_t> sceneGroupFrameTableLength;
   std::vector<uint32_t> sceneGroupFrameIdsFlat;
+  std::vector<std::vector<uint16_t>> rotationLookupColorsV2;
+  std::vector<std::vector<uint16_t>> rotationLookupMetaV2;
+  std::vector<std::vector<uint16_t>> rotationLookupColorsV2Extra;
+  std::vector<std::vector<uint16_t>> rotationLookupMetaV2Extra;
+  std::vector<std::vector<SpriteDetectionPlanEntryV2>> spriteDetectionPlanV2;
   std::vector<uint16_t> spriteWidthV1;
   std::vector<uint16_t> spriteHeightV1;
   std::vector<uint16_t> spriteWidthV2;
@@ -173,15 +195,19 @@ class SerumData {
       if (concentrateFileVersion >= 6) {
         ar(frameIsScene, sceneFramesBySignature, sceneFrameIdsBySceneKey,
            sceneGroupFrameTableOffset, sceneGroupFrameTableLength,
-           sceneGroupFrameIdsFlat, spriteWidthV1, spriteHeightV1,
-           spriteWidthV2, spriteHeightV2);
+           sceneGroupFrameIdsFlat, rotationLookupColorsV2, rotationLookupMetaV2,
+           rotationLookupColorsV2Extra, rotationLookupMetaV2Extra,
+           spriteDetectionPlanV2, spriteWidthV1, spriteHeightV1, spriteWidthV2,
+           spriteHeightV2);
       }
     } else {
       if (concentrateFileVersion >= 6) {
         ar(frameIsScene, sceneFramesBySignature, sceneFrameIdsBySceneKey,
            sceneGroupFrameTableOffset, sceneGroupFrameTableLength,
-           sceneGroupFrameIdsFlat, spriteWidthV1, spriteHeightV1,
-           spriteWidthV2, spriteHeightV2);
+           sceneGroupFrameIdsFlat, rotationLookupColorsV2, rotationLookupMetaV2,
+           rotationLookupColorsV2Extra, rotationLookupMetaV2Extra,
+           spriteDetectionPlanV2, spriteWidthV1, spriteHeightV1, spriteWidthV2,
+           spriteHeightV2);
       } else {
         frameIsScene.clear();
         sceneFramesBySignature.clear();
@@ -189,6 +215,11 @@ class SerumData {
         sceneGroupFrameTableOffset.clear();
         sceneGroupFrameTableLength.clear();
         sceneGroupFrameIdsFlat.clear();
+        rotationLookupColorsV2.clear();
+        rotationLookupMetaV2.clear();
+        rotationLookupColorsV2Extra.clear();
+        rotationLookupMetaV2Extra.clear();
+        spriteDetectionPlanV2.clear();
         spriteWidthV1.clear();
         spriteHeightV1.clear();
         spriteWidthV2.clear();

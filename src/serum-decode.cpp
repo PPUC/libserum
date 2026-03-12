@@ -143,6 +143,8 @@ static void ForceNormalFrameRefreshAfterSceneEnd(void);
 static void EnsureValidOutputDimensions(void);
 static bool ValidateLoadedGeometry(bool isV2, const char* sourceTag);
 static void RebuildSpriteSizeCaches(void);
+static void RebuildRotationLookupTablesV2(void);
+static void RebuildSpriteDetectionPlanV2(void);
 
 struct SceneResumeState {
   uint16_t nextFrame = 0;
@@ -381,6 +383,95 @@ static void RebuildSpriteSizeCaches(void) {
       }
       g_serumData.spriteWidthV2[i] = static_cast<uint16_t>(maxW);
       g_serumData.spriteHeightV2[i] = static_cast<uint16_t>(maxH);
+    }
+  }
+}
+
+static void RebuildRotationLookupTablesV2(void) {
+  if (g_serumData.SerumVersion != SERUM_V2 || g_serumData.frameCount == 0) {
+    g_serumData.rotationLookupColorsV2.clear();
+    g_serumData.rotationLookupMetaV2.clear();
+    g_serumData.rotationLookupColorsV2Extra.clear();
+    g_serumData.rotationLookupMetaV2Extra.clear();
+    return;
+  }
+
+  if (g_serumData.rotationLookupColorsV2.size() == g_serumData.frameCount &&
+      g_serumData.rotationLookupMetaV2.size() == g_serumData.frameCount &&
+      g_serumData.rotationLookupColorsV2Extra.size() ==
+          g_serumData.frameCount &&
+      g_serumData.rotationLookupMetaV2Extra.size() == g_serumData.frameCount) {
+    return;
+  }
+
+  g_serumData.rotationLookupColorsV2.assign(g_serumData.frameCount, {});
+  g_serumData.rotationLookupMetaV2.assign(g_serumData.frameCount, {});
+  g_serumData.rotationLookupColorsV2Extra.assign(g_serumData.frameCount, {});
+  g_serumData.rotationLookupMetaV2Extra.assign(g_serumData.frameCount, {});
+
+  auto buildLookup = [](uint16_t* rotations, std::vector<uint16_t>& colors,
+                        std::vector<uint16_t>& meta) {
+    if (!rotations) return;
+    colors.reserve(64);
+    meta.reserve(64);
+    for (uint16_t rotationId = 0; rotationId < MAX_COLOR_ROTATION_V2;
+         ++rotationId) {
+      const uint16_t length = rotations[rotationId * MAX_LENGTH_COLOR_ROTATION];
+      if (length == 0) continue;
+      for (uint16_t pos = 0; pos < length; ++pos) {
+        const uint16_t color =
+            rotations[rotationId * MAX_LENGTH_COLOR_ROTATION + 2 + pos];
+        if (std::find(colors.begin(), colors.end(), color) != colors.end()) {
+          continue;
+        }
+        colors.push_back(color);
+        meta.push_back(static_cast<uint16_t>((rotationId << 8) | (pos & 0xff)));
+      }
+    }
+  };
+
+  for (uint32_t frameId = 0; frameId < g_serumData.frameCount; ++frameId) {
+    buildLookup(g_serumData.colorrotations_v2[frameId],
+                g_serumData.rotationLookupColorsV2[frameId],
+                g_serumData.rotationLookupMetaV2[frameId]);
+    buildLookup(g_serumData.colorrotations_v2_extra[frameId],
+                g_serumData.rotationLookupColorsV2Extra[frameId],
+                g_serumData.rotationLookupMetaV2Extra[frameId]);
+  }
+}
+
+static void RebuildSpriteDetectionPlanV2(void) {
+  if (g_serumData.SerumVersion != SERUM_V2 || g_serumData.frameCount == 0) {
+    g_serumData.spriteDetectionPlanV2.clear();
+    return;
+  }
+
+  if (g_serumData.spriteDetectionPlanV2.size() == g_serumData.frameCount) {
+    return;
+  }
+
+  g_serumData.spriteDetectionPlanV2.assign(g_serumData.frameCount, {});
+  for (uint32_t frameId = 0; frameId < g_serumData.frameCount; ++frameId) {
+    uint8_t* frameSprites = g_serumData.framesprites[frameId];
+    uint16_t* frameSpriteBB = g_serumData.framespriteBB[frameId];
+    auto& plan = g_serumData.spriteDetectionPlanV2[frameId];
+    for (uint8_t i = 0; i < MAX_SPRITES_PER_FRAME && frameSprites[i] < 255;
+         ++i) {
+      const uint8_t spriteId = frameSprites[i];
+      SerumData::SpriteDetectionPlanEntryV2 entry;
+      entry.spriteId = spriteId;
+      entry.minX = frameSpriteBB[i * 4];
+      entry.minY = frameSpriteBB[i * 4 + 1];
+      entry.maxX = frameSpriteBB[i * 4 + 2];
+      entry.maxY = frameSpriteBB[i * 4 + 3];
+      entry.spriteWidth = (spriteId < g_serumData.spriteWidthV2.size())
+                              ? g_serumData.spriteWidthV2[spriteId]
+                              : 0;
+      entry.spriteHeight = (spriteId < g_serumData.spriteHeightV2.size())
+                               ? g_serumData.spriteHeightV2[spriteId]
+                               : 0;
+      entry.shapeCheck = g_serumData.sprshapemode[spriteId][0] > 0;
+      plan.push_back(entry);
     }
   }
 }
@@ -1398,6 +1489,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     } else {
       InitFrameLookupRuntimeStateFromStoredData();
     }
+    RebuildRotationLookupTablesV2();
+    RebuildSpriteDetectionPlanV2();
   }
   if (is_real_machine()) {
     monochromeMode = true;
@@ -1839,16 +1932,62 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                      uint16_t* pwid, uint16_t* phei) {
   uint8_t* frameSprites = g_serumData.framesprites[quelleframe];
   uint16_t* frameSpriteBB = g_serumData.framespriteBB[quelleframe];
+  const std::vector<SerumData::SpriteDetectionPlanEntryV2>* spritePlan =
+      nullptr;
+  if (quelleframe < g_serumData.spriteDetectionPlanV2.size()) {
+    spritePlan = &g_serumData.spriteDetectionPlanV2[quelleframe];
+  }
+  // TODO(v6-cleanup): remove legacy sparse-vector fallback once we decide to
+  // enforce presence of prebuilt spriteDetectionPlanV2 for all supported load
+  // paths. The fallback currently exists for:
+  // 1) backward compatibility with v5 cROMc (no persisted plan),
+  // 2) defensive behavior when v6 runtime state is incomplete/corrupt.
+  const bool usePlan = spritePlan && !spritePlan->empty();
+  size_t planIndex = 0;
   uint8_t ti = 0;
   uint32_t mdword;
   *nspr = 0;
   bool isshapedframe = false;
-  while ((ti < MAX_SPRITES_PER_FRAME) && (frameSprites[ti] < 255)) {
-    uint8_t qspr = frameSprites[ti];
-    uint8_t* Frame = recframe;
+  while (
+      (usePlan && planIndex < spritePlan->size()) ||
+      (!usePlan && (ti < MAX_SPRITES_PER_FRAME) && (frameSprites[ti] < 255))) {
+    uint8_t qspr;
+    short minxBB;
+    short minyBB;
+    short maxxBB;
+    short maxyBB;
+    int spw = 0;
+    int sph = 0;
     bool isshapecheck = false;
-    if (g_serumData.sprshapemode[qspr][0] > 0) {
-      isshapecheck = true;
+
+    if (usePlan) {
+      const SerumData::SpriteDetectionPlanEntryV2& planEntry =
+          (*spritePlan)[planIndex++];
+      qspr = planEntry.spriteId;
+      minxBB = static_cast<short>(planEntry.minX);
+      minyBB = static_cast<short>(planEntry.minY);
+      maxxBB = static_cast<short>(planEntry.maxX);
+      maxyBB = static_cast<short>(planEntry.maxY);
+      spw = static_cast<int>(planEntry.spriteWidth);
+      sph = static_cast<int>(planEntry.spriteHeight);
+      isshapecheck = planEntry.shapeCheck;
+    } else {
+      qspr = frameSprites[ti];
+      minxBB = static_cast<short>(frameSpriteBB[ti * 4]);
+      minyBB = static_cast<short>(frameSpriteBB[ti * 4 + 1]);
+      maxxBB = static_cast<short>(frameSpriteBB[ti * 4 + 2]);
+      maxyBB = static_cast<short>(frameSpriteBB[ti * 4 + 3]);
+      isshapecheck = g_serumData.sprshapemode[qspr][0] > 0;
+      spw = (qspr < g_serumData.spriteWidthV2.size())
+                ? g_serumData.spriteWidthV2[qspr]
+                : 0;
+      sph = (qspr < g_serumData.spriteHeightV2.size())
+                ? g_serumData.spriteHeightV2[qspr]
+                : 0;
+    }
+
+    uint8_t* Frame = recframe;
+    if (isshapecheck) {
       if (!isshapedframe) {
         for (int i = 0; i < g_serumData.frameWidth * g_serumData.frameHeight;
              i++) {
@@ -1861,12 +2000,6 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
       }
       Frame = frameshape;
     }
-    int spw = (qspr < g_serumData.spriteWidthV2.size())
-                  ? g_serumData.spriteWidthV2[qspr]
-                  : 0;
-    int sph = (qspr < g_serumData.spriteHeightV2.size())
-                  ? g_serumData.spriteHeightV2[qspr]
-                  : 0;
     uint8_t* spriteOriginal = g_serumData.spriteoriginal[qspr];
     uint16_t* spriteDetAreas = g_serumData.spritedetareas[qspr];
     uint32_t* spriteDetDwords = g_serumData.spritedetdwords[qspr];
@@ -1875,10 +2008,6 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
       GetSpriteSize(qspr, &spw, &sph, spriteOriginal, MAX_SPRITE_WIDTH,
                     MAX_SPRITE_HEIGHT);
     }
-    short minxBB = (short)(frameSpriteBB[ti * 4]);
-    short minyBB = (short)(frameSpriteBB[ti * 4 + 1]);
-    short maxxBB = (short)(frameSpriteBB[ti * 4 + 2]);
-    short maxyBB = (short)(frameSpriteBB[ti * 4 + 3]);
     for (uint32_t tm = 0; tm < MAX_SPRITE_DETECT_AREAS; tm++) {
       if (spriteDetAreas[tm * 4] == 0xffff) continue;
       // we look for the sprite in the frame sent
@@ -1980,7 +2109,7 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
         }
       }
     }
-    ti++;
+    if (!usePlan) ti++;
   }
   if (*nspr > 0) return true;
   return false;
@@ -2034,12 +2163,34 @@ bool CheckExtraFrameAvailable(uint32_t frID) {
 
 bool ColorInRotation(uint32_t IDfound, uint16_t col, uint16_t* norot,
                      uint16_t* posinrot, bool isextra) {
-  uint16_t* pcol = NULL;
-  if (isextra)
-    pcol = g_serumData.colorrotations_v2_extra[IDfound];
-  else
-    pcol = g_serumData.colorrotations_v2[IDfound];
   *norot = 0xffff;
+  if (IDfound < g_serumData.frameCount) {
+    const std::vector<std::vector<uint16_t>>& lookupColors =
+        isextra ? g_serumData.rotationLookupColorsV2Extra
+                : g_serumData.rotationLookupColorsV2;
+    const std::vector<std::vector<uint16_t>>& lookupMeta =
+        isextra ? g_serumData.rotationLookupMetaV2Extra
+                : g_serumData.rotationLookupMetaV2;
+    if (IDfound < lookupColors.size() && IDfound < lookupMeta.size()) {
+      const std::vector<uint16_t>& frameColors = lookupColors[IDfound];
+      const std::vector<uint16_t>& frameMeta = lookupMeta[IDfound];
+      for (size_t i = 0; i < frameColors.size() && i < frameMeta.size(); ++i) {
+        if (frameColors[i] == col) {
+          *norot = static_cast<uint16_t>((frameMeta[i] >> 8) & 0xff);
+          *posinrot = static_cast<uint16_t>(frameMeta[i] & 0xff);
+          return true;
+        }
+      }
+    }
+  }
+
+  // TODO(v6-cleanup): remove this legacy scan once we decide to require
+  // persisted/rebuilt rotation lookup vectors for all supported load paths.
+  // The fallback is currently kept for:
+  // 1) backward compatibility with v5 cROMc (no persisted lookup tables),
+  // 2) defensive behavior when v6 lookup initialization is missing.
+  uint16_t* pcol = isextra ? g_serumData.colorrotations_v2_extra[IDfound]
+                           : g_serumData.colorrotations_v2[IDfound];
   for (uint32_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
     for (uint32_t tj = 2; tj < 2u + pcol[ti * MAX_LENGTH_COLOR_ROTATION];
          tj++)  // val [0] is for length and val [1] is for duration in ms
