@@ -136,6 +136,12 @@ void SerumData::Clear() {
   frameHasRotationV2.clear();
   frameHasRotationV2Extra.clear();
   spriteDetectionPlanV2.clear();
+  backgroundMaskSegmentOffsetByFrame.clear();
+  backgroundMaskSegmentLengthByFrame.clear();
+  backgroundMaskSegments.clear();
+  backgroundMaskExtraSegmentOffsetByFrame.clear();
+  backgroundMaskExtraSegmentLengthByFrame.clear();
+  backgroundMaskExtraSegments.clear();
   identifyBucketOffsetByMaskShape.clear();
   identifyBucketLengthByMaskShape.clear();
   identifyBucketFrameIds.clear();

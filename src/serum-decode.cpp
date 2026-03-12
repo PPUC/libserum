@@ -160,6 +160,7 @@ static void RebuildIdentifyBuckets(void);
 static void RebuildSceneRuntimeInfoLookup(void);
 static void RebuildRotationLookupTablesV2(void);
 static void RebuildSpriteDetectionPlanV2(void);
+static void RebuildBackgroundMaskSegmentsV2(void);
 static bool TryGetSceneRuntimeInfo(uint16_t sceneId,
                                    SerumData::SceneRuntimeInfoV2& outInfo);
 
@@ -605,6 +606,81 @@ static void RebuildSpriteDetectionPlanV2(void) {
       plan.push_back(entry);
     }
   }
+}
+
+static void RebuildBackgroundMaskSegmentsV2(void) {
+  if (g_serumData.SerumVersion != SERUM_V2 || g_serumData.frameCount == 0) {
+    g_serumData.backgroundMaskSegmentOffsetByFrame.clear();
+    g_serumData.backgroundMaskSegmentLengthByFrame.clear();
+    g_serumData.backgroundMaskSegments.clear();
+    g_serumData.backgroundMaskExtraSegmentOffsetByFrame.clear();
+    g_serumData.backgroundMaskExtraSegmentLengthByFrame.clear();
+    g_serumData.backgroundMaskExtraSegments.clear();
+    return;
+  }
+
+  if (g_serumData.backgroundMaskSegmentOffsetByFrame.size() ==
+          g_serumData.frameCount &&
+      g_serumData.backgroundMaskSegmentLengthByFrame.size() ==
+          g_serumData.frameCount &&
+      g_serumData.backgroundMaskExtraSegmentOffsetByFrame.size() ==
+          g_serumData.frameCount &&
+      g_serumData.backgroundMaskExtraSegmentLengthByFrame.size() ==
+          g_serumData.frameCount) {
+    return;
+  }
+
+  auto buildSegmentsForMask =
+      [&](bool isExtra, std::vector<uint32_t>& offsets,
+          std::vector<uint32_t>& lengths,
+          std::vector<SerumData::BackgroundMaskSegmentV2>& segments) {
+        const uint32_t width =
+            isExtra ? g_serumData.extraFrameWidth : g_serumData.frameWidth;
+        const uint32_t height =
+            isExtra ? g_serumData.extraFrameHeight : g_serumData.frameHeight;
+
+        offsets.assign(g_serumData.frameCount, UINT32_MAX);
+        lengths.assign(g_serumData.frameCount, 0);
+        segments.clear();
+        if (width == 0 || height == 0) return;
+
+        for (uint32_t frameId = 0; frameId < g_serumData.frameCount;
+             ++frameId) {
+          uint8_t* mask = isExtra ? g_serumData.backgroundmask_extra[frameId]
+                                  : g_serumData.backgroundmask[frameId];
+          if (!mask) continue;
+
+          const uint32_t frameOffset = static_cast<uint32_t>(segments.size());
+          uint32_t segmentCount = 0;
+          for (uint32_t y = 0; y < height; ++y) {
+            const uint32_t rowStart = y * width;
+            uint32_t x = 0;
+            while (x < width) {
+              while (x < width && mask[rowStart + x] == 0) ++x;
+              if (x >= width) break;
+              const uint32_t startX = x;
+              while (x < width && mask[rowStart + x] > 0) ++x;
+              const uint32_t endX = x - 1;
+              segments.push_back({static_cast<uint16_t>(y),
+                                  static_cast<uint16_t>(startX),
+                                  static_cast<uint16_t>(endX)});
+              segmentCount++;
+            }
+          }
+          if (segmentCount > 0) {
+            offsets[frameId] = frameOffset;
+            lengths[frameId] = segmentCount;
+          }
+        }
+      };
+
+  buildSegmentsForMask(false, g_serumData.backgroundMaskSegmentOffsetByFrame,
+                       g_serumData.backgroundMaskSegmentLengthByFrame,
+                       g_serumData.backgroundMaskSegments);
+  buildSegmentsForMask(true,
+                       g_serumData.backgroundMaskExtraSegmentOffsetByFrame,
+                       g_serumData.backgroundMaskExtraSegmentLengthByFrame,
+                       g_serumData.backgroundMaskExtraSegments);
 }
 
 void Serum_free(void) {
@@ -1632,6 +1708,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     RebuildSceneRuntimeInfoLookup();
     RebuildRotationLookupTablesV2();
     RebuildSpriteDetectionPlanV2();
+    RebuildBackgroundMaskSegmentsV2();
   }
   if (is_real_machine()) {
     monochromeMode = true;
@@ -2448,7 +2525,6 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
       isoriginalrequested) {
     const uint16_t bgId = g_serumData.backgroundIDs[IDfound][0];
     const bool hasBackground = bgId < g_serumData.backgroundCount;
-    uint8_t* backgroundMask = g_serumData.backgroundmask[IDfound];
     uint8_t* dynamasks = g_serumData.dynamasks[IDfound];
     uint16_t* cframesV2 = g_serumData.cframes_v2[IDfound];
     uint16_t* dyna4colsV2 = g_serumData.dyna4cols_v2[IDfound];
@@ -2478,10 +2554,27 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
           sceneBackgroundFrame, pSceneBackgroundFrame,
           g_serumData.frameWidth * g_serumData.frameHeight * sizeof(uint16_t));
     memset(isdynapix, 0, g_serumData.frameHeight * g_serumData.frameWidth);
+    const SerumData::BackgroundMaskSegmentV2* maskSegments = nullptr;
+    uint32_t maskSegOffset = UINT32_MAX;
+    uint32_t maskSegLength = 0;
+    if (IDfound < g_serumData.backgroundMaskSegmentOffsetByFrame.size() &&
+        IDfound < g_serumData.backgroundMaskSegmentLengthByFrame.size()) {
+      maskSegOffset = g_serumData.backgroundMaskSegmentOffsetByFrame[IDfound];
+      maskSegLength = g_serumData.backgroundMaskSegmentLengthByFrame[IDfound];
+      if (maskSegOffset != UINT32_MAX && maskSegLength > 0 &&
+          maskSegOffset + maskSegLength <=
+              g_serumData.backgroundMaskSegments.size()) {
+        maskSegments =
+            g_serumData.backgroundMaskSegments.data() + maskSegOffset;
+      }
+    }
+    uint32_t segmentCursor = 0;
     for (tj = 0; tj < g_serumData.frameHeight; tj++) {
-      for (ti = 0; ti < g_serumData.frameWidth; ti++) {
-        uint16_t tk = tj * g_serumData.frameWidth + ti;
-        if (hasBackground && (frame[tk] == 0) && (backgroundMask[tk] > 0)) {
+      const uint16_t rowStart = tj * g_serumData.frameWidth;
+
+      auto processPixel = [&](uint16_t x, bool maskActive) {
+        const uint16_t tk = rowStart + x;
+        if (hasBackground && maskActive && (frame[tk] == 0)) {
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
               pfr[tk] = sceneBackgroundFrame[tk];
@@ -2497,37 +2590,79 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
               // Keep current output pixel: background image is a placeholder.
             }
           }
-        } else {
-          uint8_t dynamicLayerIndex = dynamasks[tk];
-          if (dynamicLayerIndex == 255) {
-            if (isdynapix[tk] == 0) {
-              if (blackOutStaticContent && hasBackground && (frame[tk] > 0) &&
-                  (backgroundMask[tk] > 0)) {
-                pfr[tk] = sceneBackgroundFrame[tk];
-              } else {
-                pfr[tk] = cframesV2[tk];
-                if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                    &prot[tk * 2 + 1], false))
-                  pfr[tk] =
-                      prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                          (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                              prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
-              }
-            }
-          } else {
-            if (frame[tk] > 0) {
-              CheckDynaShadow(pfr, IDfound, dynamicLayerIndex, isdynapix, ti,
-                              tj, g_serumData.frameWidth,
-                              g_serumData.frameHeight, false);
-              isdynapix[tk] = 1;
-              pfr[tk] = dyna4colsV2[dynamicLayerIndex * g_serumData.colorCount +
-                                    frame[tk]];
-            } else if (isdynapix[tk] == 0)
-              pfr[tk] = dyna4colsV2[dynamicLayerIndex * g_serumData.colorCount +
-                                    frame[tk]];
-            prot[tk * 2] = prot[tk * 2 + 1] = 0xffff;
-          }
+          return;
         }
+
+        uint8_t dynamicLayerIndex = dynamasks[tk];
+        if (dynamicLayerIndex == 255) {
+          if (isdynapix[tk] == 0) {
+            if (blackOutStaticContent && hasBackground && (frame[tk] > 0) &&
+                maskActive) {
+              pfr[tk] = sceneBackgroundFrame[tk];
+            } else {
+              pfr[tk] = cframesV2[tk];
+              if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
+                                  &prot[tk * 2 + 1], false))
+                pfr[tk] =
+                    prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
+                        (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
+                            prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
+            }
+          }
+        } else {
+          if (frame[tk] > 0) {
+            CheckDynaShadow(pfr, IDfound, dynamicLayerIndex, isdynapix, x, tj,
+                            g_serumData.frameWidth, g_serumData.frameHeight,
+                            false);
+            isdynapix[tk] = 1;
+            pfr[tk] = dyna4colsV2[dynamicLayerIndex * g_serumData.colorCount +
+                                  frame[tk]];
+          } else if (isdynapix[tk] == 0) {
+            pfr[tk] = dyna4colsV2[dynamicLayerIndex * g_serumData.colorCount +
+                                  frame[tk]];
+          }
+          prot[tk * 2] = prot[tk * 2 + 1] = 0xffff;
+        }
+      };
+
+      if (!maskSegments) {
+        for (ti = 0; ti < g_serumData.frameWidth; ti++) {
+          processPixel(ti, false);
+        }
+        continue;
+      }
+
+      while (segmentCursor < maskSegLength &&
+             maskSegments[segmentCursor].row < tj) {
+        segmentCursor++;
+      }
+      uint32_t rowSegmentStart = segmentCursor;
+      while (segmentCursor < maskSegLength &&
+             maskSegments[segmentCursor].row == tj) {
+        segmentCursor++;
+      }
+      uint32_t rowSegmentEnd = segmentCursor;
+
+      if (rowSegmentStart == rowSegmentEnd) {
+        for (ti = 0; ti < g_serumData.frameWidth; ti++) {
+          processPixel(ti, false);
+        }
+        continue;
+      }
+
+      uint16_t xCursor = 0;
+      for (uint32_t seg = rowSegmentStart; seg < rowSegmentEnd; ++seg) {
+        uint16_t segStart = maskSegments[seg].startX;
+        uint16_t segEnd = maskSegments[seg].endX;
+        if (segStart > g_serumData.frameWidth)
+          segStart = g_serumData.frameWidth;
+        if (segEnd >= g_serumData.frameWidth)
+          segEnd = g_serumData.frameWidth - 1;
+        for (; xCursor < segStart; ++xCursor) processPixel(xCursor, false);
+        for (; xCursor <= segEnd; ++xCursor) processPixel(xCursor, true);
+      }
+      for (; xCursor < g_serumData.frameWidth; ++xCursor) {
+        processPixel(xCursor, false);
       }
     }
   }
@@ -2537,7 +2672,6 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
       isextrarequested) {
     const uint16_t bgId = g_serumData.backgroundIDs[IDfound][0];
     const bool hasBackground = bgId < g_serumData.backgroundCount;
-    uint8_t* backgroundMaskExtra = g_serumData.backgroundmask_extra[IDfound];
     uint8_t* dynamasksExtra = g_serumData.dynamasks_extra[IDfound];
     uint16_t* cframesV2Extra = g_serumData.cframes_v2_extra[IDfound];
     uint16_t* dyna4colsV2Extra = g_serumData.dyna4cols_v2_extra[IDfound];
@@ -2568,17 +2702,35 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                  sizeof(uint16_t));
     memset(isdynapix, 0,
            g_serumData.extraFrameHeight * g_serumData.extraFrameWidth);
+    const SerumData::BackgroundMaskSegmentV2* maskSegmentsExtra = nullptr;
+    uint32_t maskSegExtraOffset = UINT32_MAX;
+    uint32_t maskSegExtraLength = 0;
+    if (IDfound < g_serumData.backgroundMaskExtraSegmentOffsetByFrame.size() &&
+        IDfound < g_serumData.backgroundMaskExtraSegmentLengthByFrame.size()) {
+      maskSegExtraOffset =
+          g_serumData.backgroundMaskExtraSegmentOffsetByFrame[IDfound];
+      maskSegExtraLength =
+          g_serumData.backgroundMaskExtraSegmentLengthByFrame[IDfound];
+      if (maskSegExtraOffset != UINT32_MAX && maskSegExtraLength > 0 &&
+          maskSegExtraOffset + maskSegExtraLength <=
+              g_serumData.backgroundMaskExtraSegments.size()) {
+        maskSegmentsExtra =
+            g_serumData.backgroundMaskExtraSegments.data() + maskSegExtraOffset;
+      }
+    }
+    uint32_t segmentExtraCursor = 0;
     for (tj = 0; tj < g_serumData.extraFrameHeight; tj++) {
-      for (ti = 0; ti < g_serumData.extraFrameWidth; ti++) {
-        uint16_t tk = tj * g_serumData.extraFrameWidth + ti;
+      const uint16_t rowStart = tj * g_serumData.extraFrameWidth;
+
+      auto processPixel = [&](uint16_t x, bool maskActive) {
+        uint16_t tk = rowStart + x;
         uint16_t tl;
         if (g_serumData.extraFrameHeight == 64)
-          tl = tj / 2 * g_serumData.frameWidth + ti / 2;
+          tl = tj / 2 * g_serumData.frameWidth + x / 2;
         else
-          tl = tj * 2 * g_serumData.frameWidth + ti * 2;
+          tl = tj * 2 * g_serumData.frameWidth + x * 2;
 
-        if (hasBackground && (frame[tl] == 0) &&
-            (backgroundMaskExtra[tk] > 0)) {
+        if (hasBackground && maskActive && (frame[tl] == 0)) {
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
               pfr[tk] = sceneBackgroundFrame[tk];
@@ -2595,40 +2747,82 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
               // Keep current output pixel: background image is a placeholder.
             }
           }
-        } else {
-          uint8_t dynamicLayerIndex = dynamasksExtra[tk];
-          if (dynamicLayerIndex == 255) {
-            if (isdynapix[tk] == 0) {
-              if (blackOutStaticContent && hasBackground && (frame[tl] > 0) &&
-                  (backgroundMaskExtra[tk] > 0)) {
-                pfr[tk] = sceneBackgroundFrame[tk];
-              } else {
-                pfr[tk] = cframesV2Extra[tk];
-                if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                    &prot[tk * 2 + 1], true)) {
-                  pfr[tk] =
-                      prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                          (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                              prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
-                }
+          return;
+        }
+
+        uint8_t dynamicLayerIndex = dynamasksExtra[tk];
+        if (dynamicLayerIndex == 255) {
+          if (isdynapix[tk] == 0) {
+            if (blackOutStaticContent && hasBackground && (frame[tl] > 0) &&
+                maskActive) {
+              pfr[tk] = sceneBackgroundFrame[tk];
+            } else {
+              pfr[tk] = cframesV2Extra[tk];
+              if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
+                                  &prot[tk * 2 + 1], true)) {
+                pfr[tk] =
+                    prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
+                        (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
+                            prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
               }
             }
-          } else {
-            if (frame[tl] > 0) {
-              CheckDynaShadow(pfr, IDfound, dynamicLayerIndex, isdynapix, ti,
-                              tj, g_serumData.extraFrameWidth,
-                              g_serumData.extraFrameHeight, true);
-              isdynapix[tk] = 1;
-              pfr[tk] =
-                  dyna4colsV2Extra[dynamicLayerIndex * g_serumData.colorCount +
-                                   frame[tl]];
-            } else if (isdynapix[tk] == 0)
-              pfr[tk] =
-                  dyna4colsV2Extra[dynamicLayerIndex * g_serumData.colorCount +
-                                   frame[tl]];
-            prot[tk * 2] = prot[tk * 2 + 1] = 0xffff;
           }
+        } else {
+          if (frame[tl] > 0) {
+            CheckDynaShadow(pfr, IDfound, dynamicLayerIndex, isdynapix, x, tj,
+                            g_serumData.extraFrameWidth,
+                            g_serumData.extraFrameHeight, true);
+            isdynapix[tk] = 1;
+            pfr[tk] =
+                dyna4colsV2Extra[dynamicLayerIndex * g_serumData.colorCount +
+                                 frame[tl]];
+          } else if (isdynapix[tk] == 0) {
+            pfr[tk] =
+                dyna4colsV2Extra[dynamicLayerIndex * g_serumData.colorCount +
+                                 frame[tl]];
+          }
+          prot[tk * 2] = prot[tk * 2 + 1] = 0xffff;
         }
+      };
+
+      if (!maskSegmentsExtra) {
+        for (ti = 0; ti < g_serumData.extraFrameWidth; ti++) {
+          processPixel(ti, false);
+        }
+        continue;
+      }
+
+      while (segmentExtraCursor < maskSegExtraLength &&
+             maskSegmentsExtra[segmentExtraCursor].row < tj) {
+        segmentExtraCursor++;
+      }
+      uint32_t rowSegmentStart = segmentExtraCursor;
+      while (segmentExtraCursor < maskSegExtraLength &&
+             maskSegmentsExtra[segmentExtraCursor].row == tj) {
+        segmentExtraCursor++;
+      }
+      uint32_t rowSegmentEnd = segmentExtraCursor;
+
+      if (rowSegmentStart == rowSegmentEnd) {
+        for (ti = 0; ti < g_serumData.extraFrameWidth; ti++) {
+          processPixel(ti, false);
+        }
+        continue;
+      }
+
+      uint16_t xCursor = 0;
+      for (uint32_t seg = rowSegmentStart; seg < rowSegmentEnd; ++seg) {
+        uint16_t segStart = maskSegmentsExtra[seg].startX;
+        uint16_t segEnd = maskSegmentsExtra[seg].endX;
+        if (segStart > g_serumData.extraFrameWidth)
+          segStart = g_serumData.extraFrameWidth;
+        if (segEnd >= g_serumData.extraFrameWidth)
+          segEnd = g_serumData.extraFrameWidth - 1;
+        for (; xCursor < segStart; ++xCursor) processPixel(xCursor, false);
+        for (; xCursor <= segEnd; ++xCursor) processPixel(xCursor, true);
+      }
+      for (; xCursor < g_serumData.extraFrameWidth; ++xCursor) {
+        processPixel(xCursor, false);
       }
     }
   }

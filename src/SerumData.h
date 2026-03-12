@@ -88,6 +88,17 @@ class SerumData {
     }
   };
 
+  struct BackgroundMaskSegmentV2 {
+    uint16_t row = 0;
+    uint16_t startX = 0;
+    uint16_t endX = 0;
+
+    template <class Archive>
+    void serialize(Archive &ar) {
+      ar(row, startX, endX);
+    }
+  };
+
   SerumData();
   ~SerumData();
 
@@ -185,6 +196,12 @@ class SerumData {
   std::vector<uint8_t> frameHasRotationV2;
   std::vector<uint8_t> frameHasRotationV2Extra;
   std::vector<std::vector<SpriteDetectionPlanEntryV2>> spriteDetectionPlanV2;
+  std::vector<uint32_t> backgroundMaskSegmentOffsetByFrame;
+  std::vector<uint32_t> backgroundMaskSegmentLengthByFrame;
+  std::vector<BackgroundMaskSegmentV2> backgroundMaskSegments;
+  std::vector<uint32_t> backgroundMaskExtraSegmentOffsetByFrame;
+  std::vector<uint32_t> backgroundMaskExtraSegmentLengthByFrame;
+  std::vector<BackgroundMaskSegmentV2> backgroundMaskExtraSegments;
   std::vector<uint32_t> identifyBucketOffsetByMaskShape;
   std::vector<uint32_t> identifyBucketLengthByMaskShape;
   std::vector<uint32_t> identifyBucketFrameIds;
@@ -237,6 +254,10 @@ class SerumData {
            rotationLookupColorsV2Extra, rotationLookupMetaV2Extra,
            rotationPlanV2, rotationPlanV2Extra, frameHasRotationV2,
            frameHasRotationV2Extra, spriteDetectionPlanV2,
+           backgroundMaskSegmentOffsetByFrame,
+           backgroundMaskSegmentLengthByFrame, backgroundMaskSegments,
+           backgroundMaskExtraSegmentOffsetByFrame,
+           backgroundMaskExtraSegmentLengthByFrame, backgroundMaskExtraSegments,
            identifyBucketOffsetByMaskShape, identifyBucketLengthByMaskShape,
            identifyBucketFrameIds, sceneRuntimeInfoById, autoStartSceneIdV2,
            autoStartTimerMsV2, hasAutoStartSceneV2, spriteWidthV1,
@@ -250,6 +271,10 @@ class SerumData {
            rotationLookupColorsV2Extra, rotationLookupMetaV2Extra,
            rotationPlanV2, rotationPlanV2Extra, frameHasRotationV2,
            frameHasRotationV2Extra, spriteDetectionPlanV2,
+           backgroundMaskSegmentOffsetByFrame,
+           backgroundMaskSegmentLengthByFrame, backgroundMaskSegments,
+           backgroundMaskExtraSegmentOffsetByFrame,
+           backgroundMaskExtraSegmentLengthByFrame, backgroundMaskExtraSegments,
            identifyBucketOffsetByMaskShape, identifyBucketLengthByMaskShape,
            identifyBucketFrameIds, sceneRuntimeInfoById, autoStartSceneIdV2,
            autoStartTimerMsV2, hasAutoStartSceneV2, spriteWidthV1,
@@ -270,6 +295,12 @@ class SerumData {
         frameHasRotationV2.clear();
         frameHasRotationV2Extra.clear();
         spriteDetectionPlanV2.clear();
+        backgroundMaskSegmentOffsetByFrame.clear();
+        backgroundMaskSegmentLengthByFrame.clear();
+        backgroundMaskSegments.clear();
+        backgroundMaskExtraSegmentOffsetByFrame.clear();
+        backgroundMaskExtraSegmentLengthByFrame.clear();
+        backgroundMaskExtraSegments.clear();
         identifyBucketOffsetByMaskShape.clear();
         identifyBucketLengthByMaskShape.clear();
         identifyBucketFrameIds.clear();
