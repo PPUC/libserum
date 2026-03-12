@@ -57,6 +57,7 @@ class SparseVector {
   std::vector<uint32_t> packedSizes;
   std::vector<uint8_t> packedBlob;
   mutable std::unordered_map<uint32_t, uint32_t> packedIndexById;
+  mutable std::vector<uint32_t> packedDenseIndexById;
 
   static constexpr uint8_t kBitPackedMagic = 0xB1;
 
@@ -118,6 +119,7 @@ class SparseVector {
     packedSizes.clear();
     packedBlob.clear();
     packedIndexById.clear();
+    packedDenseIndexById.clear();
     lastPayloadId = UINT32_MAX;
     lastPayloadPtr = nullptr;
     lastPayloadSize = 0;
@@ -126,15 +128,30 @@ class SparseVector {
   void ensurePackedIndex() const {
     if (packedIds.empty()) {
       packedIndexById.clear();
+      packedDenseIndexById.clear();
       return;
     }
-    if (packedIndexById.size() == packedIds.size()) {
+    if (packedIndexById.size() == packedIds.size() &&
+        !packedDenseIndexById.empty()) {
       return;
     }
     packedIndexById.clear();
     packedIndexById.reserve(packedIds.size());
     for (uint32_t i = 0; i < packedIds.size(); ++i) {
       packedIndexById.emplace(packedIds[i], i);
+    }
+
+    // Fast path for dense/small ID spaces (frame IDs, sprite IDs, etc).
+    // This avoids hash lookup overhead in operator[] hot loops.
+    packedDenseIndexById.clear();
+    const uint32_t maxPackedId = packedIds.back();
+    if (maxPackedId <= 1000000 &&
+        maxPackedId <= static_cast<uint32_t>(packedIds.size() * 8)) {
+      packedDenseIndexById.assign(static_cast<size_t>(maxPackedId) + 1,
+                                  UINT32_MAX);
+      for (uint32_t i = 0; i < packedIds.size(); ++i) {
+        packedDenseIndexById[packedIds[i]] = i;
+      }
     }
   }
 
@@ -272,12 +289,21 @@ class SparseVector {
     }
 
     ensurePackedIndex();
-    auto it = packedIndexById.find(elementId);
-    if (it == packedIndexById.end()) {
-      return nullptr;
+    uint32_t packedIndex = UINT32_MAX;
+    if (elementId < packedDenseIndexById.size()) {
+      packedIndex = packedDenseIndexById[elementId];
+      if (packedIndex == UINT32_MAX) {
+        return nullptr;
+      }
+    } else {
+      auto it = packedIndexById.find(elementId);
+      if (it == packedIndexById.end()) {
+        return nullptr;
+      }
+      packedIndex = it->second;
     }
 
-    const size_t idx = static_cast<size_t>(it->second);
+    const size_t idx = static_cast<size_t>(packedIndex);
     if (idx >= packedOffsets.size() || idx >= packedSizes.size()) {
       return nullptr;
     }
@@ -431,7 +457,11 @@ class SparseVector {
       return elementId < index.size() && !index[elementId].empty() &&
              index[elementId][0] != noData[0];
     if (!packedIds.empty()) {
-      return std::binary_search(packedIds.begin(), packedIds.end(), elementId);
+      ensurePackedIndex();
+      if (elementId < packedDenseIndexById.size()) {
+        return packedDenseIndexById[elementId] != UINT32_MAX;
+      }
+      return packedIndexById.find(elementId) != packedIndexById.end();
     }
     return data.find(elementId) != data.end();
   }
@@ -597,6 +627,8 @@ class SparseVector {
       packedSizes = std::move(newSizes);
       packedBlob = std::move(newBlob);
       deduplicatePackedBlob();
+      packedIndexById.clear();
+      packedDenseIndexById.clear();
       data.clear();
 
       lastPayloadId = UINT32_MAX;
@@ -656,6 +688,7 @@ class SparseVector {
       clearPacked();
       if (!useIndex && !data.empty()) {
         buildPackedFromData();
+        ensurePackedIndex();
       }
     } else {
       ar(index, noData, elementSize, useIndex, useCompression,
@@ -665,6 +698,7 @@ class SparseVector {
       clearPacked();
       if (!useIndex) {
         ar(packedIds, packedOffsets, packedSizes, packedBlob);
+        ensurePackedIndex();
       }
     }
 
