@@ -123,6 +123,10 @@ void SerumData::Clear() {
   sprshapemode.clear();
   frameIsScene.clear();
   sceneFramesBySignature.clear();
+  spriteWidthV1.clear();
+  spriteHeightV1.clear();
+  spriteWidthV2.clear();
+  spriteHeightV2.clear();
 }
 
 bool SerumData::SaveToFile(const char *filename) {

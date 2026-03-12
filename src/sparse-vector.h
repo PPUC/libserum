@@ -48,7 +48,9 @@ class SparseVector {
   mutable const uint8_t *lastPayloadPtr = nullptr;
   mutable uint32_t lastPayloadSize = 0;
   mutable uint32_t lastAccessedId = UINT32_MAX;
+  mutable uint32_t secondAccessedId = UINT32_MAX;
   mutable std::vector<T> lastDecompressed;
+  mutable std::vector<T> secondDecompressed;
   mutable std::vector<uint8_t> decodeScratch;
   std::vector<uint32_t> packedIds;
   std::vector<uint32_t> packedOffsets;
@@ -91,6 +93,11 @@ class SparseVector {
   }
 
   T *decodeBitPackedAndCache(uint32_t elementId, const uint8_t *payload) {
+    if (lastAccessedId != UINT32_MAX && lastAccessedId != elementId &&
+        !lastDecompressed.empty()) {
+      secondAccessedId = lastAccessedId;
+      secondDecompressed.swap(lastDecompressed);
+    }
     if (lastDecompressed.size() < elementSize) {
       lastDecompressed.resize(elementSize);
     }
@@ -302,6 +309,12 @@ class SparseVector {
           !lastDecompressed.empty()) {
         return lastDecompressed.data();
       }
+      if (useCompression && elementId == secondAccessedId &&
+          !secondDecompressed.empty()) {
+        std::swap(lastAccessedId, secondAccessedId);
+        std::swap(lastDecompressed, secondDecompressed);
+        return lastDecompressed.data();
+      }
 
       const uint8_t *payload = nullptr;
       uint32_t payloadSize = 0;
@@ -371,6 +384,11 @@ class SparseVector {
           return noData.data();
         }
 
+        if (lastAccessedId != UINT32_MAX && lastAccessedId != elementId &&
+            !lastDecompressed.empty()) {
+          secondAccessedId = lastAccessedId;
+          secondDecompressed.swap(lastDecompressed);
+        }
         if (lastDecompressed.size() < elementSize) {
           lastDecompressed.resize(elementSize);
         }
@@ -508,7 +526,9 @@ class SparseVector {
     lastPayloadPtr = nullptr;
     lastPayloadSize = 0;
     lastAccessedId = UINT32_MAX;
+    secondAccessedId = UINT32_MAX;
     lastDecompressed.clear();
+    secondDecompressed.clear();
     decodeScratch.clear();
   }
 
@@ -566,7 +586,9 @@ class SparseVector {
       lastPayloadPtr = nullptr;
       lastPayloadSize = 0;
       lastAccessedId = UINT32_MAX;
+      secondAccessedId = UINT32_MAX;
       lastDecompressed.clear();
+      secondDecompressed.clear();
       decodeScratch.clear();
       return;
     }
@@ -588,7 +610,9 @@ class SparseVector {
     lastPayloadPtr = nullptr;
     lastPayloadSize = 0;
     lastAccessedId = UINT32_MAX;
+    secondAccessedId = UINT32_MAX;
     lastDecompressed.clear();
+    secondDecompressed.clear();
     decodeScratch.clear();
   }
 
@@ -632,7 +656,9 @@ class SparseVector {
     lastPayloadPtr = nullptr;
     lastPayloadSize = 0;
     lastAccessedId = UINT32_MAX;
+    secondAccessedId = UINT32_MAX;
     lastDecompressed.clear();
+    secondDecompressed.clear();
     decodeScratch.clear();
   }
 };

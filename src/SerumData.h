@@ -128,6 +128,10 @@ class SerumData {
   SparseVector<uint8_t> sprshapemode;
   std::vector<uint8_t> frameIsScene;
   std::unordered_map<uint64_t, std::vector<uint32_t>> sceneFramesBySignature;
+  std::vector<uint16_t> spriteWidthV1;
+  std::vector<uint16_t> spriteHeightV1;
+  std::vector<uint16_t> spriteWidthV2;
+  std::vector<uint16_t> spriteHeightV2;
 
   SceneGenerator *sceneGenerator;
 
@@ -162,14 +166,20 @@ class SerumData {
 
     if constexpr (Archive::is_saving::value) {
       if (concentrateFileVersion >= 6) {
-        ar(frameIsScene, sceneFramesBySignature);
+        ar(frameIsScene, sceneFramesBySignature, spriteWidthV1, spriteHeightV1,
+           spriteWidthV2, spriteHeightV2);
       }
     } else {
       if (concentrateFileVersion >= 6) {
-        ar(frameIsScene, sceneFramesBySignature);
+        ar(frameIsScene, sceneFramesBySignature, spriteWidthV1, spriteHeightV1,
+           spriteWidthV2, spriteHeightV2);
       } else {
         frameIsScene.clear();
         sceneFramesBySignature.clear();
+        spriteWidthV1.clear();
+        spriteHeightV1.clear();
+        spriteWidthV2.clear();
+        spriteHeightV2.clear();
       }
     }
 

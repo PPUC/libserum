@@ -138,6 +138,7 @@ static void ConfigureSceneEndHold(uint16_t sceneId, bool interruptable,
                                   uint8_t sceneOptions);
 static void ForceNormalFrameRefreshAfterSceneEnd(void);
 static bool ValidateLoadedGeometry(bool isV2, const char* sourceTag);
+static void RebuildSpriteSizeCaches(void);
 
 struct SceneResumeState {
   uint16_t nextFrame = 0;
@@ -328,6 +329,54 @@ void Free_element(void** ppElement) {
   if (ppElement && *ppElement) {
     free(*ppElement);
     *ppElement = NULL;
+  }
+}
+
+static void RebuildSpriteSizeCaches(void) {
+  if (g_serumData.spriteWidthV1.size() == g_serumData.nsprites &&
+      g_serumData.spriteHeightV1.size() == g_serumData.nsprites &&
+      g_serumData.spriteWidthV2.size() == g_serumData.nsprites &&
+      g_serumData.spriteHeightV2.size() == g_serumData.nsprites) {
+    return;
+  }
+
+  g_serumData.spriteWidthV1.assign(g_serumData.nsprites, 0);
+  g_serumData.spriteHeightV1.assign(g_serumData.nsprites, 0);
+  g_serumData.spriteWidthV2.assign(g_serumData.nsprites, 0);
+  g_serumData.spriteHeightV2.assign(g_serumData.nsprites, 0);
+
+  for (uint32_t i = 0; i < g_serumData.nsprites; ++i) {
+    if (g_serumData.spritedescriptionso.hasData(i)) {
+      uint8_t* spriteData = g_serumData.spritedescriptionso[i];
+      int maxW = 0;
+      int maxH = 0;
+      for (int y = 0; y < MAX_SPRITE_SIZE; ++y) {
+        for (int x = 0; x < MAX_SPRITE_SIZE; ++x) {
+          if (spriteData[y * MAX_SPRITE_SIZE + x] < 255) {
+            if (x + 1 > maxW) maxW = x + 1;
+            if (y + 1 > maxH) maxH = y + 1;
+          }
+        }
+      }
+      g_serumData.spriteWidthV1[i] = static_cast<uint16_t>(maxW);
+      g_serumData.spriteHeightV1[i] = static_cast<uint16_t>(maxH);
+    }
+
+    if (g_serumData.spriteoriginal.hasData(i)) {
+      uint8_t* spriteData = g_serumData.spriteoriginal[i];
+      int maxW = 0;
+      int maxH = 0;
+      for (int y = 0; y < MAX_SPRITE_HEIGHT; ++y) {
+        for (int x = 0; x < MAX_SPRITE_WIDTH; ++x) {
+          if (spriteData[y * MAX_SPRITE_WIDTH + x] < 255) {
+            if (x + 1 > maxW) maxW = x + 1;
+            if (y + 1 > maxH) maxH = y + 1;
+          }
+        }
+      }
+      g_serumData.spriteWidthV2[i] = static_cast<uint16_t>(maxW);
+      g_serumData.spriteHeightV2[i] = static_cast<uint16_t>(maxH);
+    }
   }
 }
 
@@ -643,6 +692,7 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(const uint8_t flags) {
   Full_Reset_ColorRotations();
   cromloaded = true;
   enabled = true;
+  RebuildSpriteSizeCaches();
 
   return &mySerum;
 }
@@ -973,6 +1023,7 @@ Serum_Frame_Struc* Serum_LoadFilev2(FILE* pfile, const uint8_t flags,
   }
 
   enabled = true;
+  RebuildSpriteSizeCaches();
   return &mySerum;
 }
 
@@ -1214,6 +1265,7 @@ Serum_Frame_Struc* Serum_LoadFilev1(const char* const filename,
   }
 
   enabled = true;
+  RebuildSpriteSizeCaches();
   return &mySerum;
 }
 
@@ -1588,21 +1640,33 @@ bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
                      uint8_t* pquelsprites, uint8_t* nspr, uint16_t* pfrx,
                      uint16_t* pfry, uint16_t* pspx, uint16_t* pspy,
                      uint16_t* pwid, uint16_t* phei) {
+  uint8_t* frameSprites = g_serumData.framesprites[quelleframe];
+  uint16_t* frameSpriteBB = g_serumData.framespriteBB[quelleframe];
   uint8_t ti = 0;
   uint32_t mdword;
   *nspr = 0;
-  while ((ti < MAX_SPRITES_PER_FRAME) &&
-         (g_serumData.framesprites[quelleframe][ti] < 255)) {
-    uint8_t qspr = g_serumData.framesprites[quelleframe][ti];
-    int spw, sph;
-    GetSpriteSize(qspr, &spw, &sph, g_serumData.spritedescriptionso[qspr],
-                  MAX_SPRITE_SIZE, MAX_SPRITE_SIZE);
-    short minxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4]);
-    short minyBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 1]);
-    short maxxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 2]);
-    short maxyBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 3]);
+  while ((ti < MAX_SPRITES_PER_FRAME) && (frameSprites[ti] < 255)) {
+    uint8_t qspr = frameSprites[ti];
+    int spw = (qspr < g_serumData.spriteWidthV1.size())
+                  ? g_serumData.spriteWidthV1[qspr]
+                  : 0;
+    int sph = (qspr < g_serumData.spriteHeightV1.size())
+                  ? g_serumData.spriteHeightV1[qspr]
+                  : 0;
+    uint8_t* spriteDesc = g_serumData.spritedescriptionso[qspr];
+    uint16_t* spriteDetAreas = g_serumData.spritedetareas[qspr];
+    uint32_t* spriteDetDwords = g_serumData.spritedetdwords[qspr];
+    uint16_t* spriteDetDwordPos = g_serumData.spritedetdwordpos[qspr];
+    if (spw <= 0 || sph <= 0) {
+      GetSpriteSize(qspr, &spw, &sph, spriteDesc, MAX_SPRITE_SIZE,
+                    MAX_SPRITE_SIZE);
+    }
+    short minxBB = (short)(frameSpriteBB[ti * 4]);
+    short minyBB = (short)(frameSpriteBB[ti * 4 + 1]);
+    short maxxBB = (short)(frameSpriteBB[ti * 4 + 2]);
+    short maxyBB = (short)(frameSpriteBB[ti * 4 + 3]);
     for (uint32_t tm = 0; tm < MAX_SPRITE_DETECT_AREAS; tm++) {
-      if (g_serumData.spritedetareas[qspr][tm * 4] == 0xffff) continue;
+      if (spriteDetAreas[tm * 4] == 0xffff) continue;
       // we look for the sprite in the frame sent
       for (short ty = minyBB; ty <= maxyBB; ty++) {
         mdword = (uint32_t)(Frame[ty * g_serumData.fwidth + minxBB] << 8) |
@@ -1612,8 +1676,8 @@ bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
           uint32_t tj = ty * g_serumData.fwidth + tx;
           mdword = (mdword >> 8) | (uint32_t)(Frame[tj + 3] << 24);
           // we look for the magic dword first:
-          uint16_t sddp = g_serumData.spritedetdwordpos[qspr][tm];
-          if (mdword == g_serumData.spritedetdwords[qspr][tm]) {
+          uint16_t sddp = spriteDetDwordPos[tm];
+          if (mdword == spriteDetDwords[tm]) {
             short frax =
                 (short)tx;  // position in the frame of the detection dword
             short fray = (short)ty;
@@ -1623,15 +1687,12 @@ bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
             short spry = (short)(sddp / MAX_SPRITE_SIZE);
             // details of the det area:
             short detx =
-                (short)g_serumData
-                    .spritedetareas[qspr][tm * 4];  // position of the detection
-                                                    // area in the sprite
-            short dety = (short)g_serumData.spritedetareas[qspr][tm * 4 + 1];
+                (short)spriteDetAreas[tm * 4];  // position of the detection
+                                                // area in the sprite
+            short dety = (short)spriteDetAreas[tm * 4 + 1];
             short detw =
-                (short)g_serumData
-                    .spritedetareas[qspr]
-                                   [tm * 4 + 2];  // size of the detection area
-            short deth = (short)g_serumData.spritedetareas[qspr][tm * 4 + 3];
+                (short)spriteDetAreas[tm * 4 + 2];  // size of the detection area
+            short deth = (short)spriteDetAreas[tm * 4 + 3];
             // if the detection area starts before the frame (left or top),
             // continue:
             if ((frax - minxBB < sprx - detx) || (fray - minyBB < spry - dety))
@@ -1650,9 +1711,7 @@ bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
             for (uint16_t tk = 0; tk < deth; tk++) {
               for (uint16_t tl = 0; tl < detw; tl++) {
                 uint8_t val =
-                    g_serumData.spritedescriptionso[qspr][(tk + dety) *
-                                                              MAX_SPRITE_SIZE +
-                                                          tl + detx];
+                    spriteDesc[(tk + dety) * MAX_SPRITE_SIZE + tl + detx];
                 if (val == 255) continue;
                 if (val !=
                     Frame[(tk + offsy) * g_serumData.fwidth + tl + offsx]) {
@@ -1716,13 +1775,14 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                      uint8_t* pquelsprites, uint8_t* nspr, uint16_t* pfrx,
                      uint16_t* pfry, uint16_t* pspx, uint16_t* pspy,
                      uint16_t* pwid, uint16_t* phei) {
+  uint8_t* frameSprites = g_serumData.framesprites[quelleframe];
+  uint16_t* frameSpriteBB = g_serumData.framespriteBB[quelleframe];
   uint8_t ti = 0;
   uint32_t mdword;
   *nspr = 0;
   bool isshapedframe = false;
-  while ((ti < MAX_SPRITES_PER_FRAME) &&
-         (g_serumData.framesprites[quelleframe][ti] < 255)) {
-    uint8_t qspr = g_serumData.framesprites[quelleframe][ti];
+  while ((ti < MAX_SPRITES_PER_FRAME) && (frameSprites[ti] < 255)) {
+    uint8_t qspr = frameSprites[ti];
     uint8_t* Frame = recframe;
     bool isshapecheck = false;
     if (g_serumData.sprshapemode[qspr][0] > 0) {
@@ -1738,15 +1798,26 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
       }
       Frame = frameshape;
     }
-    int spw, sph;
-    GetSpriteSize(qspr, &spw, &sph, g_serumData.spriteoriginal[qspr],
-                  MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT);
-    short minxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4]);
-    short minyBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 1]);
-    short maxxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 2]);
-    short maxyBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 3]);
+    int spw = (qspr < g_serumData.spriteWidthV2.size())
+                  ? g_serumData.spriteWidthV2[qspr]
+                  : 0;
+    int sph = (qspr < g_serumData.spriteHeightV2.size())
+                  ? g_serumData.spriteHeightV2[qspr]
+                  : 0;
+    uint8_t* spriteOriginal = g_serumData.spriteoriginal[qspr];
+    uint16_t* spriteDetAreas = g_serumData.spritedetareas[qspr];
+    uint32_t* spriteDetDwords = g_serumData.spritedetdwords[qspr];
+    uint16_t* spriteDetDwordPos = g_serumData.spritedetdwordpos[qspr];
+    if (spw <= 0 || sph <= 0) {
+      GetSpriteSize(qspr, &spw, &sph, spriteOriginal, MAX_SPRITE_WIDTH,
+                    MAX_SPRITE_HEIGHT);
+    }
+    short minxBB = (short)(frameSpriteBB[ti * 4]);
+    short minyBB = (short)(frameSpriteBB[ti * 4 + 1]);
+    short maxxBB = (short)(frameSpriteBB[ti * 4 + 2]);
+    short maxyBB = (short)(frameSpriteBB[ti * 4 + 3]);
     for (uint32_t tm = 0; tm < MAX_SPRITE_DETECT_AREAS; tm++) {
-      if (g_serumData.spritedetareas[qspr][tm * 4] == 0xffff) continue;
+      if (spriteDetAreas[tm * 4] == 0xffff) continue;
       // we look for the sprite in the frame sent
       for (short ty = minyBB; ty <= maxyBB; ty++) {
         mdword = (uint32_t)(Frame[ty * g_serumData.fwidth + minxBB] << 8) |
@@ -1756,8 +1827,8 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
           uint32_t tj = ty * g_serumData.fwidth + tx;
           mdword = (mdword >> 8) | (uint32_t)(Frame[tj + 3] << 24);
           // we look for the magic dword first:
-          uint16_t sddp = g_serumData.spritedetdwordpos[qspr][tm];
-          if (mdword == g_serumData.spritedetdwords[qspr][tm]) {
+          uint16_t sddp = spriteDetDwordPos[tm];
+          if (mdword == spriteDetDwords[tm]) {
             short frax =
                 (short)tx;  // position in the frame of the detection dword
             short fray = (short)ty;
@@ -1767,15 +1838,12 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
             short spry = (short)(sddp / MAX_SPRITE_WIDTH);
             // details of the det area:
             short detx =
-                (short)g_serumData
-                    .spritedetareas[qspr][tm * 4];  // position of the detection
-                                                    // area in the sprite
-            short dety = (short)g_serumData.spritedetareas[qspr][tm * 4 + 1];
+                (short)spriteDetAreas[tm * 4];  // position of the detection
+                                                // area in the sprite
+            short dety = (short)spriteDetAreas[tm * 4 + 1];
             short detw =
-                (short)g_serumData
-                    .spritedetareas[qspr]
-                                   [tm * 4 + 2];  // size of the detection area
-            short deth = (short)g_serumData.spritedetareas[qspr][tm * 4 + 3];
+                (short)spriteDetAreas[tm * 4 + 2];  // size of the detection area
+            short deth = (short)spriteDetAreas[tm * 4 + 3];
             // if the detection area starts before the frame (left or top),
             // continue:
             if ((frax - minxBB < sprx - detx) || (fray - minyBB < spry - dety))
@@ -1794,9 +1862,7 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
             for (uint16_t tk = 0; tk < deth; tk++) {
               for (uint16_t tl = 0; tl < detw; tl++) {
                 uint8_t val =
-                    g_serumData
-                        .spriteoriginal[qspr][(tk + dety) * MAX_SPRITE_WIDTH +
-                                              tl + detx];
+                    spriteOriginal[(tk + dety) * MAX_SPRITE_WIDTH + tl + detx];
                 if (val == 255) continue;
                 if (val !=
                     Frame[(tk + offsy) * g_serumData.fwidth + tl + offsx]) {
@@ -2007,6 +2073,15 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
   if (((mySerum.frame32 && g_serumData.fheight == 32) ||
        (mySerum.frame64 && g_serumData.fheight == 64)) &&
       isoriginalrequested) {
+    const uint16_t bgId = g_serumData.backgroundIDs[IDfound][0];
+    const bool hasBackground = bgId < g_serumData.nbackgrounds;
+    uint8_t* backgroundMask = g_serumData.backgroundmask[IDfound];
+    uint8_t* dynamasks = g_serumData.dynamasks[IDfound];
+    uint16_t* cframesV2 = g_serumData.cframes_v2[IDfound];
+    uint16_t* dyna4colsV2 = g_serumData.dyna4cols_v2[IDfound];
+    uint16_t* backgroundFrame =
+        hasBackground ? g_serumData.backgroundframes_v2[bgId] : nullptr;
+
     // create the original res frame
     if (g_serumData.fheight == 32) {
       pfr = mySerum.frame32;
@@ -2032,15 +2107,12 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     for (tj = 0; tj < g_serumData.fheight; tj++) {
       for (ti = 0; ti < g_serumData.fwidth; ti++) {
         uint16_t tk = tj * g_serumData.fwidth + ti;
-        if ((g_serumData.backgroundIDs[IDfound][0] <
-             g_serumData.nbackgrounds) &&
-            (frame[tk] == 0) && (g_serumData.backgroundmask[IDfound][tk] > 0)) {
+        if (hasBackground && (frame[tk] == 0) && (backgroundMask[tk] > 0)) {
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
               pfr[tk] = sceneBackgroundFrame[tk];
             } else if (!suppressFrameBackgroundImage) {
-              pfr[tk] = g_serumData.backgroundframes_v2
-                            [g_serumData.backgroundIDs[IDfound][0]][tk];
+              pfr[tk] = backgroundFrame[tk];
               if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
                                   &prot[tk * 2 + 1], false))
                 pfr[tk] =
@@ -2052,17 +2124,14 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             }
           }
         } else {
-          uint8_t dynacouche = g_serumData.dynamasks[IDfound][tk];
+          uint8_t dynacouche = dynamasks[tk];
           if (dynacouche == 255) {
             if (isdynapix[tk] == 0) {
-              if (blackOutStaticContent &&
-                  (g_serumData.backgroundIDs[IDfound][0] <
-                   g_serumData.nbackgrounds) &&
-                  (frame[tk] > 0) &&
-                  (g_serumData.backgroundmask[IDfound][tk] > 0)) {
+              if (blackOutStaticContent && hasBackground && (frame[tk] > 0) &&
+                  (backgroundMask[tk] > 0)) {
                 pfr[tk] = sceneBackgroundFrame[tk];
               } else {
-                pfr[tk] = g_serumData.cframes_v2[IDfound][tk];
+                pfr[tk] = cframesV2[tk];
                 if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
                                     &prot[tk * 2 + 1], false))
                   pfr[tk] =
@@ -2076,15 +2145,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
               CheckDynaShadow(pfr, IDfound, dynacouche, isdynapix, ti, tj,
                               g_serumData.fwidth, g_serumData.fheight, false);
               isdynapix[tk] = 1;
-              pfr[tk] =
-                  g_serumData
-                      .dyna4cols_v2[IDfound][dynacouche * g_serumData.nocolors +
-                                             frame[tk]];
+              pfr[tk] = dyna4colsV2[dynacouche * g_serumData.nocolors + frame[tk]];
             } else if (isdynapix[tk] == 0)
-              pfr[tk] =
-                  g_serumData
-                      .dyna4cols_v2[IDfound][dynacouche * g_serumData.nocolors +
-                                             frame[tk]];
+              pfr[tk] = dyna4colsV2[dynacouche * g_serumData.nocolors + frame[tk]];
             prot[tk * 2] = prot[tk * 2 + 1] = 0xffff;
           }
         }
@@ -2095,6 +2158,15 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
       ((mySerum.frame32 && g_serumData.fheight_extra == 32) ||
        (mySerum.frame64 && g_serumData.fheight_extra == 64)) &&
       isextrarequested) {
+    const uint16_t bgId = g_serumData.backgroundIDs[IDfound][0];
+    const bool hasBackground = bgId < g_serumData.nbackgrounds;
+    uint8_t* backgroundMaskExtra = g_serumData.backgroundmask_extra[IDfound];
+    uint8_t* dynamasksExtra = g_serumData.dynamasks_extra[IDfound];
+    uint16_t* cframesV2Extra = g_serumData.cframes_v2_extra[IDfound];
+    uint16_t* dyna4colsV2Extra = g_serumData.dyna4cols_v2_extra[IDfound];
+    uint16_t* backgroundFrameExtra =
+        hasBackground ? g_serumData.backgroundframes_v2_extra[bgId] : nullptr;
+
     // create the extra res frame
     if (g_serumData.fheight_extra == 32) {
       pfr = mySerum.frame32;
@@ -2127,16 +2199,12 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         else
           tl = tj * 2 * g_serumData.fwidth + ti * 2;
 
-        if ((g_serumData.backgroundIDs[IDfound][0] <
-             g_serumData.nbackgrounds) &&
-            (frame[tl] == 0) &&
-            (g_serumData.backgroundmask_extra[IDfound][tk] > 0)) {
+        if (hasBackground && (frame[tl] == 0) && (backgroundMaskExtra[tk] > 0)) {
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
               pfr[tk] = sceneBackgroundFrame[tk];
             } else if (!suppressFrameBackgroundImage) {
-              pfr[tk] = g_serumData.backgroundframes_v2_extra
-                            [g_serumData.backgroundIDs[IDfound][0]][tk];
+              pfr[tk] = backgroundFrameExtra[tk];
               if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
                                   &prot[tk * 2 + 1], true)) {
                 pfr[tk] =
@@ -2149,17 +2217,14 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             }
           }
         } else {
-          uint8_t dynacouche = g_serumData.dynamasks_extra[IDfound][tk];
+          uint8_t dynacouche = dynamasksExtra[tk];
           if (dynacouche == 255) {
             if (isdynapix[tk] == 0) {
-              if (blackOutStaticContent &&
-                  (g_serumData.backgroundIDs[IDfound][0] <
-                   g_serumData.nbackgrounds) &&
-                  (frame[tl] > 0) &&
-                  (g_serumData.backgroundmask_extra[IDfound][tk] > 0)) {
+              if (blackOutStaticContent && hasBackground && (frame[tl] > 0) &&
+                  (backgroundMaskExtra[tk] > 0)) {
                 pfr[tk] = sceneBackgroundFrame[tk];
               } else {
-                pfr[tk] = g_serumData.cframes_v2_extra[IDfound][tk];
+                pfr[tk] = cframesV2Extra[tk];
                 if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
                                     &prot[tk * 2 + 1], true)) {
                   pfr[tk] =
@@ -2176,12 +2241,10 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                               g_serumData.fheight_extra, true);
               isdynapix[tk] = 1;
               pfr[tk] =
-                  g_serumData.dyna4cols_v2_extra
-                      [IDfound][dynacouche * g_serumData.nocolors + frame[tl]];
+                  dyna4colsV2Extra[dynacouche * g_serumData.nocolors + frame[tl]];
             } else if (isdynapix[tk] == 0)
               pfr[tk] =
-                  g_serumData.dyna4cols_v2_extra
-                      [IDfound][dynacouche * g_serumData.nocolors + frame[tl]];
+                  dyna4colsV2Extra[dynacouche * g_serumData.nocolors + frame[tl]];
             prot[tk * 2] = prot[tk * 2 + 1] = 0xffff;
           }
         }
