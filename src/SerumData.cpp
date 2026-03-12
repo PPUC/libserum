@@ -131,7 +131,18 @@ void SerumData::Clear() {
   rotationLookupMetaV2.clear();
   rotationLookupColorsV2Extra.clear();
   rotationLookupMetaV2Extra.clear();
+  rotationPlanV2.clear();
+  rotationPlanV2Extra.clear();
+  frameHasRotationV2.clear();
+  frameHasRotationV2Extra.clear();
   spriteDetectionPlanV2.clear();
+  identifyBucketOffsetByMaskShape.clear();
+  identifyBucketLengthByMaskShape.clear();
+  identifyBucketFrameIds.clear();
+  sceneRuntimeInfoById.clear();
+  autoStartSceneIdV2 = 0;
+  autoStartTimerMsV2 = 0;
+  hasAutoStartSceneV2 = false;
   spriteWidthV1.clear();
   spriteHeightV1.clear();
   spriteWidthV2.clear();

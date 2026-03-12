@@ -61,6 +61,33 @@ class SerumData {
     }
   };
 
+  struct SceneRuntimeInfoV2 {
+    uint16_t frameCount = 0;
+    uint16_t durationPerFrame = 0;
+    bool interruptable = false;
+    bool startImmediately = false;
+    uint8_t repeat = 0;
+    uint8_t sceneOptions = 0;
+    uint32_t endHoldDurationMs = 0;
+
+    template <class Archive>
+    void serialize(Archive &ar) {
+      ar(frameCount, durationPerFrame, interruptable, startImmediately, repeat,
+         sceneOptions, endHoldDurationMs);
+    }
+  };
+
+  struct RotationPlanEntryV2 {
+    uint8_t rotationId = 0;
+    uint16_t length = 0;
+    uint16_t durationMs = 0;
+
+    template <class Archive>
+    void serialize(Archive &ar) {
+      ar(rotationId, length, durationMs);
+    }
+  };
+
   SerumData();
   ~SerumData();
 
@@ -153,7 +180,18 @@ class SerumData {
   std::vector<std::vector<uint16_t>> rotationLookupMetaV2;
   std::vector<std::vector<uint16_t>> rotationLookupColorsV2Extra;
   std::vector<std::vector<uint16_t>> rotationLookupMetaV2Extra;
+  std::vector<std::vector<RotationPlanEntryV2>> rotationPlanV2;
+  std::vector<std::vector<RotationPlanEntryV2>> rotationPlanV2Extra;
+  std::vector<uint8_t> frameHasRotationV2;
+  std::vector<uint8_t> frameHasRotationV2Extra;
   std::vector<std::vector<SpriteDetectionPlanEntryV2>> spriteDetectionPlanV2;
+  std::vector<uint32_t> identifyBucketOffsetByMaskShape;
+  std::vector<uint32_t> identifyBucketLengthByMaskShape;
+  std::vector<uint32_t> identifyBucketFrameIds;
+  std::unordered_map<uint16_t, SceneRuntimeInfoV2> sceneRuntimeInfoById;
+  uint16_t autoStartSceneIdV2 = 0;
+  uint32_t autoStartTimerMsV2 = 0;
+  bool hasAutoStartSceneV2 = false;
   std::vector<uint16_t> spriteWidthV1;
   std::vector<uint16_t> spriteHeightV1;
   std::vector<uint16_t> spriteWidthV2;
@@ -197,8 +235,12 @@ class SerumData {
            sceneGroupFrameTableOffset, sceneGroupFrameTableLength,
            sceneGroupFrameIdsFlat, rotationLookupColorsV2, rotationLookupMetaV2,
            rotationLookupColorsV2Extra, rotationLookupMetaV2Extra,
-           spriteDetectionPlanV2, spriteWidthV1, spriteHeightV1, spriteWidthV2,
-           spriteHeightV2);
+           rotationPlanV2, rotationPlanV2Extra, frameHasRotationV2,
+           frameHasRotationV2Extra, spriteDetectionPlanV2,
+           identifyBucketOffsetByMaskShape, identifyBucketLengthByMaskShape,
+           identifyBucketFrameIds, sceneRuntimeInfoById, autoStartSceneIdV2,
+           autoStartTimerMsV2, hasAutoStartSceneV2, spriteWidthV1,
+           spriteHeightV1, spriteWidthV2, spriteHeightV2);
       }
     } else {
       if (concentrateFileVersion >= 6) {
@@ -206,8 +248,12 @@ class SerumData {
            sceneGroupFrameTableOffset, sceneGroupFrameTableLength,
            sceneGroupFrameIdsFlat, rotationLookupColorsV2, rotationLookupMetaV2,
            rotationLookupColorsV2Extra, rotationLookupMetaV2Extra,
-           spriteDetectionPlanV2, spriteWidthV1, spriteHeightV1, spriteWidthV2,
-           spriteHeightV2);
+           rotationPlanV2, rotationPlanV2Extra, frameHasRotationV2,
+           frameHasRotationV2Extra, spriteDetectionPlanV2,
+           identifyBucketOffsetByMaskShape, identifyBucketLengthByMaskShape,
+           identifyBucketFrameIds, sceneRuntimeInfoById, autoStartSceneIdV2,
+           autoStartTimerMsV2, hasAutoStartSceneV2, spriteWidthV1,
+           spriteHeightV1, spriteWidthV2, spriteHeightV2);
       } else {
         frameIsScene.clear();
         sceneFramesBySignature.clear();
@@ -219,7 +265,18 @@ class SerumData {
         rotationLookupMetaV2.clear();
         rotationLookupColorsV2Extra.clear();
         rotationLookupMetaV2Extra.clear();
+        rotationPlanV2.clear();
+        rotationPlanV2Extra.clear();
+        frameHasRotationV2.clear();
+        frameHasRotationV2Extra.clear();
         spriteDetectionPlanV2.clear();
+        identifyBucketOffsetByMaskShape.clear();
+        identifyBucketLengthByMaskShape.clear();
+        identifyBucketFrameIds.clear();
+        sceneRuntimeInfoById.clear();
+        autoStartSceneIdV2 = 0;
+        autoStartTimerMsV2 = 0;
+        hasAutoStartSceneV2 = false;
         spriteWidthV1.clear();
         spriteHeightV1.clear();
         spriteWidthV2.clear();
