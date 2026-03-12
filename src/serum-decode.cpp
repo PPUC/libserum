@@ -132,6 +132,7 @@ static void BuildFrameLookupVectors(void);
 static uint64_t MakeFrameSignature(uint8_t mask, uint8_t shape, uint32_t hash);
 static uint64_t MakeSceneFrameKey(uint16_t sceneId, uint8_t group,
                                   uint16_t frameIndex);
+static uint32_t MakeSceneGroupKey(uint16_t sceneId, uint8_t group);
 static void InitFrameLookupRuntimeStateFromStoredData(void);
 static void StopV2ColorRotations(void);
 static bool CaptureMonochromePaletteFromFrameV2(uint32_t frameId);
@@ -1412,6 +1413,9 @@ static void BuildFrameLookupVectors(void) {
   g_serumData.frameIsScene.clear();
   g_serumData.sceneFramesBySignature.clear();
   g_serumData.sceneFrameIdsBySceneKey.clear();
+  g_serumData.sceneGroupFrameTableOffset.clear();
+  g_serumData.sceneGroupFrameTableLength.clear();
+  g_serumData.sceneGroupFrameIdsFlat.clear();
 
   if (g_serumData.frameCount == 0) return;
   g_serumData.frameIsScene.resize(g_serumData.frameCount, 0);
@@ -1445,6 +1449,7 @@ static void BuildFrameLookupVectors(void) {
 
     std::unordered_set<uint64_t> sceneSignatures;
     sceneSignatures.reserve(uniqueMaskShapes.size() * 64);
+    std::unordered_map<uint32_t, std::vector<uint32_t>> sceneGroupFrameIds;
     auto append_unique = [](std::vector<uint32_t>& ids, uint32_t frameId) {
       if (std::find(ids.begin(), ids.end(), frameId) == ids.end()) {
         ids.push_back(frameId);
@@ -1463,9 +1468,7 @@ static void BuildFrameLookupVectors(void) {
                   true) != 0xffff) {
             continue;
           }
-          std::vector<uint32_t>& matchedFrameIdsBySceneKey =
-              g_serumData.sceneFrameIdsBySceneKey[MakeSceneFrameKey(
-                  scene.sceneId, static_cast<uint8_t>(group), frameIndex)];
+          std::vector<uint32_t> matchedFrameIds;
           for (const auto& maskShape : uniqueMaskShapes) {
             uint32_t hash = calc_crc32(generatedSceneFrame, maskShape.first,
                                        pixels, maskShape.second);
@@ -1477,8 +1480,28 @@ static void BuildFrameLookupVectors(void) {
               continue;
             }
             for (uint32_t frameId : frameSigIt->second) {
-              append_unique(matchedFrameIdsBySceneKey, frameId);
+              append_unique(matchedFrameIds, frameId);
             }
+          }
+
+          if (!matchedFrameIds.empty()) {
+            std::sort(matchedFrameIds.begin(), matchedFrameIds.end());
+            matchedFrameIds.erase(
+                std::unique(matchedFrameIds.begin(), matchedFrameIds.end()),
+                matchedFrameIds.end());
+
+            uint32_t primaryFrameId = matchedFrameIds.front();
+            g_serumData.sceneFrameIdsBySceneKey[MakeSceneFrameKey(
+                scene.sceneId, static_cast<uint8_t>(group), frameIndex)] =
+                primaryFrameId;
+
+            uint32_t sceneGroupKey =
+                MakeSceneGroupKey(scene.sceneId, static_cast<uint8_t>(group));
+            std::vector<uint32_t>& byGroup = sceneGroupFrameIds[sceneGroupKey];
+            if (byGroup.size() < scene.frameCount) {
+              byGroup.resize(scene.frameCount, IDENTIFY_NO_FRAME);
+            }
+            byGroup[frameIndex] = primaryFrameId;
           }
         }
       }
@@ -1498,10 +1521,23 @@ static void BuildFrameLookupVectors(void) {
       }
     }
 
-    for (auto& entry : g_serumData.sceneFrameIdsBySceneKey) {
-      auto& ids = entry.second;
-      std::sort(ids.begin(), ids.end());
-      ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    std::vector<uint32_t> sceneGroupKeys;
+    sceneGroupKeys.reserve(sceneGroupFrameIds.size());
+    for (const auto& entry : sceneGroupFrameIds) {
+      sceneGroupKeys.push_back(entry.first);
+    }
+    std::sort(sceneGroupKeys.begin(), sceneGroupKeys.end());
+
+    uint32_t offset = 0;
+    for (uint32_t sceneGroupKey : sceneGroupKeys) {
+      const std::vector<uint32_t>& byGroup = sceneGroupFrameIds[sceneGroupKey];
+      g_serumData.sceneGroupFrameTableOffset[sceneGroupKey] = offset;
+      g_serumData.sceneGroupFrameTableLength[sceneGroupKey] =
+          static_cast<uint16_t>(std::min<size_t>(byGroup.size(), 0xffffu));
+      g_serumData.sceneGroupFrameIdsFlat.insert(
+          g_serumData.sceneGroupFrameIdsFlat.end(), byGroup.begin(),
+          byGroup.end());
+      offset += static_cast<uint32_t>(byGroup.size());
     }
   }
 
@@ -1535,8 +1571,15 @@ static uint64_t MakeSceneFrameKey(uint16_t sceneId, uint8_t group,
          uint64_t(frameIndex);
 }
 
+static uint32_t MakeSceneGroupKey(uint16_t sceneId, uint8_t group) {
+  return (uint32_t(sceneId) << 8) | uint32_t(group);
+}
+
 static void InitFrameLookupRuntimeStateFromStoredData(void) {
-  if (g_serumData.frameIsScene.size() != g_serumData.frameCount) {
+  const bool needsSceneTable =
+      g_serumData.sceneGenerator && g_serumData.sceneGenerator->isActive();
+  if (g_serumData.frameIsScene.size() != g_serumData.frameCount ||
+      (needsSceneTable && g_serumData.sceneGroupFrameTableOffset.empty())) {
     BuildFrameLookupVectors();
     return;
   }
@@ -3191,16 +3234,18 @@ uint32_t Serum_RenderScene(void) {
       uint8_t currentGroup = 0;
       if (g_serumData.sceneGenerator->getCurrentGroup(lastTriggerID,
                                                       currentGroup)) {
-        auto sceneKeyIt = g_serumData.sceneFrameIdsBySceneKey.find(
-            MakeSceneFrameKey(lastTriggerID, currentGroup, sceneCurrentFrame));
-        if (sceneKeyIt != g_serumData.sceneFrameIdsBySceneKey.end() &&
-            !sceneKeyIt->second.empty()) {
-          const std::vector<uint32_t>& candidates = sceneKeyIt->second;
-          directSceneFrameId = candidates.front();
-          auto it =
-              std::find(candidates.begin(), candidates.end(), lastfound_scene);
-          if (it != candidates.end()) {
-            directSceneFrameId = *it;
+        const uint32_t sceneGroupKey =
+            MakeSceneGroupKey(lastTriggerID, currentGroup);
+        auto offsetIt =
+            g_serumData.sceneGroupFrameTableOffset.find(sceneGroupKey);
+        auto lengthIt =
+            g_serumData.sceneGroupFrameTableLength.find(sceneGroupKey);
+        if (offsetIt != g_serumData.sceneGroupFrameTableOffset.end() &&
+            lengthIt != g_serumData.sceneGroupFrameTableLength.end() &&
+            sceneCurrentFrame < lengthIt->second) {
+          const uint32_t flatIndex = offsetIt->second + sceneCurrentFrame;
+          if (flatIndex < g_serumData.sceneGroupFrameIdsFlat.size()) {
+            directSceneFrameId = g_serumData.sceneGroupFrameIdsFlat[flatIndex];
           }
         }
       }

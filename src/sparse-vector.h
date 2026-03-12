@@ -56,6 +56,7 @@ class SparseVector {
   std::vector<uint32_t> packedOffsets;
   std::vector<uint32_t> packedSizes;
   std::vector<uint8_t> packedBlob;
+  mutable std::unordered_map<uint32_t, uint32_t> packedIndexById;
 
   static constexpr uint8_t kBitPackedMagic = 0xB1;
 
@@ -116,9 +117,25 @@ class SparseVector {
     packedOffsets.clear();
     packedSizes.clear();
     packedBlob.clear();
+    packedIndexById.clear();
     lastPayloadId = UINT32_MAX;
     lastPayloadPtr = nullptr;
     lastPayloadSize = 0;
+  }
+
+  void ensurePackedIndex() const {
+    if (packedIds.empty()) {
+      packedIndexById.clear();
+      return;
+    }
+    if (packedIndexById.size() == packedIds.size()) {
+      return;
+    }
+    packedIndexById.clear();
+    packedIndexById.reserve(packedIds.size());
+    for (uint32_t i = 0; i < packedIds.size(); ++i) {
+      packedIndexById.emplace(packedIds[i], i);
+    }
   }
 
   static uint64_t hashPayload(const uint8_t *bytes, size_t size) {
@@ -254,13 +271,13 @@ class SparseVector {
       return nullptr;
     }
 
-    const auto it =
-        std::lower_bound(packedIds.begin(), packedIds.end(), elementId);
-    if (it == packedIds.end() || *it != elementId) {
+    ensurePackedIndex();
+    auto it = packedIndexById.find(elementId);
+    if (it == packedIndexById.end()) {
       return nullptr;
     }
 
-    const size_t idx = static_cast<size_t>(it - packedIds.begin());
+    const size_t idx = static_cast<size_t>(it->second);
     if (idx >= packedOffsets.size() || idx >= packedSizes.size()) {
       return nullptr;
     }

@@ -124,6 +124,9 @@ void SerumData::Clear() {
   frameIsScene.clear();
   sceneFramesBySignature.clear();
   sceneFrameIdsBySceneKey.clear();
+  sceneGroupFrameTableOffset.clear();
+  sceneGroupFrameTableLength.clear();
+  sceneGroupFrameIdsFlat.clear();
   spriteWidthV1.clear();
   spriteHeightV1.clear();
   spriteWidthV2.clear();
