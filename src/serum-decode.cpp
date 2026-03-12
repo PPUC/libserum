@@ -139,6 +139,7 @@ static bool IsFullBlackFrame(const uint8_t* frame, uint32_t size);
 static void ConfigureSceneEndHold(uint16_t sceneId, bool interruptable,
                                   uint8_t sceneOptions);
 static void ForceNormalFrameRefreshAfterSceneEnd(void);
+static void EnsureValidOutputDimensions(void);
 static bool ValidateLoadedGeometry(bool isV2, const char* sourceTag);
 static void RebuildSpriteSizeCaches(void);
 
@@ -2687,6 +2688,32 @@ static void ForceNormalFrameRefreshAfterSceneEnd(void) {
   lastframe_full_crc_normal = 0xffffffff;
 }
 
+static void EnsureValidOutputDimensions(void) {
+  if ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) && mySerum.width32 == 0) {
+    if (g_serumData.frameHeight == 32) {
+      mySerum.width32 = g_serumData.frameWidth;
+    } else if (g_serumData.extraFrameHeight == 32) {
+      mySerum.width32 = g_serumData.extraFrameWidth;
+    }
+    if (mySerum.width32 == 0) {
+      Log("Invalid 32P frame width=0, clearing 32P output flag");
+      mySerum.flags &= ~FLAG_RETURNED_32P_FRAME_OK;
+    }
+  }
+
+  if ((mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) && mySerum.width64 == 0) {
+    if (g_serumData.frameHeight == 64) {
+      mySerum.width64 = g_serumData.frameWidth;
+    } else if (g_serumData.extraFrameHeight == 64) {
+      mySerum.width64 = g_serumData.extraFrameWidth;
+    }
+    if (mySerum.width64 == 0) {
+      Log("Invalid 64P frame width=0, clearing 64P output flag");
+      mySerum.flags &= ~FLAG_RETURNED_64P_FRAME_OK;
+    }
+  }
+}
+
 SERUM_API uint32_t
 Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false,
                              uint32_t forcedFrameId = IDENTIFY_NO_FRAME) {
@@ -3011,6 +3038,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false,
             mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
           mySerum.triggerID = 0xffffffff;
 
+        EnsureValidOutputDimensions();
         return (uint32_t)mySerum.rotationtimer |
                (rotationIsScene ? FLAG_RETURNED_V2_SCENE : 0);
       }
@@ -3052,6 +3080,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false,
     }
     mySerum.rotationtimer = 0;
 
+    EnsureValidOutputDimensions();
     return 0;  // "colorized" frame with no rotations
   }
 
