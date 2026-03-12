@@ -424,10 +424,7 @@ static void RebuildIdentifyBuckets(void) {
 
   g_serumData.identifyBucketOffsetByMaskShape.assign(65536, UINT32_MAX);
   g_serumData.identifyBucketLengthByMaskShape.assign(65536, 0);
-  g_serumData.identifyBucketFrameIds.clear();
-  g_serumData.identifyBucketFrameIds.reserve(g_serumData.frameCount);
-
-  std::array<std::vector<uint32_t>, 65536> bucketFrames;
+  std::vector<uint32_t> bucketCounts(65536, 0);
   for (uint32_t frameId = 0; frameId < g_serumData.frameCount; ++frameId) {
     if (frameId < g_serumData.frameIsScene.size() &&
         g_serumData.frameIsScene[frameId]) {
@@ -436,18 +433,32 @@ static void RebuildIdentifyBuckets(void) {
     const uint8_t mask = g_serumData.compmaskID[frameId][0];
     const uint8_t shape = g_serumData.shapecompmode[frameId][0];
     const uint16_t key = (uint16_t(mask) << 8) | shape;
-    bucketFrames[key].push_back(frameId);
+    bucketCounts[key]++;
   }
 
+  uint32_t totalFrameRefs = 0;
   for (uint32_t key = 0; key < 65536; ++key) {
-    const auto& bucket = bucketFrames[key];
-    if (bucket.empty()) continue;
-    g_serumData.identifyBucketOffsetByMaskShape[key] =
-        static_cast<uint32_t>(g_serumData.identifyBucketFrameIds.size());
-    g_serumData.identifyBucketLengthByMaskShape[key] =
-        static_cast<uint32_t>(bucket.size());
-    g_serumData.identifyBucketFrameIds.insert(
-        g_serumData.identifyBucketFrameIds.end(), bucket.begin(), bucket.end());
+    if (bucketCounts[key] == 0) continue;
+    g_serumData.identifyBucketOffsetByMaskShape[key] = totalFrameRefs;
+    g_serumData.identifyBucketLengthByMaskShape[key] = bucketCounts[key];
+    totalFrameRefs += bucketCounts[key];
+  }
+
+  g_serumData.identifyBucketFrameIds.assign(totalFrameRefs, 0);
+  std::vector<uint32_t> writeCursor =
+      g_serumData.identifyBucketOffsetByMaskShape;
+  for (uint32_t frameId = 0; frameId < g_serumData.frameCount; ++frameId) {
+    if (frameId < g_serumData.frameIsScene.size() &&
+        g_serumData.frameIsScene[frameId]) {
+      continue;
+    }
+    const uint8_t mask = g_serumData.compmaskID[frameId][0];
+    const uint8_t shape = g_serumData.shapecompmode[frameId][0];
+    const uint16_t key = (uint16_t(mask) << 8) | shape;
+    uint32_t pos = writeCursor[key]++;
+    if (pos < g_serumData.identifyBucketFrameIds.size()) {
+      g_serumData.identifyBucketFrameIds[pos] = frameId;
+    }
   }
 }
 
