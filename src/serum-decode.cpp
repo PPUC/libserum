@@ -87,6 +87,18 @@ uint32_t sceneEndHoldDurationMs = 0;
 uint8_t sceneFrame[256 * 64] = {0};
 uint8_t lastFrame[256 * 64] = {0};
 uint32_t lastFrameId = 0;  // last frame ID identified
+uint32_t lastFrameCrcForSpriteCache = 0;
+bool lastFrameSpriteCacheValid = false;
+uint32_t lastFrameSpriteCacheFrameId = IDENTIFY_NO_FRAME;
+uint32_t lastFrameSpriteCacheCrc = 0;
+uint8_t lastFrameSpriteCacheIds[MAX_SPRITES_PER_FRAME] = {255};
+uint8_t lastFrameSpriteCacheCount = 0;
+uint16_t lastFrameSpriteCacheFrameX[MAX_SPRITES_PER_FRAME] = {0};
+uint16_t lastFrameSpriteCacheFrameY[MAX_SPRITES_PER_FRAME] = {0};
+uint16_t lastFrameSpriteCacheSpriteX[MAX_SPRITES_PER_FRAME] = {0};
+uint16_t lastFrameSpriteCacheSpriteY[MAX_SPRITES_PER_FRAME] = {0};
+uint16_t lastFrameSpriteCacheWidth[MAX_SPRITES_PER_FRAME] = {0};
+uint16_t lastFrameSpriteCacheHeight[MAX_SPRITES_PER_FRAME] = {0};
 uint16_t sceneBackgroundFrame[256 * 64] = {0};
 bool monochromeMode = false;
 bool monochromePaletteMode = false;
@@ -503,6 +515,12 @@ void Serum_free(void) {
   monochromeMode = false;
   monochromePaletteMode = false;
   monochromePaletteV2Length = 0;
+  lastFrameCrcForSpriteCache = 0;
+  lastFrameSpriteCacheValid = false;
+  lastFrameSpriteCacheFrameId = IDENTIFY_NO_FRAME;
+  lastFrameSpriteCacheCrc = 0;
+  lastFrameSpriteCacheCount = 0;
+  memset(lastFrameSpriteCacheIds, 255, sizeof(lastFrameSpriteCacheIds));
   g_sceneResumeState.clear();
 
   g_serumData.sceneGenerator->Reset();
@@ -2275,6 +2293,10 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                       bool blackOutStaticContent = false,
                       bool suppressFrameBackgroundImage = false) {
   uint16_t tj, ti;
+  // TODO(v6-perf-step4): optional next optimization is a precompiled per-frame
+  // render plan for this function (segment/static/dynamic/background passes)
+  // stored in cROMc v6 and rebuilt for v5. Keep current logic unchanged until
+  // users confirm scene lag is gone and no regressions from recent changes.
   // Generate the colorized version of a frame once identified in the crom
   // frames
   bool isextra = CheckExtraFrameAvailable(IDfound);
@@ -2984,6 +3006,10 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false,
         memcpy(lastFrame, frame,
                g_serumData.frameWidth * g_serumData.frameHeight);
         lastFrameId = frameID;
+        lastFrameCrcForSpriteCache = calc_crc32(
+            lastFrame, 255,
+            g_serumData.frameWidth * g_serumData.frameHeight, 0);
+        lastFrameSpriteCacheValid = false;
 
         if (sceneFrameCount > 0 &&
             (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
@@ -3090,14 +3116,47 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false,
           spriteHeight[MAX_SPRITES_PER_FRAME];
       memset(spriteIds, 255, MAX_SPRITES_PER_FRAME);
 
-      bool isspr =
-          (sceneFrameRequested && !isBackgroundSceneRequested)
-              ? false
-              : Check_Spritesv2(
-                    isBackgroundSceneRequested ? lastFrame : frame,
-                    isBackgroundSceneRequested ? lastFrameId : lastfound,
-                    spriteIds, &spriteCount, frameX, frameY, spriteX, spriteY,
-                    spriteWidth, spriteHeight);
+      bool isspr = false;
+      if (sceneFrameRequested && !isBackgroundSceneRequested) {
+        isspr = false;
+      } else if (isBackgroundSceneRequested) {
+        // Background scene path reuses the same `lastFrame` while the scene is
+        // advancing. Cache sprite detection result for that stable source frame
+        // to avoid paying full sprite matching cost on every scene tick.
+        if (lastFrameSpriteCacheValid &&
+            lastFrameSpriteCacheFrameId == lastFrameId &&
+            lastFrameSpriteCacheCrc == lastFrameCrcForSpriteCache) {
+          spriteCount = lastFrameSpriteCacheCount;
+          memcpy(spriteIds, lastFrameSpriteCacheIds, sizeof(spriteIds));
+          memcpy(frameX, lastFrameSpriteCacheFrameX, sizeof(frameX));
+          memcpy(frameY, lastFrameSpriteCacheFrameY, sizeof(frameY));
+          memcpy(spriteX, lastFrameSpriteCacheSpriteX, sizeof(spriteX));
+          memcpy(spriteY, lastFrameSpriteCacheSpriteY, sizeof(spriteY));
+          memcpy(spriteWidth, lastFrameSpriteCacheWidth, sizeof(spriteWidth));
+          memcpy(spriteHeight, lastFrameSpriteCacheHeight, sizeof(spriteHeight));
+          isspr = spriteCount > 0;
+        } else {
+          isspr = Check_Spritesv2(lastFrame, lastFrameId, spriteIds, &spriteCount,
+                                  frameX, frameY, spriteX, spriteY, spriteWidth,
+                                  spriteHeight);
+          lastFrameSpriteCacheValid = true;
+          lastFrameSpriteCacheFrameId = lastFrameId;
+          lastFrameSpriteCacheCrc = lastFrameCrcForSpriteCache;
+          lastFrameSpriteCacheCount = spriteCount;
+          memcpy(lastFrameSpriteCacheIds, spriteIds, sizeof(spriteIds));
+          memcpy(lastFrameSpriteCacheFrameX, frameX, sizeof(frameX));
+          memcpy(lastFrameSpriteCacheFrameY, frameY, sizeof(frameY));
+          memcpy(lastFrameSpriteCacheSpriteX, spriteX, sizeof(spriteX));
+          memcpy(lastFrameSpriteCacheSpriteY, spriteY, sizeof(spriteY));
+          memcpy(lastFrameSpriteCacheWidth, spriteWidth, sizeof(spriteWidth));
+          memcpy(lastFrameSpriteCacheHeight, spriteHeight,
+                 sizeof(spriteHeight));
+        }
+      } else {
+        isspr = Check_Spritesv2(frame, lastfound, spriteIds, &spriteCount,
+                                frameX, frameY, spriteX, spriteY, spriteWidth,
+                                spriteHeight);
+      }
       if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
           g_serumData.activeframes[lastfound][0] != 0) {
         if (!sceneIsLastBackgroundFrame) {
