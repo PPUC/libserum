@@ -205,5 +205,6 @@ if(PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "macos" OR PLATFORM STREQUAL "li
          src/serum_load_cli.cpp
       )
       target_link_libraries(serum_load PUBLIC ${SERUM_LOAD_LINK_TARGET})
+      set_target_properties(serum_load PROPERTIES OUTPUT_NAME "serum-load")
    endif()
 endif()

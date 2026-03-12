@@ -129,6 +129,7 @@ jobs:
              cp build/Release/serum_static.lib tmp
              cp build/Release/serum_test_s.exe tmp
              cp build/Release/serum_test.exe tmp
+             cp build/Release/serum-load.exe tmp
           else
             ARTIFACT_PATH="libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz"
             if [[ "${{ matrix.platform }}" == "macos" ]]; then
@@ -136,11 +137,13 @@ jobs:
                cp build/libserum.*.dylib tmp
                cp build/serum_test_s tmp
                cp build/serum_test tmp
+               cp build/serum-load tmp
             elif [[ "${{ matrix.platform }}" == "linux" ]]; then
                cp build/libserum.a tmp
                cp build/libserum.so.* tmp
                cp build/serum_test_s tmp
                cp build/serum_test tmp
+               cp build/serum-load tmp
             elif [[ "${{ matrix.platform }}" == "ios" || "${{ matrix.platform }}" == "ios-simulator" || "${{ matrix.platform }}" == "tvos" ]]; then
                cp build/libserum.a tmp
                cp build/libserum.*.dylib tmp
@@ -183,6 +186,9 @@ jobs:
           lipo -create -output tmp/serum_test_s \
              libserum-${{ needs.version.outputs.tag }}-macos-arm64/serum_test_s \
              libserum-${{ needs.version.outputs.tag }}-macos-x64/serum_test_s
+          lipo -create -output tmp/serum-load \
+             libserum-${{ needs.version.outputs.tag }}-macos-arm64/serum-load \
+             libserum-${{ needs.version.outputs.tag }}-macos-x64/serum-load
       - name: Prepare artifacts
         run: |
           cd tmp

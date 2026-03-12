@@ -10,12 +10,11 @@ namespace fs = std::filesystem;
 
 static void PrintUsage(const char* exe) {
   std::cout << "Usage: " << exe
-            << " <serum-file-or-rom-dir> [--flags N] [--no-generate] [--quiet]\n"
+            << " <serum-file-or-rom-dir> [--no-generate] [--quiet]\n"
             << "\n"
             << "Examples:\n"
             << "  " << exe << " /path/to/altcolor/afm_113b/afm_113b.cRZ\n"
-            << "  " << exe << " /path/to/altcolor/afm_113b\n"
-            << "  " << exe << " /path/to/altcolor/afm_113b --flags 3\n";
+            << "  " << exe << " /path/to/altcolor/afm_113b\n";
 }
 
 static std::string ToLower(std::string s) {
@@ -37,7 +36,6 @@ static void SERUM_CALLBACK CliLog(const char* format, va_list args,
 }
 
 int main(int argc, char** argv) {
-  uint8_t flags = 0;
   bool generateCRomC = true;
   bool quiet = false;
   std::string inputArg;
@@ -54,19 +52,6 @@ int main(int argc, char** argv) {
     }
     if (arg == "--quiet") {
       quiet = true;
-      continue;
-    }
-    if (arg == "--flags") {
-      if (i + 1 >= argc) {
-        std::cerr << "Missing value after --flags\n";
-        return 2;
-      }
-      const int parsed = std::stoi(argv[++i]);
-      if (parsed < 0 || parsed > 255) {
-        std::cerr << "Invalid --flags value (must be 0..255)\n";
-        return 2;
-      }
-      flags = static_cast<uint8_t>(parsed);
       continue;
     }
     if (!arg.empty() && arg[0] == '-') {
@@ -125,7 +110,7 @@ int main(int argc, char** argv) {
   Serum_SetGenerateCRomC(generateCRomC);
 
   Serum_Frame_Struc* loaded =
-      Serum_Load(altcolorPath.c_str(), romname.c_str(), flags);
+      Serum_Load(altcolorPath.c_str(), romname.c_str(), 0);
   if (!loaded) {
     std::cerr << "Failed to load serum for rom '" << romname << "' from "
               << romDir.string() << "\n";
