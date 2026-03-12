@@ -289,10 +289,6 @@ class SparseVector {
       if (elementId >= index.size()) return noData.data();
       return index[elementId].data();
     } else {
-      if (packedIds.empty() && !data.empty()) {
-        buildPackedFromData();
-      }
-
       const uint8_t *payload = nullptr;
       uint32_t payloadSize = 0;
 
