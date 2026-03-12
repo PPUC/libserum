@@ -274,60 +274,20 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
     }
     Log("cROMc compressed size %u", compressedSize);
 
-    std::vector<uint8_t> compressedData(compressedSize);
-    if (fread(compressedData.data(), 1, compressedSize, fp) != compressedSize) {
-      Log("Failed to read compressed cROMc payload from %s", filename);
-      fclose(fp);
-      return false;
-    }
-
-    std::string decompressed;
-    decompressed.resize(originalSize);
-    mz_ulong dstLen = originalSize;
-    const int status =
-        uncompress(reinterpret_cast<unsigned char *>(decompressed.data()),
-                   &dstLen, compressedData.data(), (mz_ulong)compressedSize);
-    if (status != MZ_OK || dstLen != originalSize) {
-      Log("Decompression error in %s: %d", filename, status);
-      fclose(fp);
-      return false;
-    }
-
-    auto tryDeserialize = [&](bool legacyLayoutExpected) -> bool {
-      try {
-        std::istringstream iss(decompressed, std::ios::binary);
-        struct LegacyLoadFlagGuard {
-          explicit LegacyLoadFlagGuard(bool legacy) {
-            sparse_vector_serialization::SetLegacyLoadExpected(legacy);
-          }
-          ~LegacyLoadFlagGuard() {
-            sparse_vector_serialization::SetLegacyLoadExpected(false);
-          }
-        } legacyLoadGuard(legacyLayoutExpected);
-
-        cereal::PortableBinaryInputArchive archive(iss);
-        archive(*this);
-        return true;
-      } catch (const std::exception &e) {
-        Log("Deserialization failed in %s (%s sparse layout): %s", filename,
-            legacyLayoutExpected ? "legacy" : "packed", e.what());
-        return false;
-      } catch (...) {
-        Log("Deserialization failed in %s (%s sparse layout): unknown error",
-            filename, legacyLayoutExpected ? "legacy" : "packed");
-        return false;
+    // Stream decompression to avoid large peak memory on low-memory systems.
+    DecompressingIStream decompStream(fp, compressedSize, originalSize);
+    struct LegacyLoadFlagGuard {
+      explicit LegacyLoadFlagGuard(bool legacy) {
+        sparse_vector_serialization::SetLegacyLoadExpected(legacy);
       }
-    };
+      ~LegacyLoadFlagGuard() {
+        sparse_vector_serialization::SetLegacyLoadExpected(false);
+      }
+    } legacyLoadGuard(concentrateFileVersion <= 5);
 
-    bool loaded = false;
-    if (concentrateFileVersion <= 5) {
-      loaded = tryDeserialize(true);
-    } else {
-      loaded = tryDeserialize(false);
-    }
-    if (!loaded) {
-      fclose(fp);
-      return false;
+    {
+      cereal::PortableBinaryInputArchive archive(decompStream);
+      archive(*this);
     }
 
     fclose(fp);
