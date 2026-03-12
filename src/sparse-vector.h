@@ -44,6 +44,9 @@ class SparseVector {
   bool useBinaryBitPacking;
   T bitPackFalseValue;
   T bitPackTrueValue;
+  mutable uint32_t lastPayloadId = UINT32_MAX;
+  mutable const uint8_t *lastPayloadPtr = nullptr;
+  mutable uint32_t lastPayloadSize = 0;
   mutable uint32_t lastAccessedId = UINT32_MAX;
   mutable std::vector<T> lastDecompressed;
   mutable std::vector<uint8_t> decodeScratch;
@@ -106,6 +109,9 @@ class SparseVector {
     packedOffsets.clear();
     packedSizes.clear();
     packedBlob.clear();
+    lastPayloadId = UINT32_MAX;
+    lastPayloadPtr = nullptr;
+    lastPayloadSize = 0;
   }
 
   static uint64_t hashPayload(const uint8_t *bytes, size_t size) {
@@ -211,6 +217,9 @@ class SparseVector {
 
     data.clear();
     deduplicatePackedBlob();
+    lastPayloadId = UINT32_MAX;
+    lastPayloadPtr = nullptr;
+    lastPayloadSize = 0;
   }
 
   void restoreDataFromPacked() {
@@ -289,16 +298,35 @@ class SparseVector {
       if (elementId >= index.size()) return noData.data();
       return index[elementId].data();
     } else {
+      if (useCompression && elementId == lastAccessedId &&
+          !lastDecompressed.empty()) {
+        return lastDecompressed.data();
+      }
+
       const uint8_t *payload = nullptr;
       uint32_t payloadSize = 0;
 
-      if (!packedIds.empty()) {
-        payload = getPackedPayload(elementId, &payloadSize);
+      if (elementId == lastPayloadId && lastPayloadPtr != nullptr) {
+        payload = lastPayloadPtr;
+        payloadSize = lastPayloadSize;
       } else {
-        auto it = data.find(elementId);
-        if (it != data.end()) {
-          payload = it->second.data();
-          payloadSize = static_cast<uint32_t>(it->second.size());
+        if (!packedIds.empty()) {
+          payload = getPackedPayload(elementId, &payloadSize);
+        } else {
+          auto it = data.find(elementId);
+          if (it != data.end()) {
+            payload = it->second.data();
+            payloadSize = static_cast<uint32_t>(it->second.size());
+          }
+        }
+        if (payload) {
+          lastPayloadId = elementId;
+          lastPayloadPtr = payload;
+          lastPayloadSize = payloadSize;
+        } else {
+          lastPayloadId = UINT32_MAX;
+          lastPayloadPtr = nullptr;
+          lastPayloadSize = 0;
         }
       }
 
@@ -383,6 +411,9 @@ class SparseVector {
     restoreDataFromPacked();
     elementSize = size;
     clearPacked();
+    lastAccessedId = UINT32_MAX;
+    lastDecompressed.clear();
+    decodeScratch.clear();
 
     if (decompBuffer.size() < (elementSize * sizeof(T))) {
       decompBuffer.resize(elementSize * sizeof(T));
@@ -473,6 +504,9 @@ class SparseVector {
     data.clear();
     clearPacked();
     noData.resize(1);
+    lastPayloadId = UINT32_MAX;
+    lastPayloadPtr = nullptr;
+    lastPayloadSize = 0;
     lastAccessedId = UINT32_MAX;
     lastDecompressed.clear();
     decodeScratch.clear();
@@ -528,6 +562,9 @@ class SparseVector {
       deduplicatePackedBlob();
       data.clear();
 
+      lastPayloadId = UINT32_MAX;
+      lastPayloadPtr = nullptr;
+      lastPayloadSize = 0;
       lastAccessedId = UINT32_MAX;
       lastDecompressed.clear();
       decodeScratch.clear();
@@ -547,6 +584,9 @@ class SparseVector {
     data = std::move(filteredData);
 
     // Clear cache
+    lastPayloadId = UINT32_MAX;
+    lastPayloadPtr = nullptr;
+    lastPayloadSize = 0;
     lastAccessedId = UINT32_MAX;
     lastDecompressed.clear();
     decodeScratch.clear();
@@ -588,6 +628,9 @@ class SparseVector {
     }
 
     // Clear cache
+    lastPayloadId = UINT32_MAX;
+    lastPayloadPtr = nullptr;
+    lastPayloadSize = 0;
     lastAccessedId = UINT32_MAX;
     lastDecompressed.clear();
     decodeScratch.clear();
