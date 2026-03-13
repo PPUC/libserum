@@ -57,6 +57,9 @@ Vector policy currently used in `SerumData`:
   - `dynaspritemasks` + `dynaspritemasks_active`
   - `dynaspritemasks_extra` + `dynaspritemasks_extra_active`
 - Runtime uses sidecar flags instead of `255` sentinels for transparency / dynamic-zone activity.
+- Dynamic-zone value vectors (`dynamasks*`, `dynaspritemasks*`) remain
+  compressed but not value-bitpacked (correctness-first to avoid visual
+  artifacts); only their sidecar active flags are bitpacked.
 - `compmasks` and `backgroundmask*` are already boolean-mask domain (`mask==0`
   include / `>0` exclude) and therefore do not need separate transparency
   sidecar vectors.
