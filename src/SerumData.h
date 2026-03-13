@@ -60,6 +60,7 @@ class SerumData {
   bool SaveToFile(const char *filename);
   bool LoadFromFile(const char *filename, const uint8_t flags);
   bool LoadFromBuffer(const uint8_t *data, size_t size, const uint8_t flags);
+  void BuildPackingSidecarsAndNormalize();
 
   // Header data
   char rname[64];
@@ -88,16 +89,21 @@ class SerumData {
   SparseVector<uint16_t> cframes_v2;
   SparseVector<uint16_t> cframes_v2_extra;
   SparseVector<uint8_t> dynamasks;
+  SparseVector<uint8_t> dynamasks_active;
   SparseVector<uint8_t> dynamasks_extra;
+  SparseVector<uint8_t> dynamasks_extra_active;
   SparseVector<uint8_t> dyna4cols;
   SparseVector<uint16_t> dyna4cols_v2;
   SparseVector<uint16_t> dyna4cols_v2_extra;
   SparseVector<uint8_t> framesprites;
   SparseVector<uint8_t> spritedescriptionso;
+  SparseVector<uint8_t> spritedescriptionso_opaque;
   SparseVector<uint8_t> spritedescriptionsc;
   SparseVector<uint8_t> isextrasprite;
   SparseVector<uint8_t> spriteoriginal;
+  SparseVector<uint8_t> spriteoriginal_opaque;
   SparseVector<uint8_t> spritemask_extra;
+  SparseVector<uint8_t> spritemask_extra_opaque;
   SparseVector<uint16_t> spritecolored;
   SparseVector<uint16_t> spritecolored_extra;
   SparseVector<uint8_t> activeframes;
@@ -124,7 +130,9 @@ class SerumData {
   SparseVector<uint16_t> dynasprite4cols;
   SparseVector<uint16_t> dynasprite4cols_extra;
   SparseVector<uint8_t> dynaspritemasks;
+  SparseVector<uint8_t> dynaspritemasks_active;
   SparseVector<uint8_t> dynaspritemasks_extra;
+  SparseVector<uint8_t> dynaspritemasks_extra_active;
   SparseVector<uint8_t> sprshapemode;
   std::vector<uint8_t> frameIsScene;
   std::unordered_map<uint64_t, std::vector<uint32_t>> sceneFramesBySignature;
@@ -138,6 +146,7 @@ class SerumData {
   const void *m_logUserData = nullptr;
 
   uint8_t m_loadFlags = 0;
+  bool m_packingSidecarsNormalized = false;
 
   friend class cereal::access;
 
@@ -162,14 +171,27 @@ class SerumData {
 
     if constexpr (Archive::is_saving::value) {
       if (concentrateFileVersion >= 6) {
-        ar(frameIsScene, sceneFramesBySignature);
+        ar(frameIsScene, sceneFramesBySignature, spriteoriginal_opaque,
+           spritemask_extra_opaque, spritedescriptionso_opaque,
+           dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
+           dynaspritemasks_extra_active);
       }
     } else {
       if (concentrateFileVersion >= 6) {
-        ar(frameIsScene, sceneFramesBySignature);
+        ar(frameIsScene, sceneFramesBySignature, spriteoriginal_opaque,
+           spritemask_extra_opaque, spritedescriptionso_opaque,
+           dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
+           dynaspritemasks_extra_active);
       } else {
         frameIsScene.clear();
         sceneFramesBySignature.clear();
+        spriteoriginal_opaque.clear();
+        spritemask_extra_opaque.clear();
+        spritedescriptionso_opaque.clear();
+        dynamasks_active.clear();
+        dynamasks_extra_active.clear();
+        dynaspritemasks_active.clear();
+        dynaspritemasks_extra_active.clear();
       }
     }
 
@@ -187,8 +209,10 @@ class SerumData {
 
       cframes_v2_extra.setParent(&isextraframe);
       dynamasks_extra.setParent(&isextraframe);
+      dynamasks_extra_active.setParent(&isextraframe);
       dyna4cols_v2_extra.setParent(&isextraframe);
       spritemask_extra.setParent(&isextrasprite);
+      spritemask_extra_opaque.setParent(&isextrasprite);
       spritecolored_extra.setParent(&isextrasprite);
       colorrotations_v2_extra.setParent(&isextraframe);
       framespriteBB.setParent(&framesprites);
@@ -199,6 +223,7 @@ class SerumData {
       dynashadowscol_extra.setParent(&isextraframe);
       dynasprite4cols_extra.setParent(&isextraframe);
       dynaspritemasks_extra.setParent(&isextraframe);
+      dynaspritemasks_extra_active.setParent(&isextrasprite);
       backgroundBB.setParent(&backgroundIDs);
 
       std::vector<SceneData> loadedScenes;

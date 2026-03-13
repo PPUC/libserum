@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -59,42 +60,113 @@ class SparseVector {
   mutable std::unordered_map<uint32_t, uint32_t> packedIndexById;
   mutable std::vector<uint32_t> packedDenseIndexById;
 
-  static constexpr uint8_t kBitPackedMagic = 0xB1;
+  static constexpr uint8_t kLegacyBitPackedMagic = 0xB1;
+  static constexpr uint8_t kValuePackedMagic = 0xB2;
+  static constexpr uint8_t kValuePackedMode1Bit = 1;
+  static constexpr uint8_t kValuePackedMode2Bit = 2;
+  static constexpr uint8_t kValuePackedMode4Bit = 4;
 
   size_t rawByteSize() const { return elementSize * sizeof(T); }
 
-  size_t bitPackedByteSize() const { return 1 + ((elementSize + 7) / 8); }
+  size_t legacyBitPackedByteSize() const { return 1 + ((elementSize + 7) / 8); }
 
-  bool isBitPackedPayload(const uint8_t *payload, size_t size) const {
+  size_t valuePackedByteSize(uint8_t modeBits) const {
+    return 2 + (((elementSize * modeBits) + 7) / 8);
+  }
+
+  size_t maxPackedPayloadByteSize() const {
+    if (!useBinaryBitPacking || !std::is_same<T, uint8_t>::value) {
+      return rawByteSize();
+    }
+    const size_t maxPacked =
+        std::max(legacyBitPackedByteSize(), valuePackedByteSize(4));
+    return std::max(rawByteSize(), maxPacked);
+  }
+
+  bool isLegacyBitPackedPayload(const uint8_t *payload, size_t size) const {
     if (!useBinaryBitPacking || !payload) {
       return false;
     }
     if (!std::is_same<T, uint8_t>::value) {
       return false;
     }
-    return size == bitPackedByteSize() && payload[0] == kBitPackedMagic;
+    return size == legacyBitPackedByteSize() &&
+           payload[0] == kLegacyBitPackedMagic;
   }
 
-  void encodeBitPacked(const T *values, std::vector<uint8_t> &encoded) const {
-    if (!useBinaryBitPacking) {
-      encoded.clear();
-      return;
+  bool isValuePackedPayload(const uint8_t *payload, size_t size) const {
+    if (!useBinaryBitPacking || !payload) {
+      return false;
     }
     if (!std::is_same<T, uint8_t>::value) {
-      throw std::runtime_error(
-          "Binary bit packing is only supported for uint8_t");
+      return false;
     }
-
-    encoded.assign(bitPackedByteSize(), 0);
-    encoded[0] = kBitPackedMagic;
-    for (size_t i = 0; i < elementSize; ++i) {
-      if (values[i] != bitPackFalseValue) {
-        encoded[1 + (i / 8)] |= (1u << (i % 8));
-      }
+    if (size < 2 || payload[0] != kValuePackedMagic) {
+      return false;
     }
+    const uint8_t mode = payload[1];
+    if (mode != kValuePackedMode1Bit && mode != kValuePackedMode2Bit &&
+        mode != kValuePackedMode4Bit) {
+      return false;
+    }
+    return size == valuePackedByteSize(mode);
   }
 
-  T *decodeBitPackedAndCache(uint32_t elementId, const uint8_t *payload) {
+  bool encodeValuePacked(const T *values, std::vector<uint8_t> &encoded) const {
+    if (!useBinaryBitPacking) {
+      encoded.clear();
+      return false;
+    }
+    if (!std::is_same<T, uint8_t>::value) {
+      throw std::runtime_error("Value packing is only supported for uint8_t");
+    }
+
+    uint8_t maxValue = 0;
+    for (size_t i = 0; i < elementSize; ++i) {
+      const uint8_t value = values[i];
+      if (value > maxValue) {
+        maxValue = value;
+      }
+    }
+
+    uint8_t modeBits = 0;
+    if (maxValue <= 1) {
+      modeBits = kValuePackedMode1Bit;
+    } else if (maxValue <= 3) {
+      modeBits = kValuePackedMode2Bit;
+    } else if (maxValue <= 15) {
+      modeBits = kValuePackedMode4Bit;
+    } else {
+      return false;
+    }
+
+    if (valuePackedByteSize(modeBits) >= rawByteSize()) {
+      return false;
+    }
+
+    encoded.assign(valuePackedByteSize(modeBits), 0);
+    encoded[0] = kValuePackedMagic;
+    encoded[1] = modeBits;
+    for (size_t i = 0; i < elementSize; ++i) {
+      const uint8_t value = values[i];
+      if (modeBits == kValuePackedMode1Bit) {
+        if (value > 0) {
+          encoded[2 + (i / 8)] |= static_cast<uint8_t>(1u << (i % 8));
+        }
+      } else if (modeBits == kValuePackedMode2Bit) {
+        const size_t bitPos = i * 2;
+        encoded[2 + (bitPos / 8)] |=
+            static_cast<uint8_t>((value & 0x3u) << (bitPos % 8));
+      } else {
+        const size_t bitPos = i * 4;
+        encoded[2 + (bitPos / 8)] |=
+            static_cast<uint8_t>((value & 0xFu) << (bitPos % 8));
+      }
+    }
+    return true;
+  }
+
+  void prepareDecodedCacheForWrite(uint32_t elementId) {
     if (lastAccessedId != UINT32_MAX && lastAccessedId != elementId &&
         !lastDecompressed.empty()) {
       secondAccessedId = lastAccessedId;
@@ -103,6 +175,33 @@ class SparseVector {
     if (lastDecompressed.size() < elementSize) {
       lastDecompressed.resize(elementSize);
     }
+  }
+
+  T *decodeValuePackedAndCache(uint32_t elementId, const uint8_t *payload) {
+    const uint8_t modeBits = payload[1];
+    prepareDecodedCacheForWrite(elementId);
+
+    for (size_t i = 0; i < elementSize; ++i) {
+      if (modeBits == kValuePackedMode1Bit) {
+        const bool isSet = (payload[2 + (i / 8)] & (1u << (i % 8))) != 0;
+        lastDecompressed[i] = static_cast<T>(isSet ? 1 : 0);
+      } else if (modeBits == kValuePackedMode2Bit) {
+        const size_t bitPos = i * 2;
+        lastDecompressed[i] =
+            static_cast<T>((payload[2 + (bitPos / 8)] >> (bitPos % 8)) & 0x3u);
+      } else {
+        const size_t bitPos = i * 4;
+        lastDecompressed[i] =
+            static_cast<T>((payload[2 + (bitPos / 8)] >> (bitPos % 8)) & 0xFu);
+      }
+    }
+
+    lastAccessedId = elementId;
+    return lastDecompressed.data();
+  }
+
+  T *decodeLegacyBitPackedAndCache(uint32_t elementId, const uint8_t *payload) {
+    prepareDecodedCacheForWrite(elementId);
 
     for (size_t i = 0; i < elementSize; ++i) {
       const bool isSet = (payload[1 + (i / 8)] & (1u << (i % 8))) != 0;
@@ -395,19 +494,22 @@ class SparseVector {
         }
 
         const size_t rawBytes = rawByteSize();
-        if (decodeScratch.size() < rawBytes) {
-          decodeScratch.resize(rawBytes);
+        const size_t maxDecodedSize = maxPackedPayloadByteSize();
+        if (decodeScratch.size() < maxDecodedSize) {
+          decodeScratch.resize(maxDecodedSize);
         }
 
         int decompressedSize = LZ4_decompress_safe(
             reinterpret_cast<const char *>(payload),
             reinterpret_cast<char *>(decodeScratch.data()),
-            static_cast<int>(payloadSize), static_cast<int>(rawBytes));
+            static_cast<int>(payloadSize), static_cast<int>(maxDecodedSize));
 
         if (decompressedSize < 0) {
-          // Backward compatibility: some payloads may be stored raw.
-          if (isBitPackedPayload(payload, payloadSize)) {
-            return decodeBitPackedAndCache(elementId, payload);
+          if (isValuePackedPayload(payload, payloadSize)) {
+            return decodeValuePackedAndCache(elementId, payload);
+          }
+          if (isLegacyBitPackedPayload(payload, payloadSize)) {
+            return decodeLegacyBitPackedAndCache(elementId, payload);
           }
 
           // Backward compatibility: older payloads may store raw bytes even if
@@ -418,30 +520,31 @@ class SparseVector {
           return noData.data();
         }
 
-        if (isBitPackedPayload(decodeScratch.data(),
-                               static_cast<size_t>(decompressedSize))) {
-          return decodeBitPackedAndCache(elementId, decodeScratch.data());
+        if (isValuePackedPayload(decodeScratch.data(),
+                                 static_cast<size_t>(decompressedSize))) {
+          return decodeValuePackedAndCache(elementId, decodeScratch.data());
+        }
+
+        if (isLegacyBitPackedPayload(decodeScratch.data(),
+                                     static_cast<size_t>(decompressedSize))) {
+          return decodeLegacyBitPackedAndCache(elementId, decodeScratch.data());
         }
 
         if (static_cast<size_t>(decompressedSize) != rawBytes) {
           return noData.data();
         }
 
-        if (lastAccessedId != UINT32_MAX && lastAccessedId != elementId &&
-            !lastDecompressed.empty()) {
-          secondAccessedId = lastAccessedId;
-          secondDecompressed.swap(lastDecompressed);
-        }
-        if (lastDecompressed.size() < elementSize) {
-          lastDecompressed.resize(elementSize);
-        }
+        prepareDecodedCacheForWrite(elementId);
         memcpy(lastDecompressed.data(), decodeScratch.data(), rawBytes);
         lastAccessedId = elementId;
         return lastDecompressed.data();
       }
 
-      if (isBitPackedPayload(payload, payloadSize)) {
-        return decodeBitPackedAndCache(elementId, payload);
+      if (isValuePackedPayload(payload, payloadSize)) {
+        return decodeValuePackedAndCache(elementId, payload);
+      }
+      if (isLegacyBitPackedPayload(payload, payloadSize)) {
+        return decodeLegacyBitPackedAndCache(elementId, payload);
       }
 
       if (payloadSize != rawByteSize()) {
@@ -490,14 +593,15 @@ class SparseVector {
 
     if (parent == nullptr || parent->hasData(elementId)) {
       if (memcmp(values, noData.data(), elementSize * sizeof(T)) != 0) {
-        std::vector<uint8_t> bitPacked;
+        std::vector<uint8_t> valuePacked;
         const uint8_t *storeBytes = reinterpret_cast<const uint8_t *>(values);
         size_t storeByteSize = elementSize * sizeof(T);
 
         if (useBinaryBitPacking) {
-          encodeBitPacked(values, bitPacked);
-          storeBytes = bitPacked.data();
-          storeByteSize = bitPacked.size();
+          if (encodeValuePacked(values, valuePacked)) {
+            storeBytes = valuePacked.data();
+            storeByteSize = valuePacked.size();
+          }
         }
 
         if (useCompression) {

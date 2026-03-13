@@ -21,19 +21,22 @@ SerumData::SerumData()
       cframes(0, false, true),
       cframes_v2(0, false, true),
       cframes_v2_extra(0, false, true),
-      dynamasks(255, false, true),
-      dynamasks_extra(255, false, true),
+      dynamasks(0, false, true, true, 0, 1),
+      dynamasks_active(0, false, true, true, 0, 1),
+      dynamasks_extra(0, false, true, true, 0, 1),
+      dynamasks_extra_active(0, false, true, true, 0, 1),
       dyna4cols(0),
       dyna4cols_v2(0, false, true),
       dyna4cols_v2_extra(0, false, true),
       framesprites(255),
       spritedescriptionso(0),
+      spritedescriptionso_opaque(0, false, true, true, 0, 1),
       spritedescriptionsc(0),
       isextrasprite(0, true),
-      spriteoriginal(255),    // Do not compress because GetSpriteSize seems to
-                              // have an issue with it.
-      spritemask_extra(255),  // Do not compress because GetSpriteSize seems to
-                              // have an issue with it.
+      spriteoriginal(0, false, true, true, 0, 1),
+      spriteoriginal_opaque(0, false, true, true, 0, 1),
+      spritemask_extra(0, false, true, true, 0, 1),
+      spritemask_extra_opaque(0, false, true, true, 0, 1),
       spritecolored(0, false, true),
       spritecolored_extra(0, false, true),
       activeframes(1),
@@ -59,8 +62,10 @@ SerumData::SerumData()
       dynashadowscol_extra(0),
       dynasprite4cols(0),
       dynasprite4cols_extra(0),
-      dynaspritemasks(255, false, true),
-      dynaspritemasks_extra(255, false, true),
+      dynaspritemasks(0, false, true, true, 0, 1),
+      dynaspritemasks_active(0, false, true, true, 0, 1),
+      dynaspritemasks_extra(0, false, true, true, 0, 1),
+      dynaspritemasks_extra_active(0, false, true, true, 0, 1),
       sprshapemode(0) {
   sceneGenerator = new SceneGenerator();
   if (is_real_machine()) packingStorage.assign(384u * 1024u * 1024u, 0xA5);
@@ -69,6 +74,7 @@ SerumData::SerumData()
 SerumData::~SerumData() {}
 
 void SerumData::Clear() {
+  m_packingSidecarsNormalized = false;
   hashcodes.clear();
   shapecompmode.clear();
   compmaskID.clear();
@@ -79,16 +85,21 @@ void SerumData::Clear() {
   cframes_v2_extra.clear();
   cframes.clear();
   dynamasks.clear();
+  dynamasks_active.clear();
   dynamasks_extra.clear();
+  dynamasks_extra_active.clear();
   dyna4cols.clear();
   dyna4cols_v2.clear();
   dyna4cols_v2_extra.clear();
   framesprites.clear();
   spritedescriptionso.clear();
+  spritedescriptionso_opaque.clear();
   spritedescriptionsc.clear();
   isextrasprite.clear();
   spriteoriginal.clear();
+  spriteoriginal_opaque.clear();
   spritemask_extra.clear();
+  spritemask_extra_opaque.clear();
   spritecolored.clear();
   spritecolored_extra.clear();
   activeframes.clear();
@@ -115,14 +126,194 @@ void SerumData::Clear() {
   dynasprite4cols.clear();
   dynasprite4cols_extra.clear();
   dynaspritemasks.clear();
+  dynaspritemasks_active.clear();
   dynaspritemasks_extra.clear();
+  dynaspritemasks_extra_active.clear();
   sprshapemode.clear();
   frameIsScene.clear();
   sceneFramesBySignature.clear();
 }
 
+void SerumData::BuildPackingSidecarsAndNormalize() {
+  if (m_packingSidecarsNormalized) {
+    return;
+  }
+
+  const size_t spritePixels = MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
+  const size_t spritePixelsV1 = MAX_SPRITE_SIZE * MAX_SPRITE_SIZE;
+  const size_t framePixels = static_cast<size_t>(fwidth) * fheight;
+  const size_t extraFramePixels =
+      static_cast<size_t>(fwidth_extra) * fheight_extra;
+
+  std::vector<uint8_t> normalized;
+  std::vector<uint8_t> flags;
+
+  normalized.resize(spritePixels);
+  flags.resize(spritePixels);
+  for (uint32_t spriteId = 0; spriteId < nsprites; ++spriteId) {
+    const bool hasSourceVector = spriteoriginal.hasData(spriteId);
+    const bool hasOpaqueVector = spriteoriginal_opaque.hasData(spriteId);
+    if (!hasSourceVector && !hasOpaqueVector) {
+      continue;
+    }
+    const uint8_t *source = spriteoriginal[spriteId];
+    const uint8_t *opaqueSource = spriteoriginal_opaque[spriteId];
+    for (size_t i = 0; i < spritePixels; ++i) {
+      const uint8_t value = hasSourceVector ? source[i] : 0;
+      const bool opaque =
+          hasOpaqueVector ? (opaqueSource[i] > 0) : (value != 255);
+      flags[i] = opaque ? 1 : 0;
+      normalized[i] = opaque ? value : 0;
+    }
+    spriteoriginal_opaque.set(spriteId, flags.data(), spritePixels);
+    spriteoriginal.set(spriteId, normalized.data(), spritePixels);
+  }
+
+  for (uint32_t spriteId = 0; spriteId < nsprites; ++spriteId) {
+    if (isextrasprite[spriteId][0] == 0) {
+      continue;
+    }
+    const bool hasSourceVector = spritemask_extra.hasData(spriteId);
+    const bool hasOpaqueVector = spritemask_extra_opaque.hasData(spriteId);
+    if (!hasSourceVector && !hasOpaqueVector) {
+      continue;
+    }
+    const uint8_t *source = spritemask_extra[spriteId];
+    const uint8_t *opaqueSource = spritemask_extra_opaque[spriteId];
+    for (size_t i = 0; i < spritePixels; ++i) {
+      const uint8_t value = hasSourceVector ? source[i] : 0;
+      const bool opaque =
+          hasOpaqueVector ? (opaqueSource[i] > 0) : (value != 255);
+      flags[i] = opaque ? 1 : 0;
+      normalized[i] = opaque ? value : 0;
+    }
+    spritemask_extra_opaque.set(spriteId, flags.data(), spritePixels,
+                                &isextrasprite);
+    spritemask_extra.set(spriteId, normalized.data(), spritePixels,
+                         &isextrasprite);
+  }
+
+  normalized.resize(spritePixelsV1);
+  flags.resize(spritePixelsV1);
+  for (uint32_t spriteId = 0; spriteId < nsprites; ++spriteId) {
+    const bool hasSourceVector = spritedescriptionso.hasData(spriteId);
+    const bool hasOpaqueVector = spritedescriptionso_opaque.hasData(spriteId);
+    if (!hasSourceVector && !hasOpaqueVector) {
+      continue;
+    }
+    const uint8_t *source = spritedescriptionso[spriteId];
+    const uint8_t *opaqueSource = spritedescriptionso_opaque[spriteId];
+    for (size_t i = 0; i < spritePixelsV1; ++i) {
+      const uint8_t value = hasSourceVector ? source[i] : 0;
+      const bool opaque =
+          hasOpaqueVector ? (opaqueSource[i] > 0) : (value != 255);
+      flags[i] = opaque ? 1 : 0;
+      normalized[i] = opaque ? value : 0;
+    }
+    spritedescriptionso_opaque.set(spriteId, flags.data(), spritePixelsV1);
+    spritedescriptionso.set(spriteId, normalized.data(), spritePixelsV1);
+  }
+
+  normalized.resize(framePixels);
+  flags.resize(framePixels);
+  for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+    const bool hasSourceVector = dynamasks.hasData(frameId);
+    const bool hasActiveVector = dynamasks_active.hasData(frameId);
+    if (!hasSourceVector && !hasActiveVector) {
+      continue;
+    }
+    const uint8_t *source = dynamasks[frameId];
+    const uint8_t *activeSource = dynamasks_active[frameId];
+    for (size_t i = 0; i < framePixels; ++i) {
+      const uint8_t value = hasSourceVector ? source[i] : 0;
+      const bool active =
+          hasActiveVector ? (activeSource[i] > 0) : (value != 255);
+      flags[i] = active ? 1 : 0;
+      normalized[i] = active ? value : 0;
+    }
+    dynamasks_active.set(frameId, flags.data(), framePixels);
+    dynamasks.set(frameId, normalized.data(), framePixels);
+  }
+
+  if (extraFramePixels > 0) {
+    normalized.resize(extraFramePixels);
+    flags.resize(extraFramePixels);
+    for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+      if (isextraframe[frameId][0] == 0) {
+        continue;
+      }
+      const bool hasSourceVector = dynamasks_extra.hasData(frameId);
+      const bool hasActiveVector = dynamasks_extra_active.hasData(frameId);
+      if (!hasSourceVector && !hasActiveVector) {
+        continue;
+      }
+      const uint8_t *source = dynamasks_extra[frameId];
+      const uint8_t *activeSource = dynamasks_extra_active[frameId];
+      for (size_t i = 0; i < extraFramePixels; ++i) {
+        const uint8_t value = hasSourceVector ? source[i] : 0;
+        const bool active =
+            hasActiveVector ? (activeSource[i] > 0) : (value != 255);
+        flags[i] = active ? 1 : 0;
+        normalized[i] = active ? value : 0;
+      }
+      dynamasks_extra_active.set(frameId, flags.data(), extraFramePixels,
+                                 &isextraframe);
+      dynamasks_extra.set(frameId, normalized.data(), extraFramePixels,
+                          &isextraframe);
+    }
+  }
+
+  normalized.resize(spritePixels);
+  flags.resize(spritePixels);
+  for (uint32_t spriteId = 0; spriteId < nsprites; ++spriteId) {
+    const bool hasSourceVector = dynaspritemasks.hasData(spriteId);
+    const bool hasActiveVector = dynaspritemasks_active.hasData(spriteId);
+    if (!hasSourceVector && !hasActiveVector) {
+      continue;
+    }
+    const uint8_t *source = dynaspritemasks[spriteId];
+    const uint8_t *activeSource = dynaspritemasks_active[spriteId];
+    for (size_t i = 0; i < spritePixels; ++i) {
+      const uint8_t value = hasSourceVector ? source[i] : 0;
+      const bool active =
+          hasActiveVector ? (activeSource[i] > 0) : (value != 255);
+      flags[i] = active ? 1 : 0;
+      normalized[i] = active ? value : 0;
+    }
+    dynaspritemasks_active.set(spriteId, flags.data(), spritePixels);
+    dynaspritemasks.set(spriteId, normalized.data(), spritePixels);
+  }
+
+  for (uint32_t spriteId = 0; spriteId < nsprites; ++spriteId) {
+    if (isextrasprite[spriteId][0] == 0) {
+      continue;
+    }
+    const bool hasSourceVector = dynaspritemasks_extra.hasData(spriteId);
+    const bool hasActiveVector = dynaspritemasks_extra_active.hasData(spriteId);
+    if (!hasSourceVector && !hasActiveVector) {
+      continue;
+    }
+    const uint8_t *source = dynaspritemasks_extra[spriteId];
+    const uint8_t *activeSource = dynaspritemasks_extra_active[spriteId];
+    for (size_t i = 0; i < spritePixels; ++i) {
+      const uint8_t value = hasSourceVector ? source[i] : 0;
+      const bool active =
+          hasActiveVector ? (activeSource[i] > 0) : (value != 255);
+      flags[i] = active ? 1 : 0;
+      normalized[i] = active ? value : 0;
+    }
+    dynaspritemasks_extra_active.set(spriteId, flags.data(), spritePixels,
+                                     &isextrasprite);
+    dynaspritemasks_extra.set(spriteId, normalized.data(), spritePixels,
+                              &isextrasprite);
+  }
+
+  m_packingSidecarsNormalized = true;
+}
+
 bool SerumData::SaveToFile(const char *filename) {
   try {
+    BuildPackingSidecarsAndNormalize();
     Log("Writing %s", filename);
     // Serialize to memory buffer first
     std::ostringstream ss(std::ios::binary);
@@ -183,6 +374,7 @@ bool SerumData::SaveToFile(const char *filename) {
 
 bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
   m_loadFlags = flags;
+  m_packingSidecarsNormalized = false;
   FILE *fp;
   try {
     fp = fopen(filename, "rb");
@@ -303,6 +495,7 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
 bool SerumData::LoadFromBuffer(const uint8_t *data, size_t size,
                                const uint8_t flags) {
   m_loadFlags = flags;
+  m_packingSidecarsNormalized = false;
 
   try {
     if (!data || size < (4 + sizeof(uint16_t) + sizeof(uint32_t))) {

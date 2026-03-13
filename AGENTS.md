@@ -35,14 +35,31 @@ Packed sparse payload format (used for v6 save):
 
 Behavior:
 - Packed payloads are deduplicated by payload content at pack time.
-- Optional binary bit-packing exists for boolean-like `uint8_t` payloads.
+- Optional adaptive value packing exists for `uint8_t` payloads:
+  - per-payload mode is derived from actual max value and encoded in payload header
+  - 1-bit mode for values in `0..1`
+  - 2-bit mode for values in `0..3`
+  - 4-bit mode for values in `0..15`
+  - fallback to raw 8-bit payload otherwise
+- Value packing preserves exact values for packed modes (no nonzero->1 normalization).
 - Packed vectors can still be modified at runtime (`set()`); mutable map storage is restored lazily when needed.
 - Runtime lookup uses dense index fast-path when IDs are dense.
 
 Vector policy currently used in `SerumData`:
 - `dyna4cols_v2` and `dyna4cols_v2_extra` are LZ4-compressed sparse vectors.
-- `backgroundmask` and `backgroundmask_extra` use binary bit-packing + LZ4 compression.
-- `spritedescriptionso`, `spritedescriptionsc`, `spriteoriginal`, and `spritemask_extra` are intentionally not compressed/bitpacked due known sprite path issues.
+- `backgroundmask` and `backgroundmask_extra` use adaptive value packing + LZ4 compression.
+- Sentinel-based vectors are normalized and packed with boolean sidecars:
+  - `spriteoriginal` + `spriteoriginal_opaque`
+  - `spritemask_extra` + `spritemask_extra_opaque`
+  - `spritedescriptionso` + `spritedescriptionso_opaque`
+  - `dynamasks` + `dynamasks_active`
+  - `dynamasks_extra` + `dynamasks_extra_active`
+  - `dynaspritemasks` + `dynaspritemasks_active`
+  - `dynaspritemasks_extra` + `dynaspritemasks_extra_active`
+- Runtime uses sidecar flags instead of `255` sentinels for transparency / dynamic-zone activity.
+- `compmasks` and `backgroundmask*` are already boolean-mask domain (`mask==0`
+  include / `>0` exclude) and therefore do not need separate transparency
+  sidecar vectors.
 
 ## Load flow
 Entry point: `Serum_Load(altcolorpath, romname, flags)`.
@@ -58,6 +75,9 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
 7. Build or restore frame lookup acceleration:
    - If loaded from cROMc v6 and no CSV update in this run: use stored lookup via `InitFrameLookupRuntimeStateFromStoredData()`.
    - Otherwise: rebuild via `BuildFrameLookupVectors()`.
+8. Build/normalize packing sidecars via `BuildPackingSidecarsAndNormalize()`.
+   - The normalization step is idempotent and guarded; repeated calls in the
+     same load/save cycle are no-ops once completed.
 
 Important:
 - `BuildFrameLookupVectors()` must run after final scene data is known for this load cycle.
@@ -149,6 +169,8 @@ Stored in v6:
   - `frameIsScene`
   - `sceneFramesBySignature`
 - Sparse vectors in packed sparse layout.
+- Normalized sentinel vectors plus sidecar flag vectors for transparency and
+  dynamic-zone activity.
 
 Backward compatibility:
 - v5 files are loadable.

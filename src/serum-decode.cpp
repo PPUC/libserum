@@ -540,6 +540,8 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(const uint8_t flags) {
     return NULL;
   }
 
+  g_serumData.BuildPackingSidecarsAndNormalize();
+
   // Set requested frame types
   isoriginalrequested = false;
   isextrarequested = false;
@@ -896,6 +898,8 @@ Serum_Frame_Struc* Serum_LoadFilev2(FILE* pfile, const uint8_t flags,
     g_serumData.sprshapemode.reserve(g_serumData.nsprites);
   }
 
+  g_serumData.BuildPackingSidecarsAndNormalize();
+
   fclose(pfile);
 
   mySerum.ntriggers = 0;
@@ -1189,6 +1193,8 @@ Serum_Frame_Struc* Serum_LoadFilev1(const char* const filename,
     g_serumData.backgroundBB.readFromCRomFile(4, g_serumData.nframes, pfile,
                                               &g_serumData.backgroundIDs);
   }
+
+  g_serumData.BuildPackingSidecarsAndNormalize();
   fclose(pfile);
 
   // allocate memory for previous detected frame
@@ -1567,14 +1573,66 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   return IDENTIFY_NO_FRAME;  // we found no corresponding frame
 }
 
+static inline bool IsSpriteOpaqueV1(uint8_t spriteId, uint32_t pixelIndex) {
+  if (!g_serumData.spritedescriptionso_opaque.hasData(spriteId)) {
+    return g_serumData.spritedescriptionso[spriteId][pixelIndex] != 255;
+  }
+  return g_serumData.spritedescriptionso_opaque[spriteId][pixelIndex] > 0;
+}
+
+static inline bool IsSpriteOpaqueV2(uint8_t spriteId, uint32_t pixelIndex) {
+  if (!g_serumData.spriteoriginal_opaque.hasData(spriteId)) {
+    return g_serumData.spriteoriginal[spriteId][pixelIndex] != 255;
+  }
+  return g_serumData.spriteoriginal_opaque[spriteId][pixelIndex] > 0;
+}
+
+static inline bool IsSpriteExtraOpaqueV2(uint8_t spriteId,
+                                         uint32_t pixelIndex) {
+  if (!g_serumData.spritemask_extra_opaque.hasData(spriteId)) {
+    return g_serumData.spritemask_extra[spriteId][pixelIndex] != 255;
+  }
+  return g_serumData.spritemask_extra_opaque[spriteId][pixelIndex] > 0;
+}
+
+static inline bool IsFrameDynaActive(uint32_t frameId, uint32_t pixelIndex) {
+  if (!g_serumData.dynamasks_active.hasData(frameId)) {
+    return g_serumData.dynamasks[frameId][pixelIndex] != 255;
+  }
+  return g_serumData.dynamasks_active[frameId][pixelIndex] > 0;
+}
+
+static inline bool IsFrameExtraDynaActive(uint32_t frameId,
+                                          uint32_t pixelIndex) {
+  if (!g_serumData.dynamasks_extra_active.hasData(frameId)) {
+    return g_serumData.dynamasks_extra[frameId][pixelIndex] != 255;
+  }
+  return g_serumData.dynamasks_extra_active[frameId][pixelIndex] > 0;
+}
+
+static inline bool IsSpriteDynaActive(uint8_t spriteId, uint32_t pixelIndex) {
+  if (!g_serumData.dynaspritemasks_active.hasData(spriteId)) {
+    return g_serumData.dynaspritemasks[spriteId][pixelIndex] != 255;
+  }
+  return g_serumData.dynaspritemasks_active[spriteId][pixelIndex] > 0;
+}
+
+static inline bool IsSpriteExtraDynaActive(uint8_t spriteId,
+                                           uint32_t pixelIndex) {
+  if (!g_serumData.dynaspritemasks_extra_active.hasData(spriteId)) {
+    return g_serumData.dynaspritemasks_extra[spriteId][pixelIndex] != 255;
+  }
+  return g_serumData.dynaspritemasks_extra_active[spriteId][pixelIndex] > 0;
+}
+
 void GetSpriteSize(uint8_t nospr, int* pswid, int* pshei, uint8_t* spriteData,
-                   int sswid, int sshei) {
+                   int sswid, int sshei, uint8_t* spriteOpaque) {
   *pswid = *pshei = 0;
   if (nospr >= g_serumData.nsprites) return;
   if (!spriteData) return;
   for (int tj = 0; tj < sshei; tj++) {
     for (int ti = 0; ti < sswid; ti++) {
-      if (spriteData[tj * sswid + ti] < 255) {
+      if (spriteOpaque[tj * sswid + ti] > 0) {
         if (tj > *pshei) *pshei = tj;
         if (ti > *pswid) *pswid = ti;
       }
@@ -1596,7 +1654,8 @@ bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
     uint8_t qspr = g_serumData.framesprites[quelleframe][ti];
     int spw, sph;
     GetSpriteSize(qspr, &spw, &sph, g_serumData.spritedescriptionso[qspr],
-                  MAX_SPRITE_SIZE, MAX_SPRITE_SIZE);
+                  MAX_SPRITE_SIZE, MAX_SPRITE_SIZE,
+                  g_serumData.spritedescriptionso_opaque[qspr]);
     short minxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4]);
     short minyBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 1]);
     short maxxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 2]);
@@ -1649,11 +1708,11 @@ bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
             bool notthere = false;
             for (uint16_t tk = 0; tk < deth; tk++) {
               for (uint16_t tl = 0; tl < detw; tl++) {
+                const uint32_t spritePixelIndex =
+                    (tk + dety) * MAX_SPRITE_SIZE + tl + detx;
+                if (!IsSpriteOpaqueV1(qspr, spritePixelIndex)) continue;
                 uint8_t val =
-                    g_serumData.spritedescriptionso[qspr][(tk + dety) *
-                                                              MAX_SPRITE_SIZE +
-                                                          tl + detx];
-                if (val == 255) continue;
+                    g_serumData.spritedescriptionso[qspr][spritePixelIndex];
                 if (val !=
                     Frame[(tk + offsy) * g_serumData.fwidth + tl + offsx]) {
                   notthere = true;
@@ -1740,7 +1799,8 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
     }
     int spw, sph;
     GetSpriteSize(qspr, &spw, &sph, g_serumData.spriteoriginal[qspr],
-                  MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT);
+                  MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT,
+                  g_serumData.spriteoriginal_opaque[qspr]);
     short minxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4]);
     short minyBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 1]);
     short maxxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 2]);
@@ -1793,11 +1853,11 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
             bool notthere = false;
             for (uint16_t tk = 0; tk < deth; tk++) {
               for (uint16_t tl = 0; tl < detw; tl++) {
+                const uint32_t spritePixelIndex =
+                    (tk + dety) * MAX_SPRITE_WIDTH + tl + detx;
+                if (!IsSpriteOpaqueV2(qspr, spritePixelIndex)) continue;
                 uint8_t val =
-                    g_serumData
-                        .spriteoriginal[qspr][(tk + dety) * MAX_SPRITE_WIDTH +
-                                              tl + detx];
-                if (val == 255) continue;
+                    g_serumData.spriteoriginal[qspr][spritePixelIndex];
                 if (val !=
                     Frame[(tk + offsy) * g_serumData.fwidth + tl + offsx]) {
                   notthere = true;
@@ -1874,7 +1934,7 @@ void Colorize_Framev1(uint8_t* frame, uint32_t IDfound) {
                 .backgroundframes[g_serumData.backgroundIDs[IDfound][0]][tk];
       else {
         uint8_t dynacouche = g_serumData.dynamasks[IDfound][tk];
-        if (dynacouche == 255)
+        if (!IsFrameDynaActive(IDfound, tk))
           mySerum.frame[tk] = g_serumData.cframes[IDfound][tk];
         else
           mySerum.frame[tk] =
@@ -2053,7 +2113,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
           }
         } else {
           uint8_t dynacouche = g_serumData.dynamasks[IDfound][tk];
-          if (dynacouche == 255) {
+          if (!IsFrameDynaActive(IDfound, tk)) {
             if (isdynapix[tk] == 0) {
               if (blackOutStaticContent &&
                   (g_serumData.backgroundIDs[IDfound][0] <
@@ -2150,7 +2210,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
           }
         } else {
           uint8_t dynacouche = g_serumData.dynamasks_extra[IDfound][tk];
-          if (dynacouche == 255) {
+          if (!IsFrameExtraDynaActive(IDfound, tk)) {
             if (isdynapix[tk] == 0) {
               if (blackOutStaticContent &&
                   (g_serumData.backgroundIDs[IDfound][0] <
@@ -2194,9 +2254,7 @@ void Colorize_Spritev1(uint8_t nosprite, uint16_t frx, uint16_t fry,
                        uint16_t spx, uint16_t spy, uint16_t wid, uint16_t hei) {
   for (uint16_t tj = 0; tj < hei; tj++) {
     for (uint16_t ti = 0; ti < wid; ti++) {
-      if (g_serumData
-              .spritedescriptionso[nosprite][(tj + spy) * MAX_SPRITE_SIZE + ti +
-                                             spx] < 255) {
+      if (IsSpriteOpaqueV1(nosprite, (tj + spy) * MAX_SPRITE_SIZE + ti + spx)) {
         mySerum.frame[(fry + tj) * g_serumData.fwidth + frx + ti] =
             g_serumData
                 .spritedescriptionsc[nosprite]
@@ -2231,10 +2289,9 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
       for (uint16_t ti = 0; ti < wid; ti++) {
         uint16_t tk = (fry + tj) * g_serumData.fwidth + frx + ti;
         uint32_t tl = (tj + spy) * MAX_SPRITE_WIDTH + ti + spx;
-        uint8_t spriteref = g_serumData.spriteoriginal[nosprite][tl];
-        if (spriteref < 255) {
+        if (IsSpriteOpaqueV2(nosprite, tl)) {
           uint8_t dynacouche = g_serumData.dynaspritemasks[nosprite][tl];
-          if (dynacouche == 255) {
+          if (!IsSpriteDynaActive(nosprite, tl)) {
             pfr[tk] = g_serumData.spritecolored[nosprite][tl];
             if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
                                 &prot[tk * 2 + 1], false))
@@ -2287,14 +2344,14 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
     for (uint16_t tj = 0; tj < thei; tj++) {
       for (uint16_t ti = 0; ti < twid; ti++) {
         uint16_t tk = (tfry + tj) * g_serumData.fwidth_extra + tfrx + ti;
-        if (g_serumData
-                .spritemask_extra[nosprite][(tj + tspy) * MAX_SPRITE_WIDTH +
-                                            ti + tspx] < 255) {
+        if (IsSpriteExtraOpaqueV2(nosprite,
+                                  (tj + tspy) * MAX_SPRITE_WIDTH + ti + tspx)) {
           uint8_t dynacouche =
               g_serumData.dynaspritemasks_extra[nosprite]
                                                [(tj + tspy) * MAX_SPRITE_WIDTH +
                                                 ti + tspx];
-          if (dynacouche == 255) {
+          if (!IsSpriteExtraDynaActive(
+                  nosprite, (tj + tspy) * MAX_SPRITE_WIDTH + ti + tspx)) {
             pfr[tk] =
                 g_serumData.spritecolored_extra[nosprite]
                                                [(tj + tspy) * MAX_SPRITE_WIDTH +
