@@ -1982,11 +1982,21 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
       if (++tj >= g_serumData.frameCount) tj = 0;
       continue;
     }
+    if (bucketOffset + bucketLength >
+        g_serumData.identifyBucketFrameIds.size()) {
+      if (++tj >= g_serumData.frameCount) tj = 0;
+      continue;
+    }
 
     const uint32_t hash = calc_crc32(frame, mask, pixels, shape);
-    for (uint32_t idx = 0; idx < bucketLength; ++idx) {
-      const uint32_t ti =
-          g_serumData.identifyBucketFrameIds[bucketOffset + idx];
+    const uint32_t* bucketBegin =
+        g_serumData.identifyBucketFrameIds.data() + bucketOffset;
+    const uint32_t* bucketEnd = bucketBegin + bucketLength;
+    const uint32_t* startIt = std::lower_bound(bucketBegin, bucketEnd, tj);
+    uint32_t startIdx = static_cast<uint32_t>(startIt - bucketBegin);
+    for (uint32_t step = 0; step < bucketLength; ++step) {
+      const uint32_t idx = (startIdx + step) % bucketLength;
+      const uint32_t ti = bucketBegin[idx];
       if (hash == g_serumData.hashcodes[ti][0]) {
         if (first_match || ti != lastfound_stream || mask < 255) {
           lastfound_stream = ti;
