@@ -1,13 +1,31 @@
 #pragma once
 
+#include <algorithm>
 #include <cereal/access.hpp>
 #include <cereal/types/unordered_map.hpp>
 #include <cereal/types/vector.hpp>
 #include <cstdint>
+#include <cstring>
+#include <stdexcept>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "LZ4Stream.h"
+
+namespace sparse_vector_serialization {
+inline bool &LegacyLoadExpectedFlag() {
+  static bool flag = false;
+  return flag;
+}
+
+inline void SetLegacyLoadExpected(bool expected) {
+  LegacyLoadExpectedFlag() = expected;
+}
+
+inline bool IsLegacyLoadExpected() { return LegacyLoadExpectedFlag(); }
+}  // namespace sparse_vector_serialization
+
 template <typename T>
 class SparseVector {
   static_assert(
@@ -23,16 +41,305 @@ class SparseVector {
   std::vector<T> decompBuffer;
   bool useIndex;
   bool useCompression;
+  bool useBinaryBitPacking;
+  T bitPackFalseValue;
+  T bitPackTrueValue;
+  mutable uint32_t lastPayloadId = UINT32_MAX;
+  mutable const uint8_t *lastPayloadPtr = nullptr;
+  mutable uint32_t lastPayloadSize = 0;
   mutable uint32_t lastAccessedId = UINT32_MAX;
+  mutable uint32_t secondAccessedId = UINT32_MAX;
   mutable std::vector<T> lastDecompressed;
+  mutable std::vector<T> secondDecompressed;
+  mutable std::vector<uint8_t> decodeScratch;
+  std::vector<uint32_t> packedIds;
+  std::vector<uint32_t> packedOffsets;
+  std::vector<uint32_t> packedSizes;
+  std::vector<uint8_t> packedBlob;
+  mutable std::unordered_map<uint32_t, uint32_t> packedIndexById;
+  mutable std::vector<uint32_t> packedDenseIndexById;
+
+  static constexpr uint8_t kBitPackedMagic = 0xB1;
+
+  size_t rawByteSize() const { return elementSize * sizeof(T); }
+
+  size_t bitPackedByteSize() const { return 1 + ((elementSize + 7) / 8); }
+
+  bool isBitPackedPayload(const uint8_t *payload, size_t size) const {
+    if (!useBinaryBitPacking || !payload) {
+      return false;
+    }
+    if (!std::is_same<T, uint8_t>::value) {
+      return false;
+    }
+    return size == bitPackedByteSize() && payload[0] == kBitPackedMagic;
+  }
+
+  void encodeBitPacked(const T *values, std::vector<uint8_t> &encoded) const {
+    if (!useBinaryBitPacking) {
+      encoded.clear();
+      return;
+    }
+    if (!std::is_same<T, uint8_t>::value) {
+      throw std::runtime_error(
+          "Binary bit packing is only supported for uint8_t");
+    }
+
+    encoded.assign(bitPackedByteSize(), 0);
+    encoded[0] = kBitPackedMagic;
+    for (size_t i = 0; i < elementSize; ++i) {
+      if (values[i] != bitPackFalseValue) {
+        encoded[1 + (i / 8)] |= (1u << (i % 8));
+      }
+    }
+  }
+
+  T *decodeBitPackedAndCache(uint32_t elementId, const uint8_t *payload) {
+    if (lastAccessedId != UINT32_MAX && lastAccessedId != elementId &&
+        !lastDecompressed.empty()) {
+      secondAccessedId = lastAccessedId;
+      secondDecompressed.swap(lastDecompressed);
+    }
+    if (lastDecompressed.size() < elementSize) {
+      lastDecompressed.resize(elementSize);
+    }
+
+    for (size_t i = 0; i < elementSize; ++i) {
+      const bool isSet = (payload[1 + (i / 8)] & (1u << (i % 8))) != 0;
+      lastDecompressed[i] = isSet ? bitPackTrueValue : bitPackFalseValue;
+    }
+
+    lastAccessedId = elementId;
+    return lastDecompressed.data();
+  }
+
+  void clearPacked() {
+    packedIds.clear();
+    packedOffsets.clear();
+    packedSizes.clear();
+    packedBlob.clear();
+    packedIndexById.clear();
+    packedDenseIndexById.clear();
+    lastPayloadId = UINT32_MAX;
+    lastPayloadPtr = nullptr;
+    lastPayloadSize = 0;
+  }
+
+  void ensurePackedIndex() const {
+    if (packedIds.empty()) {
+      packedIndexById.clear();
+      packedDenseIndexById.clear();
+      return;
+    }
+    if (packedIndexById.size() == packedIds.size() &&
+        !packedDenseIndexById.empty()) {
+      return;
+    }
+    packedIndexById.clear();
+    packedIndexById.reserve(packedIds.size());
+    for (uint32_t i = 0; i < packedIds.size(); ++i) {
+      packedIndexById.emplace(packedIds[i], i);
+    }
+
+    // Fast path for dense/small ID spaces (frame IDs, sprite IDs, etc).
+    // This avoids hash lookup overhead in operator[] hot loops.
+    packedDenseIndexById.clear();
+    const uint32_t maxPackedId = packedIds.back();
+    if (maxPackedId <= 1000000 &&
+        maxPackedId <= static_cast<uint32_t>(packedIds.size() * 8)) {
+      packedDenseIndexById.assign(static_cast<size_t>(maxPackedId) + 1,
+                                  UINT32_MAX);
+      for (uint32_t i = 0; i < packedIds.size(); ++i) {
+        packedDenseIndexById[packedIds[i]] = i;
+      }
+    }
+  }
+
+  static uint64_t hashPayload(const uint8_t *bytes, size_t size) {
+    uint64_t hash = 1469598103934665603ull;  // FNV-1a 64-bit offset basis
+    for (size_t i = 0; i < size; ++i) {
+      hash ^= static_cast<uint64_t>(bytes[i]);
+      hash *= 1099511628211ull;  // FNV prime
+    }
+    hash ^= static_cast<uint64_t>(size);
+    hash *= 1099511628211ull;
+    return hash;
+  }
+
+  void deduplicatePackedBlob() {
+    if (packedIds.empty() || packedOffsets.size() != packedIds.size() ||
+        packedSizes.size() != packedIds.size()) {
+      return;
+    }
+
+    std::vector<uint8_t> dedupBlob;
+    dedupBlob.reserve(packedBlob.size());
+
+    // hash -> list of (offset,size) candidates in dedupBlob
+    std::unordered_map<uint64_t, std::vector<std::pair<uint32_t, uint32_t>>>
+        dedupIndex;
+    dedupIndex.reserve(packedIds.size());
+
+    for (size_t i = 0; i < packedIds.size(); ++i) {
+      const uint32_t oldOffset = packedOffsets[i];
+      const uint32_t size = packedSizes[i];
+      if (oldOffset > packedBlob.size() ||
+          size > packedBlob.size() - oldOffset) {
+        continue;
+      }
+
+      const uint8_t *payload = packedBlob.data() + oldOffset;
+      const uint64_t payloadHash = hashPayload(payload, size);
+
+      uint32_t foundOffset = UINT32_MAX;
+      auto it = dedupIndex.find(payloadHash);
+      if (it != dedupIndex.end()) {
+        for (const auto &candidate : it->second) {
+          const uint32_t candidateOffset = candidate.first;
+          const uint32_t candidateSize = candidate.second;
+          if (candidateSize != size) {
+            continue;
+          }
+          if (candidateOffset > dedupBlob.size() ||
+              size > dedupBlob.size() - candidateOffset) {
+            continue;
+          }
+          if (memcmp(payload, dedupBlob.data() + candidateOffset, size) == 0) {
+            foundOffset = candidateOffset;
+            break;
+          }
+        }
+      }
+
+      if (foundOffset == UINT32_MAX) {
+        foundOffset = static_cast<uint32_t>(dedupBlob.size());
+        dedupBlob.insert(dedupBlob.end(), payload, payload + size);
+        dedupIndex[payloadHash].push_back({foundOffset, size});
+      }
+
+      packedOffsets[i] = foundOffset;
+      packedSizes[i] = size;
+    }
+
+    packedBlob = std::move(dedupBlob);
+  }
+
+  void buildPackedFromData() {
+    if (useIndex || data.empty()) {
+      return;
+    }
+
+    std::vector<uint32_t> ids;
+    ids.reserve(data.size());
+    for (const auto &entry : data) {
+      ids.push_back(entry.first);
+    }
+    std::sort(ids.begin(), ids.end());
+
+    clearPacked();
+    packedIds.reserve(ids.size());
+    packedOffsets.reserve(ids.size());
+    packedSizes.reserve(ids.size());
+
+    uint32_t offset = 0;
+    for (const uint32_t id : ids) {
+      const auto it = data.find(id);
+      if (it == data.end()) {
+        continue;
+      }
+
+      const auto &payload = it->second;
+      packedIds.push_back(id);
+      packedOffsets.push_back(offset);
+      packedSizes.push_back(static_cast<uint32_t>(payload.size()));
+      packedBlob.insert(packedBlob.end(), payload.begin(), payload.end());
+      offset += static_cast<uint32_t>(payload.size());
+    }
+
+    data.clear();
+    deduplicatePackedBlob();
+    lastPayloadId = UINT32_MAX;
+    lastPayloadPtr = nullptr;
+    lastPayloadSize = 0;
+  }
+
+  void restoreDataFromPacked() {
+    if (useIndex || packedIds.empty() || !data.empty()) {
+      return;
+    }
+
+    for (size_t i = 0; i < packedIds.size(); ++i) {
+      if (i >= packedOffsets.size() || i >= packedSizes.size()) {
+        continue;
+      }
+      const uint32_t offset = packedOffsets[i];
+      const uint32_t size = packedSizes[i];
+      if (offset > packedBlob.size() || size > packedBlob.size() - offset) {
+        continue;
+      }
+      data[packedIds[i]].assign(packedBlob.begin() + offset,
+                                packedBlob.begin() + offset + size);
+    }
+  }
+
+  const uint8_t *getPackedPayload(uint32_t elementId,
+                                  uint32_t *payloadSize) const {
+    if (packedIds.empty()) {
+      return nullptr;
+    }
+
+    ensurePackedIndex();
+    uint32_t packedIndex = UINT32_MAX;
+    if (elementId < packedDenseIndexById.size()) {
+      packedIndex = packedDenseIndexById[elementId];
+      if (packedIndex == UINT32_MAX) {
+        return nullptr;
+      }
+    } else {
+      auto it = packedIndexById.find(elementId);
+      if (it == packedIndexById.end()) {
+        return nullptr;
+      }
+      packedIndex = it->second;
+    }
+
+    const size_t idx = static_cast<size_t>(packedIndex);
+    if (idx >= packedOffsets.size() || idx >= packedSizes.size()) {
+      return nullptr;
+    }
+
+    const uint32_t offset = packedOffsets[idx];
+    const uint32_t size = packedSizes[idx];
+    if (offset > packedBlob.size() || size > packedBlob.size() - offset) {
+      return nullptr;
+    }
+
+    *payloadSize = size;
+    return packedBlob.data() + offset;
+  }
 
  public:
-  SparseVector(T noDataSignature, bool index, bool compress = false)
-      : useIndex(index), useCompression(compress) {
+  SparseVector(T noDataSignature, bool index, bool compress = false,
+               bool binaryBitPack = false, T bitPackFalse = 0,
+               T bitPackTrue = 1)
+      : useIndex(index),
+        useCompression(compress),
+        useBinaryBitPacking(binaryBitPack),
+        bitPackFalseValue(bitPackFalse),
+        bitPackTrueValue(bitPackTrue) {
+    if (useBinaryBitPacking && !std::is_same<T, uint8_t>::value) {
+      throw std::runtime_error(
+          "Binary bit packing is only supported for uint8_t SparseVector");
+    }
     noData.resize(1, noDataSignature);
   }
 
-  SparseVector(T noDataSignature) : useIndex(false), useCompression(false) {
+  SparseVector(T noDataSignature)
+      : useIndex(false),
+        useCompression(false),
+        useBinaryBitPacking(false),
+        bitPackFalseValue(noDataSignature),
+        bitPackTrueValue(static_cast<T>(1)) {
     noData.resize(1, noDataSignature);
   }
 
@@ -41,36 +348,107 @@ class SparseVector {
       if (elementId >= index.size()) return noData.data();
       return index[elementId].data();
     } else {
-      auto it = data.find(elementId);
-      if (it == data.end()) return noData.data();
+      if (useCompression && elementId == lastAccessedId &&
+          !lastDecompressed.empty()) {
+        return lastDecompressed.data();
+      }
+      if (useCompression && elementId == secondAccessedId &&
+          !secondDecompressed.empty()) {
+        std::swap(lastAccessedId, secondAccessedId);
+        std::swap(lastDecompressed, secondDecompressed);
+        return lastDecompressed.data();
+      }
+
+      const uint8_t *payload = nullptr;
+      uint32_t payloadSize = 0;
+
+      if (elementId == lastPayloadId && lastPayloadPtr != nullptr) {
+        payload = lastPayloadPtr;
+        payloadSize = lastPayloadSize;
+      } else {
+        if (!packedIds.empty()) {
+          payload = getPackedPayload(elementId, &payloadSize);
+        } else {
+          auto it = data.find(elementId);
+          if (it != data.end()) {
+            payload = it->second.data();
+            payloadSize = static_cast<uint32_t>(it->second.size());
+          }
+        }
+        if (payload) {
+          lastPayloadId = elementId;
+          lastPayloadPtr = payload;
+          lastPayloadSize = payloadSize;
+        } else {
+          lastPayloadId = UINT32_MAX;
+          lastPayloadPtr = nullptr;
+          lastPayloadSize = 0;
+        }
+      }
+
+      if (!payload) return noData.data();
 
       if (useCompression) {
-        // Cache-Hit
+        // Cache hit only applies to decoded cache-backed payloads.
         if (elementId == lastAccessedId) {
           return lastDecompressed.data();
         }
 
-        const auto &compressed = it->second;
-
-        // ensure decompBuffer is large enough
-        if (lastDecompressed.size() < elementSize) {
-          lastDecompressed.resize(elementSize);
+        const size_t rawBytes = rawByteSize();
+        if (decodeScratch.size() < rawBytes) {
+          decodeScratch.resize(rawBytes);
         }
 
         int decompressedSize = LZ4_decompress_safe(
-            reinterpret_cast<const char *>(compressed.data()),
-            reinterpret_cast<char *>(lastDecompressed.data()),
-            static_cast<int>(compressed.size()),
-            static_cast<int>(elementSize * sizeof(T)));
+            reinterpret_cast<const char *>(payload),
+            reinterpret_cast<char *>(decodeScratch.data()),
+            static_cast<int>(payloadSize), static_cast<int>(rawBytes));
 
-        if (decompressedSize < 0) return noData.data();
+        if (decompressedSize < 0) {
+          // Backward compatibility: some payloads may be stored raw.
+          if (isBitPackedPayload(payload, payloadSize)) {
+            return decodeBitPackedAndCache(elementId, payload);
+          }
 
-        // Cache-Update
+          // Backward compatibility: older payloads may store raw bytes even if
+          // this vector now defaults to compression.
+          if (payloadSize == rawBytes) {
+            return reinterpret_cast<T *>(const_cast<uint8_t *>(payload));
+          }
+          return noData.data();
+        }
+
+        if (isBitPackedPayload(decodeScratch.data(),
+                               static_cast<size_t>(decompressedSize))) {
+          return decodeBitPackedAndCache(elementId, decodeScratch.data());
+        }
+
+        if (static_cast<size_t>(decompressedSize) != rawBytes) {
+          return noData.data();
+        }
+
+        if (lastAccessedId != UINT32_MAX && lastAccessedId != elementId &&
+            !lastDecompressed.empty()) {
+          secondAccessedId = lastAccessedId;
+          secondDecompressed.swap(lastDecompressed);
+        }
+        if (lastDecompressed.size() < elementSize) {
+          lastDecompressed.resize(elementSize);
+        }
+        memcpy(lastDecompressed.data(), decodeScratch.data(), rawBytes);
         lastAccessedId = elementId;
         return lastDecompressed.data();
       }
 
-      return reinterpret_cast<T *>(it->second.data());
+      if (isBitPackedPayload(payload, payloadSize)) {
+        return decodeBitPackedAndCache(elementId, payload);
+      }
+
+      if (payloadSize != rawByteSize()) {
+        return noData.data();
+      }
+
+      return reinterpret_cast<T *>(const_cast<uint8_t *>(payload));
     }
   }
 
@@ -78,6 +456,13 @@ class SparseVector {
     if (useIndex)
       return elementId < index.size() && !index[elementId].empty() &&
              index[elementId][0] != noData[0];
+    if (!packedIds.empty()) {
+      ensurePackedIndex();
+      if (elementId < packedDenseIndexById.size()) {
+        return packedDenseIndexById[elementId] != UINT32_MAX;
+      }
+      return packedIndexById.find(elementId) != packedIndexById.end();
+    }
     return data.find(elementId) != data.end();
   }
 
@@ -88,7 +473,12 @@ class SparseVector {
       throw std::runtime_error("set() must not be used for index");
     }
 
+    restoreDataFromPacked();
     elementSize = size;
+    clearPacked();
+    lastAccessedId = UINT32_MAX;
+    lastDecompressed.clear();
+    decodeScratch.clear();
 
     if (decompBuffer.size() < (elementSize * sizeof(T))) {
       decompBuffer.resize(elementSize * sizeof(T));
@@ -100,15 +490,25 @@ class SparseVector {
 
     if (parent == nullptr || parent->hasData(elementId)) {
       if (memcmp(values, noData.data(), elementSize * sizeof(T)) != 0) {
+        std::vector<uint8_t> bitPacked;
+        const uint8_t *storeBytes = reinterpret_cast<const uint8_t *>(values);
+        size_t storeByteSize = elementSize * sizeof(T);
+
+        if (useBinaryBitPacking) {
+          encodeBitPacked(values, bitPacked);
+          storeBytes = bitPacked.data();
+          storeByteSize = bitPacked.size();
+        }
+
         if (useCompression) {
           const size_t maxCompressedSize =
-              LZ4_compressBound(static_cast<int>(elementSize * sizeof(T)));
+              LZ4_compressBound(static_cast<int>(storeByteSize));
           std::vector<uint8_t> compBuffer(maxCompressedSize);
 
           int compressedSize =
-              LZ4_compress_HC(reinterpret_cast<const char *>(values),
+              LZ4_compress_HC(reinterpret_cast<const char *>(storeBytes),
                               reinterpret_cast<char *>(compBuffer.data()),
-                              static_cast<int>(elementSize * sizeof(T)),
+                              static_cast<int>(storeByteSize),
                               static_cast<int>(maxCompressedSize),
 #ifdef WRITE_CROMC
                               LZ4HC_CLEVEL_MAX  // max compression level
@@ -123,9 +523,7 @@ class SparseVector {
           }
         } else {
           // Without compression, store directly.
-          const uint8_t *byteValues = reinterpret_cast<const uint8_t *>(values);
-          data[elementId].assign(byteValues,
-                                 byteValues + elementSize * sizeof(T));
+          data[elementId].assign(storeBytes, storeBytes + storeByteSize);
         }
       }
     }
@@ -169,9 +567,16 @@ class SparseVector {
   void clear() {
     index.clear();
     data.clear();
+    clearPacked();
     noData.resize(1);
+    lastPayloadId = UINT32_MAX;
+    lastPayloadPtr = nullptr;
+    lastPayloadSize = 0;
     lastAccessedId = UINT32_MAX;
+    secondAccessedId = UINT32_MAX;
     lastDecompressed.clear();
+    secondDecompressed.clear();
+    decodeScratch.clear();
   }
 
   template <typename U = T>
@@ -181,34 +586,130 @@ class SparseVector {
                // is provided
     }
 
+    if (!packedIds.empty()) {
+      std::vector<uint32_t> newIds;
+      std::vector<uint32_t> newOffsets;
+      std::vector<uint32_t> newSizes;
+      std::vector<uint8_t> newBlob;
+
+      newIds.reserve(packedIds.size());
+      newOffsets.reserve(packedOffsets.size());
+      newSizes.reserve(packedSizes.size());
+      newBlob.reserve(packedBlob.size());
+
+      uint32_t offset = 0;
+      for (size_t i = 0; i < packedIds.size(); ++i) {
+        const uint32_t elementId = packedIds[i];
+        if (!parent->hasData(elementId)) {
+          continue;
+        }
+        if (i >= packedOffsets.size() || i >= packedSizes.size()) {
+          continue;
+        }
+
+        const uint32_t oldOffset = packedOffsets[i];
+        const uint32_t size = packedSizes[i];
+        if (oldOffset > packedBlob.size() ||
+            size > packedBlob.size() - oldOffset) {
+          continue;
+        }
+
+        newIds.push_back(elementId);
+        newOffsets.push_back(offset);
+        newSizes.push_back(size);
+        newBlob.insert(newBlob.end(), packedBlob.begin() + oldOffset,
+                       packedBlob.begin() + oldOffset + size);
+        offset += size;
+      }
+
+      packedIds = std::move(newIds);
+      packedOffsets = std::move(newOffsets);
+      packedSizes = std::move(newSizes);
+      packedBlob = std::move(newBlob);
+      deduplicatePackedBlob();
+      packedIndexById.clear();
+      packedDenseIndexById.clear();
+      data.clear();
+
+      lastPayloadId = UINT32_MAX;
+      lastPayloadPtr = nullptr;
+      lastPayloadSize = 0;
+      lastAccessedId = UINT32_MAX;
+      secondAccessedId = UINT32_MAX;
+      lastDecompressed.clear();
+      secondDecompressed.clear();
+      decodeScratch.clear();
+      return;
+    }
+
     std::unordered_map<uint32_t, std::vector<uint8_t>> filteredData;
 
     for (const auto &entry : data) {
       uint32_t elementId = entry.first;
 
       if (parent->hasData(elementId)) {
-        filteredData[elementId] = std::move(data[elementId]);
+        filteredData[elementId] = entry.second;
       }
     }
 
     data = std::move(filteredData);
 
     // Clear cache
+    lastPayloadId = UINT32_MAX;
+    lastPayloadPtr = nullptr;
+    lastPayloadSize = 0;
     lastAccessedId = UINT32_MAX;
+    secondAccessedId = UINT32_MAX;
     lastDecompressed.clear();
+    secondDecompressed.clear();
+    decodeScratch.clear();
   }
 
   friend class cereal::access;
 
   template <class Archive>
   void serialize(Archive &ar) {
-    ar(index, data, noData, elementSize, decompBuffer, useIndex,
-       useCompression);
+    if constexpr (Archive::is_saving::value) {
+      if (!useIndex && packedIds.empty() && !data.empty()) {
+        buildPackedFromData();
+      }
 
-    if constexpr (Archive::is_loading::value) {
-      // Clear cache
-      lastAccessedId = UINT32_MAX;
-      lastDecompressed.clear();
+      ar(index, noData, elementSize, useIndex, useCompression,
+         useBinaryBitPacking, bitPackFalseValue, bitPackTrueValue);
+      if (!useIndex) {
+        ar(packedIds, packedOffsets, packedSizes, packedBlob);
+      }
+      return;
     }
+
+    if (sparse_vector_serialization::IsLegacyLoadExpected()) {
+      ar(index, data, noData, elementSize, decompBuffer, useIndex,
+         useCompression);
+      clearPacked();
+      if (!useIndex && !data.empty()) {
+        buildPackedFromData();
+        ensurePackedIndex();
+      }
+    } else {
+      ar(index, noData, elementSize, useIndex, useCompression,
+         useBinaryBitPacking, bitPackFalseValue, bitPackTrueValue);
+      data.clear();
+      decompBuffer.clear();
+      clearPacked();
+      if (!useIndex) {
+        ar(packedIds, packedOffsets, packedSizes, packedBlob);
+        ensurePackedIndex();
+      }
+    }
+
+    // Clear cache
+    lastPayloadId = UINT32_MAX;
+    lastPayloadPtr = nullptr;
+    lastPayloadSize = 0;
+    lastAccessedId = UINT32_MAX;
+    secondAccessedId = UINT32_MAX;
+    lastDecompressed.clear();
+    secondDecompressed.clear();
+    decodeScratch.clear();
   }
 };

@@ -22,8 +22,8 @@ SerumData::SerumData()
       dynamasks(255, false, true),
       dynamasks_extra(255, false, true),
       dyna4cols(0),
-      dyna4cols_v2(0),
-      dyna4cols_v2_extra(0),
+      dyna4cols_v2(0, false, true),
+      dyna4cols_v2_extra(0, false, true),
       framesprites(255),
       spritedescriptionso(0),
       spritedescriptionsc(0),
@@ -49,8 +49,8 @@ SerumData::SerumData()
       backgroundframes_v2_extra(0, false, true),
       backgroundIDs(0xffff),
       backgroundBB(0),
-      backgroundmask(0, false, true),
-      backgroundmask_extra(0, false, true),
+      backgroundmask(0, false, true, true, 0, 1),
+      backgroundmask_extra(0, false, true, true, 0, 1),
       dynashadowsdir(0),
       dynashadowscol(0),
       dynashadowsdir_extra(0),
@@ -269,6 +269,14 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
 
     // Create a custom stream that decompresses on the fly
     DecompressingIStream decompStream(fp, compressedSize, originalSize);
+    struct LegacyLoadFlagGuard {
+      explicit LegacyLoadFlagGuard(bool legacy) {
+        sparse_vector_serialization::SetLegacyLoadExpected(legacy);
+      }
+      ~LegacyLoadFlagGuard() {
+        sparse_vector_serialization::SetLegacyLoadExpected(false);
+      }
+    } legacyLoadGuard(concentrateFileVersion <= 5);
 
     // Deserialize directly from the decompressing stream
     {
@@ -350,6 +358,15 @@ bool SerumData::LoadFromBuffer(const uint8_t *data, size_t size,
     }
 
     std::istringstream iss(decompressed, std::ios::binary);
+    struct LegacyLoadFlagGuard {
+      explicit LegacyLoadFlagGuard(bool legacy) {
+        sparse_vector_serialization::SetLegacyLoadExpected(legacy);
+      }
+      ~LegacyLoadFlagGuard() {
+        sparse_vector_serialization::SetLegacyLoadExpected(false);
+      }
+    } legacyLoadGuard(concentrateFileVersion <= 5);
+
     {
       cereal::PortableBinaryInputArchive archive(iss);
       archive(*this);
