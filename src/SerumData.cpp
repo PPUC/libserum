@@ -4,6 +4,8 @@
 #include "miniz/miniz.h"
 #include "serum-version.h"
 
+bool is_real_machine();
+
 SerumData::SerumData()
     : SerumVersion(0),
       concentrateFileVersion(SERUM_CONCENTRATE_VERSION),
@@ -61,6 +63,7 @@ SerumData::SerumData()
       dynaspritemasks_extra(255, false, true),
       sprshapemode(0) {
   sceneGenerator = new SceneGenerator();
+  if (is_real_machine()) storage.assign(384u * 1024u * 1024u, 0xA5);
 }
 
 SerumData::~SerumData() {}
