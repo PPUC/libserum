@@ -1574,6 +1574,9 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
 }
 
 static inline bool IsSpriteOpaqueV1(uint8_t spriteId, uint32_t pixelIndex) {
+  if (!g_serumData.spritedescriptionso.hasData(spriteId)) {
+    return false;
+  }
   if (!g_serumData.spritedescriptionso_opaque.hasData(spriteId)) {
     return g_serumData.spritedescriptionso[spriteId][pixelIndex] != 255;
   }
@@ -1581,6 +1584,9 @@ static inline bool IsSpriteOpaqueV1(uint8_t spriteId, uint32_t pixelIndex) {
 }
 
 static inline bool IsSpriteOpaqueV2(uint8_t spriteId, uint32_t pixelIndex) {
+  if (!g_serumData.spriteoriginal.hasData(spriteId)) {
+    return false;
+  }
   if (!g_serumData.spriteoriginal_opaque.hasData(spriteId)) {
     return g_serumData.spriteoriginal[spriteId][pixelIndex] != 255;
   }
@@ -1589,6 +1595,9 @@ static inline bool IsSpriteOpaqueV2(uint8_t spriteId, uint32_t pixelIndex) {
 
 static inline bool IsSpriteExtraOpaqueV2(uint8_t spriteId,
                                          uint32_t pixelIndex) {
+  if (!g_serumData.spritemask_extra.hasData(spriteId)) {
+    return false;
+  }
   if (!g_serumData.spritemask_extra_opaque.hasData(spriteId)) {
     return g_serumData.spritemask_extra[spriteId][pixelIndex] != 255;
   }
@@ -1596,6 +1605,9 @@ static inline bool IsSpriteExtraOpaqueV2(uint8_t spriteId,
 }
 
 static inline bool IsFrameDynaActive(uint32_t frameId, uint32_t pixelIndex) {
+  if (!g_serumData.dynamasks.hasData(frameId)) {
+    return false;
+  }
   if (!g_serumData.dynamasks_active.hasData(frameId)) {
     return g_serumData.dynamasks[frameId][pixelIndex] != 255;
   }
@@ -1604,6 +1616,9 @@ static inline bool IsFrameDynaActive(uint32_t frameId, uint32_t pixelIndex) {
 
 static inline bool IsFrameExtraDynaActive(uint32_t frameId,
                                           uint32_t pixelIndex) {
+  if (!g_serumData.dynamasks_extra.hasData(frameId)) {
+    return false;
+  }
   if (!g_serumData.dynamasks_extra_active.hasData(frameId)) {
     return g_serumData.dynamasks_extra[frameId][pixelIndex] != 255;
   }
@@ -1611,6 +1626,9 @@ static inline bool IsFrameExtraDynaActive(uint32_t frameId,
 }
 
 static inline bool IsSpriteDynaActive(uint8_t spriteId, uint32_t pixelIndex) {
+  if (!g_serumData.dynaspritemasks.hasData(spriteId)) {
+    return false;
+  }
   if (!g_serumData.dynaspritemasks_active.hasData(spriteId)) {
     return g_serumData.dynaspritemasks[spriteId][pixelIndex] != 255;
   }
@@ -1619,6 +1637,9 @@ static inline bool IsSpriteDynaActive(uint8_t spriteId, uint32_t pixelIndex) {
 
 static inline bool IsSpriteExtraDynaActive(uint8_t spriteId,
                                            uint32_t pixelIndex) {
+  if (!g_serumData.dynaspritemasks_extra.hasData(spriteId)) {
+    return false;
+  }
   if (!g_serumData.dynaspritemasks_extra_active.hasData(spriteId)) {
     return g_serumData.dynaspritemasks_extra[spriteId][pixelIndex] != 255;
   }
