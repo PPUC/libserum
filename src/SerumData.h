@@ -44,6 +44,21 @@ inline uint32_t FromLittleEndian32(uint32_t value) {
 
 class SerumData {
  public:
+  struct SpriteDetectMeta {
+    uint32_t detectionWord = 0;
+    uint16_t detectionWordPos = 0;
+    uint16_t detectX = 0;
+    uint16_t detectY = 0;
+    uint16_t detectWidth = 0;
+    uint16_t detectHeight = 0;
+
+    template <class Archive>
+    void serialize(Archive &ar) {
+      ar(detectionWord, detectionWordPos, detectX, detectY, detectWidth,
+         detectHeight);
+    }
+  };
+
   SerumData();
   ~SerumData();
 
@@ -62,6 +77,8 @@ class SerumData {
   bool LoadFromBuffer(const uint8_t *data, size_t size, const uint8_t flags);
   void BuildPackingSidecarsAndNormalize();
   void PrepareRuntimeDynamicHotCache();
+  void BuildSpriteRuntimeSidecars();
+  bool HasSpriteRuntimeSidecars() const;
   void BuildColorRotationLookup();
   bool TryGetColorRotation(uint32_t frameId, uint16_t color, bool isextra,
                            uint16_t &rotationIndex,
@@ -142,6 +159,18 @@ class SerumData {
   std::vector<uint8_t> frameHasDynamic;
   std::vector<uint8_t> frameHasDynamicExtra;
   std::vector<uint8_t> frameIsScene;
+  std::vector<uint32_t> spriteCandidateOffsets;
+  std::vector<uint8_t> spriteCandidateIds;
+  std::vector<uint8_t> spriteCandidateSlots;
+  std::vector<uint8_t> frameHasShapeSprite;
+  std::vector<uint16_t> spriteWidth;
+  std::vector<uint16_t> spriteHeight;
+  std::vector<uint8_t> spriteUsesShape;
+  std::vector<uint32_t> spriteDetectOffsets;
+  std::vector<SpriteDetectMeta> spriteDetectMeta;
+  std::vector<uint32_t> spriteOpaqueRowSegmentStart;
+  std::vector<uint16_t> spriteOpaqueRowSegmentCount;
+  std::vector<uint16_t> spriteOpaqueSegments;
   std::unordered_map<uint64_t, std::vector<uint32_t>> sceneFramesBySignature;
   std::unordered_map<uint64_t, uint32_t> sceneFrameIdByTriplet;
   std::unordered_map<uint64_t, uint16_t> colorRotationLookupByFrameAndColor;
@@ -185,7 +214,12 @@ class SerumData {
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
-           sceneFrameIdByTriplet, colorRotationLookupByFrameAndColor);
+           sceneFrameIdByTriplet, colorRotationLookupByFrameAndColor,
+           spriteCandidateOffsets, spriteCandidateIds, spriteCandidateSlots,
+           frameHasShapeSprite,
+           spriteWidth, spriteHeight, spriteUsesShape, spriteDetectOffsets,
+           spriteDetectMeta, spriteOpaqueRowSegmentStart,
+           spriteOpaqueRowSegmentCount, spriteOpaqueSegments);
       }
     } else {
       if (concentrateFileVersion >= 6) {
@@ -193,7 +227,12 @@ class SerumData {
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
-           sceneFrameIdByTriplet, colorRotationLookupByFrameAndColor);
+           sceneFrameIdByTriplet, colorRotationLookupByFrameAndColor,
+           spriteCandidateOffsets, spriteCandidateIds, spriteCandidateSlots,
+           frameHasShapeSprite,
+           spriteWidth, spriteHeight, spriteUsesShape, spriteDetectOffsets,
+           spriteDetectMeta, spriteOpaqueRowSegmentStart,
+           spriteOpaqueRowSegmentCount, spriteOpaqueSegments);
       } else {
         frameIsScene.clear();
         sceneFramesBySignature.clear();
@@ -208,6 +247,18 @@ class SerumData {
         dynaspritemasks_extra_active.clear();
         frameHasDynamic.clear();
         frameHasDynamicExtra.clear();
+        spriteCandidateOffsets.clear();
+        spriteCandidateIds.clear();
+        spriteCandidateSlots.clear();
+        frameHasShapeSprite.clear();
+        spriteWidth.clear();
+        spriteHeight.clear();
+        spriteUsesShape.clear();
+        spriteDetectOffsets.clear();
+        spriteDetectMeta.clear();
+        spriteOpaqueRowSegmentStart.clear();
+        spriteOpaqueRowSegmentCount.clear();
+        spriteOpaqueSegments.clear();
       }
     }
 
@@ -284,6 +335,9 @@ class SerumData {
       if (sceneGenerator) {
         sceneGenerator->setSceneData(std::move(loadedScenes));
         sceneGenerator->setDepth(nocolors == 16 ? 4 : 2);
+      }
+      if (!HasSpriteRuntimeSidecars()) {
+        BuildSpriteRuntimeSidecars();
       }
     }
   }

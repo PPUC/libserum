@@ -69,6 +69,15 @@ Vector policy currently used in `SerumData`:
   `colorRotationLookupByFrameAndColor[(frameId,isExtra,color)] -> (rotation,position)`
   restored from v6 cROMc when present and rebuilt at load time otherwise.
   - `ColorInRotation` uses lookup-only runtime path (no linear scan fallback).
+- Sprite runtime sidecars are precomputed and used by `Check_Spritesv2`:
+  - frame candidate list with sprite slot indices (`spriteCandidateOffsets`,
+    `spriteCandidateIds`, `spriteCandidateSlots`)
+  - frame-level shaped-sprite marker (`frameHasShapeSprite`)
+  - per-sprite dimensions and shape flags (`spriteWidth`, `spriteHeight`,
+    `spriteUsesShape`)
+  - flattened detection metadata (`spriteDetectOffsets`, `spriteDetectMeta`)
+  - per-sprite opaque row-segment runs (`spriteOpaqueRowSegmentStart`,
+    `spriteOpaqueRowSegmentCount`, `spriteOpaqueSegments`)
 - Runtime uses sidecar flags instead of `255` sentinels for transparency / dynamic-zone activity.
 - Runtime does not include sentinel-based fallback in sprite/dynamic helpers;
   missing/incorrect sidecars are treated as a conversion/load bug and are not
@@ -97,7 +106,11 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
 8. Build/normalize packing sidecars via `BuildPackingSidecarsAndNormalize()`.
    - The normalization step is idempotent and guarded; repeated calls in the
      same load/save cycle are no-ops once completed.
-9. Optional runtime A/B switch for dynamic packed-read overhead:
+9. Build or restore sprite runtime sidecars via `BuildSpriteRuntimeSidecars()`.
+   - For v6 cROMc loads, sidecars are restored from file when present.
+   - For v5 loads (and any missing/corrupt sidecar case), sidecars are rebuilt
+     from loaded sprite vectors at startup.
+10. Optional runtime A/B switch for dynamic packed-read overhead:
    - If env `SERUM_DISABLE_DYNAMIC_PACKED_READS` is enabled (`1/true/on/yes`),
      `PrepareRuntimeDynamicHotCache()` predecodes dynamic vectors
      (`dynamasks*`, `dynaspritemasks*`) into runtime hot caches.
@@ -180,6 +193,14 @@ Dynamic-shadow hot path:
 - Neighbor probing is done by iterating a compact offset table
   (8-connected neighbors) rather than repeated hand-written branch blocks.
 
+Sprite matching prefilter:
+- `Check_Spritesv2` builds an exact per-frame 32-bit dword index and skips
+  detection-area scans for detection words that are not present.
+- This replaces the Bloom prefilter path (no false positives from hash
+  collisions).
+- Detection-area verification uses precomputed opaque row-segment runs to avoid
+  per-pixel checks on transparent sprite zones.
+
 Background placeholder policy:
 - `Colorize_Framev2` supports `suppressFrameBackgroundImage`.
 - When true, frame-level background images are treated as placeholders and existing output pixel is kept in masked background areas.
@@ -211,6 +232,13 @@ Stored in v6:
   - `sceneFrameIdByTriplet`
 - Color-rotation lookup acceleration:
   - `colorRotationLookupByFrameAndColor`
+- Sprite runtime sidecars:
+  - `spriteCandidateOffsets`, `spriteCandidateIds`, `spriteCandidateSlots`
+  - `frameHasShapeSprite`
+  - `spriteWidth`, `spriteHeight`, `spriteUsesShape`
+  - `spriteDetectOffsets`, `spriteDetectMeta`
+  - `spriteOpaqueRowSegmentStart`, `spriteOpaqueRowSegmentCount`,
+    `spriteOpaqueSegments`
 - Scene data block uses guarded encoding (`SCD1` magic + bounded count) to
   prevent unbounded allocations on corrupted/misaligned input.
 - Sparse vectors in packed sparse layout.

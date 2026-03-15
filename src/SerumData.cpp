@@ -4,6 +4,8 @@
 #include "miniz/miniz.h"
 #include "serum-version.h"
 
+#include <unordered_set>
+
 bool is_real_machine();
 
 SerumData::SerumData()
@@ -146,6 +148,18 @@ void SerumData::Clear() {
   frameHasDynamic.clear();
   frameHasDynamicExtra.clear();
   frameIsScene.clear();
+  spriteCandidateOffsets.clear();
+  spriteCandidateIds.clear();
+  spriteCandidateSlots.clear();
+  frameHasShapeSprite.clear();
+  spriteWidth.clear();
+  spriteHeight.clear();
+  spriteUsesShape.clear();
+  spriteDetectOffsets.clear();
+  spriteDetectMeta.clear();
+  spriteOpaqueRowSegmentStart.clear();
+  spriteOpaqueRowSegmentCount.clear();
+  spriteOpaqueSegments.clear();
   sceneFramesBySignature.clear();
   sceneFrameIdByTriplet.clear();
   colorRotationLookupByFrameAndColor.clear();
@@ -382,6 +396,191 @@ void SerumData::PrepareRuntimeDynamicHotCache() {
       (uint32_t)spriteIds.size());
 }
 
+bool SerumData::HasSpriteRuntimeSidecars() const {
+  if (nframes == 0 || nsprites == 0) {
+    return false;
+  }
+  if (spriteCandidateOffsets.size() != static_cast<size_t>(nframes) + 1) {
+    return false;
+  }
+  if (spriteCandidateIds.size() != spriteCandidateSlots.size()) {
+    return false;
+  }
+  if (frameHasShapeSprite.size() != nframes) {
+    return false;
+  }
+  if (spriteWidth.size() != nsprites || spriteHeight.size() != nsprites ||
+      spriteUsesShape.size() != nsprites) {
+    return false;
+  }
+  if (spriteDetectOffsets.size() != static_cast<size_t>(nsprites) + 1) {
+    return false;
+  }
+  if (spriteOpaqueRowSegmentStart.size() !=
+          static_cast<size_t>(nsprites) * MAX_SPRITE_HEIGHT ||
+      spriteOpaqueRowSegmentCount.size() !=
+          static_cast<size_t>(nsprites) * MAX_SPRITE_HEIGHT) {
+    return false;
+  }
+  return true;
+}
+
+void SerumData::BuildSpriteRuntimeSidecars() {
+  spriteCandidateOffsets.assign(static_cast<size_t>(nframes) + 1, 0);
+  spriteCandidateIds.clear();
+  spriteCandidateSlots.clear();
+  frameHasShapeSprite.assign(nframes, 0);
+
+  spriteWidth.assign(nsprites, 0);
+  spriteHeight.assign(nsprites, 0);
+  spriteUsesShape.assign(nsprites, 0);
+  spriteDetectOffsets.assign(static_cast<size_t>(nsprites) + 1, 0);
+  spriteDetectMeta.clear();
+  spriteOpaqueRowSegmentStart.assign(static_cast<size_t>(nsprites) *
+                                         MAX_SPRITE_HEIGHT,
+                                     0);
+  spriteOpaqueRowSegmentCount.assign(static_cast<size_t>(nsprites) *
+                                         MAX_SPRITE_HEIGHT,
+                                     0);
+  spriteOpaqueSegments.clear();
+
+  const size_t spritePixels = MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
+  for (uint32_t spriteId = 0; spriteId < nsprites; ++spriteId) {
+    if (sprshapemode.hasData(spriteId) && sprshapemode[spriteId][0] > 0) {
+      spriteUsesShape[spriteId] = 1;
+    }
+
+    if (!spriteoriginal_opaque.hasData(spriteId) ||
+        !spriteoriginal.hasData(spriteId)) {
+      spriteDetectOffsets[spriteId + 1] = spriteDetectOffsets[spriteId];
+      continue;
+    }
+
+    const uint8_t *spriteOpaque = spriteoriginal_opaque[spriteId];
+    int maxX = -1;
+    int maxY = -1;
+    for (int y = 0; y < MAX_SPRITE_HEIGHT; ++y) {
+      const uint32_t rowIndex =
+          static_cast<uint32_t>(spriteId) * MAX_SPRITE_HEIGHT + y;
+      spriteOpaqueRowSegmentStart[rowIndex] =
+          static_cast<uint32_t>(spriteOpaqueSegments.size());
+      uint16_t rowSegmentCount = 0;
+
+      int x = 0;
+      while (x < MAX_SPRITE_WIDTH) {
+        const uint32_t pixelIndex = y * MAX_SPRITE_WIDTH + x;
+        if (spriteOpaque[pixelIndex] == 0) {
+          ++x;
+          continue;
+        }
+        const int segmentStart = x;
+        while (x < MAX_SPRITE_WIDTH &&
+               spriteOpaque[y * MAX_SPRITE_WIDTH + x] > 0) {
+          if (x > maxX) {
+            maxX = x;
+          }
+          if (y > maxY) {
+            maxY = y;
+          }
+          ++x;
+        }
+        const int segmentLength = x - segmentStart;
+        spriteOpaqueSegments.push_back(static_cast<uint16_t>(segmentStart));
+        spriteOpaqueSegments.push_back(static_cast<uint16_t>(segmentLength));
+        ++rowSegmentCount;
+      }
+      spriteOpaqueRowSegmentCount[rowIndex] = rowSegmentCount;
+    }
+
+    spriteWidth[spriteId] = static_cast<uint16_t>(maxX >= 0 ? maxX + 1 : 0);
+    spriteHeight[spriteId] = static_cast<uint16_t>(maxY >= 0 ? maxY + 1 : 0);
+
+    const uint32_t detectStart = static_cast<uint32_t>(spriteDetectMeta.size());
+    for (uint32_t detectIndex = 0; detectIndex < MAX_SPRITE_DETECT_AREAS;
+         ++detectIndex) {
+      const uint16_t *areas = spritedetareas[spriteId];
+      if (areas[detectIndex * 4] == 0xffff) {
+        continue;
+      }
+      SpriteDetectMeta meta;
+      meta.detectionWord = spritedetdwords[spriteId][detectIndex];
+      meta.detectionWordPos = spritedetdwordpos[spriteId][detectIndex];
+      meta.detectX = areas[detectIndex * 4];
+      meta.detectY = areas[detectIndex * 4 + 1];
+      meta.detectWidth = areas[detectIndex * 4 + 2];
+      meta.detectHeight = areas[detectIndex * 4 + 3];
+
+      if (meta.detectWidth == 0 || meta.detectHeight == 0) {
+        continue;
+      }
+
+      // Guard malformed data that would read beyond sprite storage.
+      const uint32_t maxDetectX = static_cast<uint32_t>(meta.detectX) +
+                                  static_cast<uint32_t>(meta.detectWidth);
+      const uint32_t maxDetectY = static_cast<uint32_t>(meta.detectY) +
+                                  static_cast<uint32_t>(meta.detectHeight);
+      if (maxDetectX > MAX_SPRITE_WIDTH || maxDetectY > MAX_SPRITE_HEIGHT) {
+        continue;
+      }
+
+      // Skip detect zones with no opaque pixels after normalization.
+      bool hasOpaque = false;
+      for (uint16_t dy = 0; dy < meta.detectHeight && !hasOpaque; ++dy) {
+        const uint32_t row = static_cast<uint32_t>(meta.detectY + dy);
+        for (uint16_t dx = 0; dx < meta.detectWidth; ++dx) {
+          const uint32_t x = static_cast<uint32_t>(meta.detectX + dx);
+          const uint32_t idx = row * MAX_SPRITE_WIDTH + x;
+          if (idx < spritePixels && spriteOpaque[idx] > 0) {
+            hasOpaque = true;
+            break;
+          }
+        }
+      }
+      if (hasOpaque) {
+        spriteDetectMeta.push_back(meta);
+      }
+    }
+    spriteDetectOffsets[spriteId + 1] =
+        static_cast<uint32_t>(spriteDetectMeta.size());
+    if (spriteDetectOffsets[spriteId + 1] < detectStart) {
+      spriteDetectOffsets[spriteId + 1] = detectStart;
+    }
+  }
+
+  spriteCandidateIds.reserve(static_cast<size_t>(nframes) *
+                             MAX_SPRITES_PER_FRAME / 2);
+  spriteCandidateSlots.reserve(static_cast<size_t>(nframes) *
+                               MAX_SPRITES_PER_FRAME / 2);
+  for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+    spriteCandidateOffsets[frameId] =
+        static_cast<uint32_t>(spriteCandidateIds.size());
+    std::unordered_set<uint8_t> dedupe;
+    dedupe.reserve(MAX_SPRITES_PER_FRAME);
+    for (uint32_t i = 0; i < MAX_SPRITES_PER_FRAME; ++i) {
+      const uint8_t spriteId = framesprites[frameId][i];
+      if (spriteId >= 255 || spriteId >= nsprites) {
+        break;
+      }
+      if (!spriteoriginal.hasData(spriteId) ||
+          !spriteoriginal_opaque.hasData(spriteId)) {
+        continue;
+      }
+      if (spriteDetectOffsets[spriteId] == spriteDetectOffsets[spriteId + 1]) {
+        continue;
+      }
+      if (!dedupe.insert(spriteId).second) {
+        continue;
+      }
+      spriteCandidateIds.push_back(spriteId);
+      spriteCandidateSlots.push_back(static_cast<uint8_t>(i));
+      frameHasShapeSprite[frameId] =
+          frameHasShapeSprite[frameId] || spriteUsesShape[spriteId];
+    }
+  }
+  spriteCandidateOffsets[nframes] =
+      static_cast<uint32_t>(spriteCandidateIds.size());
+}
+
 void SerumData::LogSparseVectorProfileSnapshot() {
   auto logCounters = [&](auto &vec) {
     uint64_t accesses = 0;
@@ -463,6 +662,9 @@ bool SerumData::TryGetColorRotation(uint32_t frameId, uint16_t color,
 bool SerumData::SaveToFile(const char *filename) {
   try {
     BuildPackingSidecarsAndNormalize();
+    if (!HasSpriteRuntimeSidecars()) {
+      BuildSpriteRuntimeSidecars();
+    }
     Log("Writing %s", filename);
     // Serialize to memory buffer first
     std::ostringstream ss(std::ios::binary);
