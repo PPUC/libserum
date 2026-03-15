@@ -61,6 +61,8 @@ class SerumData {
   bool LoadFromFile(const char *filename, const uint8_t flags);
   bool LoadFromBuffer(const uint8_t *data, size_t size, const uint8_t flags);
   void BuildPackingSidecarsAndNormalize();
+  void PrepareRuntimeDynamicHotCache();
+  void LogSparseVectorProfileSnapshot();
 
   // Header data
   char rname[64];
@@ -134,6 +136,8 @@ class SerumData {
   SparseVector<uint8_t> dynaspritemasks_extra;
   SparseVector<uint8_t> dynaspritemasks_extra_active;
   SparseVector<uint8_t> sprshapemode;
+  std::vector<uint8_t> frameHasDynamic;
+  std::vector<uint8_t> frameHasDynamicExtra;
   std::vector<uint8_t> frameIsScene;
   std::unordered_map<uint64_t, std::vector<uint32_t>> sceneFramesBySignature;
 
@@ -174,14 +178,16 @@ class SerumData {
         ar(frameIsScene, sceneFramesBySignature, spriteoriginal_opaque,
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
-           dynaspritemasks_extra_active);
+           dynaspritemasks_extra_active, frameHasDynamic,
+           frameHasDynamicExtra);
       }
     } else {
       if (concentrateFileVersion >= 6) {
         ar(frameIsScene, sceneFramesBySignature, spriteoriginal_opaque,
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
-           dynaspritemasks_extra_active);
+           dynaspritemasks_extra_active, frameHasDynamic,
+           frameHasDynamicExtra);
       } else {
         frameIsScene.clear();
         sceneFramesBySignature.clear();
@@ -192,6 +198,8 @@ class SerumData {
         dynamasks_extra_active.clear();
         dynaspritemasks_active.clear();
         dynaspritemasks_extra_active.clear();
+        frameHasDynamic.clear();
+        frameHasDynamicExtra.clear();
       }
     }
 

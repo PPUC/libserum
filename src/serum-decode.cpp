@@ -73,6 +73,22 @@ void Log(const char* format, ...) {
   va_end(args);
 }
 
+static bool IsEnvFlagEnabled(const char* name) {
+  const char* value = std::getenv(name);
+  if (!value || value[0] == '\0') {
+    return false;
+  }
+  return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 ||
+         strcasecmp(value, "yes") == 0 || strcasecmp(value, "on") == 0;
+}
+
+static bool g_profileDynamicHotPaths = false;
+static bool g_profileSparseVectors = false;
+static bool g_disableDynamicPackedReads = false;
+static uint64_t g_profileColorizeFrameV2Ns = 0;
+static uint64_t g_profileColorizeSpriteV2Ns = 0;
+static uint64_t g_profileColorizeCalls = 0;
+
 static SerumData g_serumData;
 uint16_t sceneFrameCount = 0;
 uint16_t sceneCurrentFrame = 0;
@@ -1227,6 +1243,13 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
                                         const char* const romname,
                                         uint8_t flags) {
   Serum_free();
+  g_profileDynamicHotPaths = IsEnvFlagEnabled("SERUM_PROFILE_DYNAMIC_HOTPATHS");
+  g_profileSparseVectors = IsEnvFlagEnabled("SERUM_PROFILE_SPARSE_VECTORS");
+  g_disableDynamicPackedReads =
+      IsEnvFlagEnabled("SERUM_DISABLE_DYNAMIC_PACKED_READS");
+  g_profileColorizeFrameV2Ns = 0;
+  g_profileColorizeSpriteV2Ns = 0;
+  g_profileColorizeCalls = 0;
 
   mySerum.SerumVersion = g_serumData.SerumVersion = 0;
   mySerum.flags = 0;
@@ -1333,6 +1356,11 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
       BuildFrameLookupVectors();
     } else {
       InitFrameLookupRuntimeStateFromStoredData();
+    }
+    if (g_disableDynamicPackedReads) {
+      g_serumData.PrepareRuntimeDynamicHotCache();
+      Log("Dynamic packed reads disabled for runtime via "
+          "SERUM_DISABLE_DYNAMIC_PACKED_READS");
     }
   }
   if (is_real_machine()) {
@@ -1573,47 +1601,9 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   return IDENTIFY_NO_FRAME;  // we found no corresponding frame
 }
 
-static inline bool IsSpriteOpaqueV1(uint8_t spriteId, uint32_t pixelIndex) {
-  // Sidecar flags are the single source of truth after load-time normalization.
-  if (!g_serumData.spritedescriptionso_opaque.hasData(spriteId)) return false;
-  return g_serumData.spritedescriptionso_opaque[spriteId][pixelIndex] > 0;
-}
-
-static inline bool IsSpriteOpaqueV2(uint8_t spriteId, uint32_t pixelIndex) {
-  if (!g_serumData.spriteoriginal_opaque.hasData(spriteId)) return false;
-  return g_serumData.spriteoriginal_opaque[spriteId][pixelIndex] > 0;
-}
-
-static inline bool IsSpriteExtraOpaqueV2(uint8_t spriteId,
-                                         uint32_t pixelIndex) {
-  if (!g_serumData.spritemask_extra_opaque.hasData(spriteId)) return false;
-  return g_serumData.spritemask_extra_opaque[spriteId][pixelIndex] > 0;
-}
-
-static inline bool IsFrameDynaActive(uint32_t frameId, uint32_t pixelIndex) {
-  if (!g_serumData.dynamasks_active.hasData(frameId)) return false;
-  return g_serumData.dynamasks_active[frameId][pixelIndex] > 0;
-}
-
-static inline bool IsFrameExtraDynaActive(uint32_t frameId,
-                                          uint32_t pixelIndex) {
-  if (!g_serumData.dynamasks_extra_active.hasData(frameId)) return false;
-  return g_serumData.dynamasks_extra_active[frameId][pixelIndex] > 0;
-}
-
-static inline bool IsSpriteDynaActive(uint8_t spriteId, uint32_t pixelIndex) {
-  if (!g_serumData.dynaspritemasks_active.hasData(spriteId)) return false;
-  return g_serumData.dynaspritemasks_active[spriteId][pixelIndex] > 0;
-}
-
-static inline bool IsSpriteExtraDynaActive(uint8_t spriteId,
-                                           uint32_t pixelIndex) {
-  if (!g_serumData.dynaspritemasks_extra_active.hasData(spriteId)) return false;
-  return g_serumData.dynaspritemasks_extra_active[spriteId][pixelIndex] > 0;
-}
-
-void GetSpriteSize(uint8_t nospr, int* pswid, int* pshei, uint8_t* spriteData,
-                   int sswid, int sshei, uint8_t* spriteOpaque) {
+void GetSpriteSize(uint8_t nospr, int* pswid, int* pshei,
+                   const uint8_t* spriteData, int sswid, int sshei,
+                   const uint8_t* spriteOpaque) {
   *pswid = *pshei = 0;
   if (nospr >= g_serumData.nsprites) return;
   if (!spriteData) return;
@@ -1639,10 +1629,16 @@ bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
   while ((ti < MAX_SPRITES_PER_FRAME) &&
          (g_serumData.framesprites[quelleframe][ti] < 255)) {
     uint8_t qspr = g_serumData.framesprites[quelleframe][ti];
+    if (!g_serumData.spritedescriptionso.hasData(qspr) ||
+        !g_serumData.spritedescriptionso_opaque.hasData(qspr)) {
+      ti++;
+      continue;
+    }
+    const uint8_t* spriteDescription = g_serumData.spritedescriptionso[qspr];
+    const uint8_t* spriteOpaque = g_serumData.spritedescriptionso_opaque[qspr];
     int spw, sph;
-    GetSpriteSize(qspr, &spw, &sph, g_serumData.spritedescriptionso[qspr],
-                  MAX_SPRITE_SIZE, MAX_SPRITE_SIZE,
-                  g_serumData.spritedescriptionso_opaque[qspr]);
+    GetSpriteSize(qspr, &spw, &sph, spriteDescription, MAX_SPRITE_SIZE,
+                  MAX_SPRITE_SIZE, spriteOpaque);
     short minxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4]);
     short minyBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 1]);
     short maxxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 2]);
@@ -1697,9 +1693,8 @@ bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
               for (uint16_t tl = 0; tl < detw; tl++) {
                 const uint32_t spritePixelIndex =
                     (tk + dety) * MAX_SPRITE_SIZE + tl + detx;
-                if (!IsSpriteOpaqueV1(qspr, spritePixelIndex)) continue;
-                uint8_t val =
-                    g_serumData.spritedescriptionso[qspr][spritePixelIndex];
+                if (spriteOpaque[spritePixelIndex] == 0) continue;
+                uint8_t val = spriteDescription[spritePixelIndex];
                 if (val !=
                     Frame[(tk + offsy) * g_serumData.fwidth + tl + offsx]) {
                   notthere = true;
@@ -1769,6 +1764,13 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
   while ((ti < MAX_SPRITES_PER_FRAME) &&
          (g_serumData.framesprites[quelleframe][ti] < 255)) {
     uint8_t qspr = g_serumData.framesprites[quelleframe][ti];
+    if (!g_serumData.spriteoriginal.hasData(qspr) ||
+        !g_serumData.spriteoriginal_opaque.hasData(qspr)) {
+      ti++;
+      continue;
+    }
+    const uint8_t* spriteOriginal = g_serumData.spriteoriginal[qspr];
+    const uint8_t* spriteOpaque = g_serumData.spriteoriginal_opaque[qspr];
     uint8_t* Frame = recframe;
     bool isshapecheck = false;
     if (g_serumData.sprshapemode[qspr][0] > 0) {
@@ -1785,9 +1787,8 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
       Frame = frameshape;
     }
     int spw, sph;
-    GetSpriteSize(qspr, &spw, &sph, g_serumData.spriteoriginal[qspr],
-                  MAX_SPRITE_WIDTH, MAX_SPRITE_HEIGHT,
-                  g_serumData.spriteoriginal_opaque[qspr]);
+    GetSpriteSize(qspr, &spw, &sph, spriteOriginal, MAX_SPRITE_WIDTH,
+                  MAX_SPRITE_HEIGHT, spriteOpaque);
     short minxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4]);
     short minyBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 1]);
     short maxxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 2]);
@@ -1842,9 +1843,8 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
               for (uint16_t tl = 0; tl < detw; tl++) {
                 const uint32_t spritePixelIndex =
                     (tk + dety) * MAX_SPRITE_WIDTH + tl + detx;
-                if (!IsSpriteOpaqueV2(qspr, spritePixelIndex)) continue;
-                uint8_t val =
-                    g_serumData.spriteoriginal[qspr][spritePixelIndex];
+                if (spriteOpaque[spritePixelIndex] == 0) continue;
+                uint8_t val = spriteOriginal[spritePixelIndex];
                 if (val !=
                     Frame[(tk + offsy) * g_serumData.fwidth + tl + offsx]) {
                   notthere = true;
@@ -1907,6 +1907,13 @@ void Colorize_Framev1(uint8_t* frame, uint32_t IDfound) {
   uint16_t tj, ti;
   // Generate the colorized version of a frame once identified in the crom
   // frames
+  const bool frameHasDynamic =
+      IDfound < g_serumData.frameHasDynamic.size() &&
+      g_serumData.frameHasDynamic[IDfound] > 0;
+  const uint8_t* frameDyna = frameHasDynamic ? g_serumData.dynamasks[IDfound] : nullptr;
+  const uint8_t* frameDynaActive = frameHasDynamic
+                                       ? g_serumData.dynamasks_active[IDfound]
+                                       : nullptr;
   for (tj = 0; tj < g_serumData.fheight; tj++) {
     for (ti = 0; ti < g_serumData.fwidth; ti++) {
       uint16_t tk = tj * g_serumData.fwidth + ti;
@@ -1920,13 +1927,14 @@ void Colorize_Framev1(uint8_t* frame, uint32_t IDfound) {
             g_serumData
                 .backgroundframes[g_serumData.backgroundIDs[IDfound][0]][tk];
       else {
-        uint8_t dynacouche = g_serumData.dynamasks[IDfound][tk];
-        if (!IsFrameDynaActive(IDfound, tk))
+        if (!frameHasDynamic || frameDynaActive[tk] == 0)
           mySerum.frame[tk] = g_serumData.cframes[IDfound][tk];
-        else
+        else {
+          const uint8_t dynacouche = frameDyna[tk];
           mySerum.frame[tk] =
               g_serumData.dyna4cols[IDfound][dynacouche * g_serumData.nocolors +
                                              frame[tk]];
+        }
       }
     }
   }
@@ -2054,6 +2062,22 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
   if (((mySerum.frame32 && g_serumData.fheight == 32) ||
        (mySerum.frame64 && g_serumData.fheight == 64)) &&
       isoriginalrequested) {
+    const uint16_t backgroundId = g_serumData.backgroundIDs[IDfound][0];
+    const bool hasBackground = backgroundId < g_serumData.nbackgrounds;
+    const uint8_t* frameBackgroundMask = g_serumData.backgroundmask[IDfound];
+    const uint16_t* frameBackground = hasBackground
+                                          ? g_serumData.backgroundframes_v2[backgroundId]
+                                          : nullptr;
+    const uint16_t* frameColors = g_serumData.cframes_v2[IDfound];
+    const bool frameHasDynamic =
+        IDfound < g_serumData.frameHasDynamic.size() &&
+        g_serumData.frameHasDynamic[IDfound] > 0;
+    const uint8_t* frameDyna =
+        frameHasDynamic ? g_serumData.dynamasks[IDfound] : nullptr;
+    const uint8_t* frameDynaActive =
+        frameHasDynamic ? g_serumData.dynamasks_active[IDfound] : nullptr;
+    const uint16_t* frameDynaColors =
+        frameHasDynamic ? g_serumData.dyna4cols_v2[IDfound] : nullptr;
     // create the original res frame
     if (g_serumData.fheight == 32) {
       pfr = mySerum.frame32;
@@ -2079,15 +2103,12 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     for (tj = 0; tj < g_serumData.fheight; tj++) {
       for (ti = 0; ti < g_serumData.fwidth; ti++) {
         uint16_t tk = tj * g_serumData.fwidth + ti;
-        if ((g_serumData.backgroundIDs[IDfound][0] <
-             g_serumData.nbackgrounds) &&
-            (frame[tk] == 0) && (g_serumData.backgroundmask[IDfound][tk] > 0)) {
+        if (hasBackground && (frame[tk] == 0) && (frameBackgroundMask[tk] > 0)) {
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
               pfr[tk] = sceneBackgroundFrame[tk];
             } else if (!suppressFrameBackgroundImage) {
-              pfr[tk] = g_serumData.backgroundframes_v2
-                            [g_serumData.backgroundIDs[IDfound][0]][tk];
+              pfr[tk] = frameBackground[tk];
               if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
                                   &prot[tk * 2 + 1], false))
                 pfr[tk] =
@@ -2099,17 +2120,14 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             }
           }
         } else {
-          uint8_t dynacouche = g_serumData.dynamasks[IDfound][tk];
-          if (!IsFrameDynaActive(IDfound, tk)) {
+          if (!frameHasDynamic || frameDynaActive[tk] == 0) {
             if (isdynapix[tk] == 0) {
               if (blackOutStaticContent &&
-                  (g_serumData.backgroundIDs[IDfound][0] <
-                   g_serumData.nbackgrounds) &&
-                  (frame[tk] > 0) &&
-                  (g_serumData.backgroundmask[IDfound][tk] > 0)) {
+                  hasBackground && (frame[tk] > 0) &&
+                  (frameBackgroundMask[tk] > 0)) {
                 pfr[tk] = sceneBackgroundFrame[tk];
               } else {
-                pfr[tk] = g_serumData.cframes_v2[IDfound][tk];
+                pfr[tk] = frameColors[tk];
                 if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
                                     &prot[tk * 2 + 1], false))
                   pfr[tk] =
@@ -2119,19 +2137,16 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
               }
             }
           } else {
+            const uint8_t dynacouche = frameDyna[tk];
             if (frame[tk] > 0) {
               CheckDynaShadow(pfr, IDfound, dynacouche, isdynapix, ti, tj,
                               g_serumData.fwidth, g_serumData.fheight, false);
               isdynapix[tk] = 1;
-              pfr[tk] =
-                  g_serumData
-                      .dyna4cols_v2[IDfound][dynacouche * g_serumData.nocolors +
-                                             frame[tk]];
+              pfr[tk] = frameDynaColors[dynacouche * g_serumData.nocolors +
+                                        frame[tk]];
             } else if (isdynapix[tk] == 0)
-              pfr[tk] =
-                  g_serumData
-                      .dyna4cols_v2[IDfound][dynacouche * g_serumData.nocolors +
-                                             frame[tk]];
+              pfr[tk] = frameDynaColors[dynacouche * g_serumData.nocolors +
+                                        frame[tk]];
             prot[tk * 2] = prot[tk * 2 + 1] = 0xffff;
           }
         }
@@ -2142,6 +2157,26 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
       ((mySerum.frame32 && g_serumData.fheight_extra == 32) ||
        (mySerum.frame64 && g_serumData.fheight_extra == 64)) &&
       isextrarequested) {
+    const uint16_t backgroundId = g_serumData.backgroundIDs[IDfound][0];
+    const bool hasBackground = backgroundId < g_serumData.nbackgrounds;
+    const uint8_t* frameBackgroundMaskExtra =
+        g_serumData.backgroundmask_extra[IDfound];
+    const uint16_t* frameBackgroundExtra =
+        hasBackground ? g_serumData.backgroundframes_v2_extra[backgroundId]
+                      : nullptr;
+    const uint16_t* frameColorsExtra = g_serumData.cframes_v2_extra[IDfound];
+    const bool frameHasDynamicExtra =
+        IDfound < g_serumData.frameHasDynamicExtra.size() &&
+        g_serumData.frameHasDynamicExtra[IDfound] > 0;
+    const uint8_t* frameDynaExtra = frameHasDynamicExtra
+                                        ? g_serumData.dynamasks_extra[IDfound]
+                                        : nullptr;
+    const uint8_t* frameDynaExtraActive = frameHasDynamicExtra
+                                              ? g_serumData.dynamasks_extra_active[IDfound]
+                                              : nullptr;
+    const uint16_t* frameDynaColorsExtra =
+        frameHasDynamicExtra ? g_serumData.dyna4cols_v2_extra[IDfound]
+                             : nullptr;
     // create the extra res frame
     if (g_serumData.fheight_extra == 32) {
       pfr = mySerum.frame32;
@@ -2174,16 +2209,13 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         else
           tl = tj * 2 * g_serumData.fwidth + ti * 2;
 
-        if ((g_serumData.backgroundIDs[IDfound][0] <
-             g_serumData.nbackgrounds) &&
-            (frame[tl] == 0) &&
-            (g_serumData.backgroundmask_extra[IDfound][tk] > 0)) {
+        if (hasBackground && (frame[tl] == 0) &&
+            (frameBackgroundMaskExtra[tk] > 0)) {
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
               pfr[tk] = sceneBackgroundFrame[tk];
             } else if (!suppressFrameBackgroundImage) {
-              pfr[tk] = g_serumData.backgroundframes_v2_extra
-                            [g_serumData.backgroundIDs[IDfound][0]][tk];
+              pfr[tk] = frameBackgroundExtra[tk];
               if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
                                   &prot[tk * 2 + 1], true)) {
                 pfr[tk] =
@@ -2196,17 +2228,14 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             }
           }
         } else {
-          uint8_t dynacouche = g_serumData.dynamasks_extra[IDfound][tk];
-          if (!IsFrameExtraDynaActive(IDfound, tk)) {
+          if (!frameHasDynamicExtra || frameDynaExtraActive[tk] == 0) {
             if (isdynapix[tk] == 0) {
               if (blackOutStaticContent &&
-                  (g_serumData.backgroundIDs[IDfound][0] <
-                   g_serumData.nbackgrounds) &&
-                  (frame[tl] > 0) &&
-                  (g_serumData.backgroundmask_extra[IDfound][tk] > 0)) {
+                  hasBackground && (frame[tl] > 0) &&
+                  (frameBackgroundMaskExtra[tk] > 0)) {
                 pfr[tk] = sceneBackgroundFrame[tk];
               } else {
-                pfr[tk] = g_serumData.cframes_v2_extra[IDfound][tk];
+                pfr[tk] = frameColorsExtra[tk];
                 if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
                                     &prot[tk * 2 + 1], true)) {
                   pfr[tk] =
@@ -2217,18 +2246,17 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
               }
             }
           } else {
+            const uint8_t dynacouche = frameDynaExtra[tk];
             if (frame[tl] > 0) {
               CheckDynaShadow(pfr, IDfound, dynacouche, isdynapix, ti, tj,
                               g_serumData.fwidth_extra,
                               g_serumData.fheight_extra, true);
               isdynapix[tk] = 1;
-              pfr[tk] =
-                  g_serumData.dyna4cols_v2_extra
-                      [IDfound][dynacouche * g_serumData.nocolors + frame[tl]];
+              pfr[tk] = frameDynaColorsExtra[dynacouche * g_serumData.nocolors +
+                                             frame[tl]];
             } else if (isdynapix[tk] == 0)
-              pfr[tk] =
-                  g_serumData.dyna4cols_v2_extra
-                      [IDfound][dynacouche * g_serumData.nocolors + frame[tl]];
+              pfr[tk] = frameDynaColorsExtra[dynacouche * g_serumData.nocolors +
+                                             frame[tl]];
             prot[tk * 2] = prot[tk * 2 + 1] = 0xffff;
           }
         }
@@ -2239,9 +2267,11 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
 
 void Colorize_Spritev1(uint8_t nosprite, uint16_t frx, uint16_t fry,
                        uint16_t spx, uint16_t spy, uint16_t wid, uint16_t hei) {
+  if (!g_serumData.spritedescriptionso_opaque.hasData(nosprite)) return;
+  const uint8_t* spriteOpaque = g_serumData.spritedescriptionso_opaque[nosprite];
   for (uint16_t tj = 0; tj < hei; tj++) {
     for (uint16_t ti = 0; ti < wid; ti++) {
-      if (IsSpriteOpaqueV1(nosprite, (tj + spy) * MAX_SPRITE_SIZE + ti + spx)) {
+      if (spriteOpaque[(tj + spy) * MAX_SPRITE_SIZE + ti + spx] > 0) {
         mySerum.frame[(fry + tj) * g_serumData.fwidth + frx + ti] =
             g_serumData
                 .spritedescriptionsc[nosprite]
@@ -2257,6 +2287,15 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
   uint16_t *pfr, *prot;
   uint16_t* prt;
   uint32_t* cshft;
+  if (!g_serumData.spriteoriginal_opaque.hasData(nosprite) ||
+      !g_serumData.dynaspritemasks_active.hasData(nosprite) ||
+      !g_serumData.dynaspritemasks.hasData(nosprite)) {
+    return;
+  }
+  const uint8_t* spriteOpaque = g_serumData.spriteoriginal_opaque[nosprite];
+  const uint8_t* spriteDyna = g_serumData.dynaspritemasks[nosprite];
+  const uint8_t* spriteDynaActive =
+      g_serumData.dynaspritemasks_active[nosprite];
   if (((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) &&
        g_serumData.fheight == 32) ||
       ((mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) &&
@@ -2276,9 +2315,8 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
       for (uint16_t ti = 0; ti < wid; ti++) {
         uint16_t tk = (fry + tj) * g_serumData.fwidth + frx + ti;
         uint32_t tl = (tj + spy) * MAX_SPRITE_WIDTH + ti + spx;
-        if (IsSpriteOpaqueV2(nosprite, tl)) {
-          uint8_t dynacouche = g_serumData.dynaspritemasks[nosprite][tl];
-          if (!IsSpriteDynaActive(nosprite, tl)) {
+        if (spriteOpaque[tl] > 0) {
+          if (spriteDynaActive[tl] == 0) {
             pfr[tk] = g_serumData.spritecolored[nosprite][tl];
             if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
                                 &prot[tk * 2 + 1], false))
@@ -2286,6 +2324,7 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
                             (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
                                 prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
           } else {
+            const uint8_t dynacouche = spriteDyna[tl];
             pfr[tk] =
                 g_serumData.dynasprite4cols[nosprite]
                                            [dynacouche * g_serumData.nocolors +
@@ -2304,6 +2343,17 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
        g_serumData.fheight_extra == 32) ||
       ((mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) &&
        g_serumData.fheight_extra == 64)) {
+    if (!g_serumData.spritemask_extra_opaque.hasData(nosprite) ||
+        !g_serumData.dynaspritemasks_extra_active.hasData(nosprite) ||
+        !g_serumData.dynaspritemasks_extra.hasData(nosprite)) {
+      return;
+    }
+    const uint8_t* spriteExtraOpaque =
+        g_serumData.spritemask_extra_opaque[nosprite];
+    const uint8_t* spriteExtraDyna =
+        g_serumData.dynaspritemasks_extra[nosprite];
+    const uint8_t* spriteExtraDynaActive =
+        g_serumData.dynaspritemasks_extra_active[nosprite];
     uint16_t thei, twid, tfrx, tfry, tspy, tspx;
     if (g_serumData.fheight_extra == 32) {
       pfr = mySerum.frame32;
@@ -2331,14 +2381,9 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
     for (uint16_t tj = 0; tj < thei; tj++) {
       for (uint16_t ti = 0; ti < twid; ti++) {
         uint16_t tk = (tfry + tj) * g_serumData.fwidth_extra + tfrx + ti;
-        if (IsSpriteExtraOpaqueV2(nosprite,
-                                  (tj + tspy) * MAX_SPRITE_WIDTH + ti + tspx)) {
-          uint8_t dynacouche =
-              g_serumData.dynaspritemasks_extra[nosprite]
-                                               [(tj + tspy) * MAX_SPRITE_WIDTH +
-                                                ti + tspx];
-          if (!IsSpriteExtraDynaActive(
-                  nosprite, (tj + tspy) * MAX_SPRITE_WIDTH + ti + tspx)) {
+        const uint32_t spritePixel = (tj + tspy) * MAX_SPRITE_WIDTH + ti + tspx;
+        if (spriteExtraOpaque[spritePixel] > 0) {
+          if (spriteExtraDynaActive[spritePixel] == 0) {
             pfr[tk] =
                 g_serumData.spritecolored_extra[nosprite]
                                                [(tj + tspy) * MAX_SPRITE_WIDTH +
@@ -2349,6 +2394,7 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
                             (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
                                 prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
           } else {
+            const uint8_t dynacouche = spriteExtraDyna[spritePixel];
             uint16_t tl;
             if (g_serumData.fheight_extra == 64)
               tl = (tj / 2 + fry) * g_serumData.fwidth + ti / 2 + frx;
@@ -2799,6 +2845,11 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
                     nosprite, &nspr, frx, fry, spx, spy, wid, hei);
       if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
           g_serumData.activeframes[lastfound][0] != 0) {
+        const bool profileNow = g_profileDynamicHotPaths;
+        std::chrono::steady_clock::time_point profStart;
+        if (profileNow) {
+          profStart = std::chrono::steady_clock::now();
+        }
         if (!sceneIsLastBackgroundFrame) {
           Colorize_Framev2(frame, lastfound, false, false,
                            suppressPlaceholderBackground);
@@ -2809,7 +2860,17 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
               (sceneOptionFlags & FLAG_SCENE_ONLY_DYNAMIC_CONTENT) ==
                   FLAG_SCENE_ONLY_DYNAMIC_CONTENT);
         }
+        if (profileNow) {
+          g_profileColorizeFrameV2Ns +=
+              (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::steady_clock::now() - profStart)
+                  .count();
+        }
         if (isspr) {
+          std::chrono::steady_clock::time_point spriteStart;
+          if (profileNow) {
+            spriteStart = std::chrono::steady_clock::now();
+          }
           uint8_t ti = 0;
           while (ti < nspr) {
             Colorize_Spritev2(
@@ -2817,6 +2878,29 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
                 frx[ti], fry[ti], spx[ti], spy[ti], wid[ti], hei[ti],
                 isBackgroundSceneRequested ? lastFrameId : lastfound);
             ti++;
+          }
+          if (profileNow) {
+            g_profileColorizeSpriteV2Ns +=
+                (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - spriteStart)
+                    .count();
+          }
+        }
+        if (profileNow) {
+          ++g_profileColorizeCalls;
+          if ((g_profileColorizeCalls % 240u) == 0u) {
+            const double frameMs =
+                (double)g_profileColorizeFrameV2Ns /
+                (double)g_profileColorizeCalls / 1000000.0;
+            const double spriteMs =
+                (double)g_profileColorizeSpriteV2Ns /
+                (double)g_profileColorizeCalls / 1000000.0;
+            Log("Perf dynamic avg: Colorize_Framev2=%.3fms "
+                "Colorize_Spritev2=%.3fms over %u frames",
+                frameMs, spriteMs, (uint32_t)g_profileColorizeCalls);
+            if (g_profileSparseVectors) {
+              g_serumData.LogSparseVectorProfileSnapshot();
+            }
           }
         }
 

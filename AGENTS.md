@@ -56,6 +56,11 @@ Vector policy currently used in `SerumData`:
   - `dynamasks_extra` + `dynamasks_extra_active`
   - `dynaspritemasks` + `dynaspritemasks_active`
   - `dynaspritemasks_extra` + `dynaspritemasks_extra_active`
+- Precomputed frame-level dynamic fast flags are persisted:
+  - `frameHasDynamic`
+  - `frameHasDynamicExtra`
+- `Colorize_Framev1/v2` uses these flags to bypass dynamic-mask branches
+  entirely for frames without active dynamic pixels.
 - Runtime uses sidecar flags instead of `255` sentinels for transparency / dynamic-zone activity.
 - Runtime does not include sentinel-based fallback in sprite/dynamic helpers;
   missing/incorrect sidecars are treated as a conversion/load bug and are not
@@ -84,6 +89,11 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
 8. Build/normalize packing sidecars via `BuildPackingSidecarsAndNormalize()`.
    - The normalization step is idempotent and guarded; repeated calls in the
      same load/save cycle are no-ops once completed.
+9. Optional runtime A/B switch for dynamic packed-read overhead:
+   - If env `SERUM_DISABLE_DYNAMIC_PACKED_READS` is enabled (`1/true/on/yes`),
+     `PrepareRuntimeDynamicHotCache()` predecodes dynamic vectors
+     (`dynamasks*`, `dynaspritemasks*`) into runtime hot caches.
+   - Default runtime behavior is unchanged when this env var is not set.
 
 Important:
 - `BuildFrameLookupVectors()` must run after final scene data is known for this load cycle.
@@ -192,6 +202,14 @@ v6 snapshot policy:
 - Central callback configured by `Serum_SetLogCallback`.
 - `serum-decode.cpp` and `SceneGenerator.cpp` both use callback-based `Log(...)`.
 - Missing-file logs from `find_case_insensitive_file(...)` use normalized path joining.
+- Optional runtime profiling:
+  - If env `SERUM_PROFILE_DYNAMIC_HOTPATHS` is enabled (`1/true/on/yes`),
+    periodic average timings for `Colorize_Framev2` and `Colorize_Spritev2`
+    hot paths are logged.
+  - If env `SERUM_PROFILE_SPARSE_VECTORS=1`, sparse-vector access snapshots are
+    logged at the same cadence (accesses, decode count, cache hits, direct hits)
+    for key runtime vectors (`cframes_v2*`, `backgroundmask*`, `dynamasks*`,
+    `dynaspritemasks*`).
 
 ## Safety invariants
 - `frameIsScene.size()` must equal `nframes` before identification.

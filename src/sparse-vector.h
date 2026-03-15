@@ -5,6 +5,7 @@
 #include <cereal/types/unordered_map.hpp>
 #include <cereal/types/vector.hpp>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <type_traits>
@@ -53,6 +54,13 @@ class SparseVector {
   mutable std::vector<T> lastDecompressed;
   mutable std::vector<T> secondDecompressed;
   mutable std::vector<uint8_t> decodeScratch;
+  mutable bool forceDecodedReads = false;
+  mutable std::unordered_map<uint32_t, std::vector<T>> forcedDecoded;
+  const char* profileLabel = nullptr;
+  mutable uint64_t profileAccessCount = 0;
+  mutable uint64_t profileDecodeCount = 0;
+  mutable uint64_t profileCacheHitCount = 0;
+  mutable uint64_t profileDirectHitCount = 0;
   std::vector<uint32_t> packedIds;
   std::vector<uint32_t> packedOffsets;
   std::vector<uint32_t> packedSizes;
@@ -65,6 +73,22 @@ class SparseVector {
   static constexpr uint8_t kValuePackedMode1Bit = 1;
   static constexpr uint8_t kValuePackedMode2Bit = 2;
   static constexpr uint8_t kValuePackedMode4Bit = 4;
+
+  static bool isProfilingEnabled() {
+    static bool initialized = false;
+    static bool enabled = false;
+    if (!initialized) {
+      const char* value = std::getenv("SERUM_PROFILE_SPARSE_VECTORS");
+      enabled =
+          value && value[0] != '\0' &&
+          (strcmp(value, "1") == 0 || strcmp(value, "true") == 0 ||
+           strcmp(value, "TRUE") == 0 || strcmp(value, "yes") == 0 ||
+           strcmp(value, "YES") == 0 || strcmp(value, "on") == 0 ||
+           strcmp(value, "ON") == 0);
+      initialized = true;
+    }
+    return enabled;
+  }
 
   size_t rawByteSize() const { return elementSize * sizeof(T); }
 
@@ -443,18 +467,40 @@ class SparseVector {
   }
 
   T *operator[](const uint32_t elementId) {
+    if (isProfilingEnabled()) {
+      ++profileAccessCount;
+    }
     if (useIndex) {
       if (elementId >= index.size()) return noData.data();
+      if (isProfilingEnabled()) {
+        ++profileDirectHitCount;
+      }
       return index[elementId].data();
     } else {
+      if (forceDecodedReads) {
+        auto cached = forcedDecoded.find(elementId);
+        if (cached != forcedDecoded.end()) {
+          if (isProfilingEnabled()) {
+            ++profileCacheHitCount;
+          }
+          return cached->second.data();
+        }
+        return noData.data();
+      }
       if (useCompression && elementId == lastAccessedId &&
           !lastDecompressed.empty()) {
+        if (isProfilingEnabled()) {
+          ++profileCacheHitCount;
+        }
         return lastDecompressed.data();
       }
       if (useCompression && elementId == secondAccessedId &&
           !secondDecompressed.empty()) {
         std::swap(lastAccessedId, secondAccessedId);
         std::swap(lastDecompressed, secondDecompressed);
+        if (isProfilingEnabled()) {
+          ++profileCacheHitCount;
+        }
         return lastDecompressed.data();
       }
 
@@ -488,8 +534,14 @@ class SparseVector {
       if (!payload) return noData.data();
 
       if (useCompression) {
+        if (isProfilingEnabled()) {
+          ++profileDecodeCount;
+        }
         // Cache hit only applies to decoded cache-backed payloads.
         if (elementId == lastAccessedId) {
+          if (isProfilingEnabled()) {
+            ++profileCacheHitCount;
+          }
           return lastDecompressed.data();
         }
 
@@ -515,6 +567,9 @@ class SparseVector {
           // Backward compatibility: older payloads may store raw bytes even if
           // this vector now defaults to compression.
           if (payloadSize == rawBytes) {
+            if (isProfilingEnabled()) {
+              ++profileDirectHitCount;
+            }
             return reinterpret_cast<T *>(const_cast<uint8_t *>(payload));
           }
           return noData.data();
@@ -551,6 +606,9 @@ class SparseVector {
         return noData.data();
       }
 
+      if (isProfilingEnabled()) {
+        ++profileDirectHitCount;
+      }
       return reinterpret_cast<T *>(const_cast<uint8_t *>(payload));
     }
   }
@@ -681,6 +739,8 @@ class SparseVector {
     lastDecompressed.clear();
     secondDecompressed.clear();
     decodeScratch.clear();
+    forceDecodedReads = false;
+    forcedDecoded.clear();
   }
 
   template <typename U = T>
@@ -743,6 +803,8 @@ class SparseVector {
       lastDecompressed.clear();
       secondDecompressed.clear();
       decodeScratch.clear();
+      forceDecodedReads = false;
+      forcedDecoded.clear();
       return;
     }
 
@@ -767,6 +829,46 @@ class SparseVector {
     lastDecompressed.clear();
     secondDecompressed.clear();
     decodeScratch.clear();
+    forceDecodedReads = false;
+    forcedDecoded.clear();
+  }
+
+  void clearForcedDecodedCache() {
+    forceDecodedReads = false;
+    forcedDecoded.clear();
+  }
+
+  void setProfileLabel(const char* label) { profileLabel = label; }
+
+  const char* getProfileLabel() const { return profileLabel; }
+
+  void consumeProfileCounters(uint64_t& accesses, uint64_t& decodes,
+                              uint64_t& cacheHits, uint64_t& directHits) {
+    accesses = profileAccessCount;
+    decodes = profileDecodeCount;
+    cacheHits = profileCacheHitCount;
+    directHits = profileDirectHitCount;
+    profileAccessCount = 0;
+    profileDecodeCount = 0;
+    profileCacheHitCount = 0;
+    profileDirectHitCount = 0;
+  }
+
+  void enableForcedDecodedReadsForIds(const std::vector<uint32_t> &ids) {
+    forcedDecoded.clear();
+    forcedDecoded.reserve(ids.size());
+    forceDecodedReads = false;
+    for (uint32_t id : ids) {
+      if (!hasData(id)) {
+        continue;
+      }
+      T *decoded = (*this)[id];
+      if (!decoded) {
+        continue;
+      }
+      forcedDecoded.emplace(id, std::vector<T>(decoded, decoded + elementSize));
+    }
+    forceDecodedReads = true;
   }
 
   friend class cereal::access;
@@ -815,5 +917,7 @@ class SparseVector {
     lastDecompressed.clear();
     secondDecompressed.clear();
     decodeScratch.clear();
+    forceDecodedReads = false;
+    forcedDecoded.clear();
   }
 };

@@ -67,6 +67,18 @@ SerumData::SerumData()
       dynaspritemasks_extra(0, false, true, true, 0, 1),
       dynaspritemasks_extra_active(0, false, true, true, 0, 1),
       sprshapemode(0) {
+  cframes_v2.setProfileLabel("cframes_v2");
+  cframes_v2_extra.setProfileLabel("cframes_v2_extra");
+  dynamasks.setProfileLabel("dynamasks");
+  dynamasks_active.setProfileLabel("dynamasks_active");
+  dynamasks_extra.setProfileLabel("dynamasks_extra");
+  dynamasks_extra_active.setProfileLabel("dynamasks_extra_active");
+  backgroundmask.setProfileLabel("backgroundmask");
+  backgroundmask_extra.setProfileLabel("backgroundmask_extra");
+  dynaspritemasks.setProfileLabel("dynaspritemasks");
+  dynaspritemasks_active.setProfileLabel("dynaspritemasks_active");
+  dynaspritemasks_extra.setProfileLabel("dynaspritemasks_extra");
+  dynaspritemasks_extra_active.setProfileLabel("dynaspritemasks_extra_active");
   sceneGenerator = new SceneGenerator();
   if (is_real_machine()) packingStorage.assign(384u * 1024u * 1024u, 0xA5);
 }
@@ -130,6 +142,8 @@ void SerumData::Clear() {
   dynaspritemasks_extra.clear();
   dynaspritemasks_extra_active.clear();
   sprshapemode.clear();
+  frameHasDynamic.clear();
+  frameHasDynamicExtra.clear();
   frameIsScene.clear();
   sceneFramesBySignature.clear();
 }
@@ -216,6 +230,7 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
 
   normalized.resize(framePixels);
   flags.resize(framePixels);
+  frameHasDynamic.assign(nframes, 0);
   for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
     const bool hasSourceVector = dynamasks.hasData(frameId);
     const bool hasActiveVector = dynamasks_active.hasData(frameId);
@@ -224,20 +239,24 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
     }
     const uint8_t *source = dynamasks[frameId];
     const uint8_t *activeSource = dynamasks_active[frameId];
+    bool anyActive = false;
     for (size_t i = 0; i < framePixels; ++i) {
       const uint8_t value = hasSourceVector ? source[i] : 0;
       const bool active =
           hasActiveVector ? (activeSource[i] > 0) : (value != 255);
       flags[i] = active ? 1 : 0;
       normalized[i] = active ? value : 0;
+      anyActive = anyActive || active;
     }
     dynamasks_active.set(frameId, flags.data(), framePixels);
     dynamasks.set(frameId, normalized.data(), framePixels);
+    frameHasDynamic[frameId] = anyActive ? 1 : 0;
   }
 
   if (extraFramePixels > 0) {
     normalized.resize(extraFramePixels);
     flags.resize(extraFramePixels);
+    frameHasDynamicExtra.assign(nframes, 0);
     for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
       if (isextraframe[frameId][0] == 0) {
         continue;
@@ -249,18 +268,23 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
       }
       const uint8_t *source = dynamasks_extra[frameId];
       const uint8_t *activeSource = dynamasks_extra_active[frameId];
+      bool anyActive = false;
       for (size_t i = 0; i < extraFramePixels; ++i) {
         const uint8_t value = hasSourceVector ? source[i] : 0;
         const bool active =
             hasActiveVector ? (activeSource[i] > 0) : (value != 255);
         flags[i] = active ? 1 : 0;
         normalized[i] = active ? value : 0;
+        anyActive = anyActive || active;
       }
       dynamasks_extra_active.set(frameId, flags.data(), extraFramePixels,
                                  &isextraframe);
       dynamasks_extra.set(frameId, normalized.data(), extraFramePixels,
                           &isextraframe);
+      frameHasDynamicExtra[frameId] = anyActive ? 1 : 0;
     }
+  } else {
+    frameHasDynamicExtra.assign(nframes, 0);
   }
 
   normalized.resize(spritePixels);
@@ -309,6 +333,79 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
   }
 
   m_packingSidecarsNormalized = true;
+}
+
+void SerumData::PrepareRuntimeDynamicHotCache() {
+  std::vector<uint32_t> frameIds;
+  frameIds.reserve(nframes);
+  for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+    if (frameId < frameHasDynamic.size() && frameHasDynamic[frameId] > 0) {
+      frameIds.push_back(frameId);
+    }
+  }
+  dynamasks.enableForcedDecodedReadsForIds(frameIds);
+  dynamasks_active.enableForcedDecodedReadsForIds(frameIds);
+
+  std::vector<uint32_t> extraFrameIds;
+  extraFrameIds.reserve(nframes);
+  for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+    if (frameId < frameHasDynamicExtra.size() &&
+        frameHasDynamicExtra[frameId] > 0) {
+      extraFrameIds.push_back(frameId);
+    }
+  }
+  dynamasks_extra.enableForcedDecodedReadsForIds(extraFrameIds);
+  dynamasks_extra_active.enableForcedDecodedReadsForIds(extraFrameIds);
+
+  std::vector<uint32_t> spriteIds;
+  spriteIds.reserve(nsprites);
+  for (uint32_t spriteId = 0; spriteId < nsprites; ++spriteId) {
+    if (dynaspritemasks.hasData(spriteId) ||
+        dynaspritemasks_active.hasData(spriteId) ||
+        dynaspritemasks_extra.hasData(spriteId) ||
+        dynaspritemasks_extra_active.hasData(spriteId)) {
+      spriteIds.push_back(spriteId);
+    }
+  }
+  dynaspritemasks.enableForcedDecodedReadsForIds(spriteIds);
+  dynaspritemasks_active.enableForcedDecodedReadsForIds(spriteIds);
+  dynaspritemasks_extra.enableForcedDecodedReadsForIds(spriteIds);
+  dynaspritemasks_extra_active.enableForcedDecodedReadsForIds(spriteIds);
+
+  Log("Prepared runtime dynamic hot cache: %u frame masks, %u extra frame masks,"
+      " %u sprite masks",
+      (uint32_t)frameIds.size(), (uint32_t)extraFrameIds.size(),
+      (uint32_t)spriteIds.size());
+}
+
+void SerumData::LogSparseVectorProfileSnapshot() {
+  auto logCounters = [&](auto& vec) {
+    uint64_t accesses = 0;
+    uint64_t decodes = 0;
+    uint64_t cacheHits = 0;
+    uint64_t directHits = 0;
+    vec.consumeProfileCounters(accesses, decodes, cacheHits, directHits);
+    const char* label = vec.getProfileLabel();
+    if (!label || accesses == 0) {
+      return;
+    }
+    Log("SparseProfile %s: accesses=%llu decodes=%llu cacheHits=%llu direct=%llu",
+        label, (unsigned long long)accesses, (unsigned long long)decodes,
+        (unsigned long long)cacheHits, (unsigned long long)directHits);
+  };
+
+  logCounters(cframes_v2);
+  logCounters(cframes_v2_extra);
+  logCounters(backgroundmask);
+  logCounters(backgroundmask_extra);
+  logCounters(dynamasks);
+  logCounters(dynamasks_active);
+  logCounters(dynamasks_extra);
+  logCounters(dynamasks_extra_active);
+  logCounters(dynaspritemasks);
+  logCounters(dynaspritemasks_active);
+  logCounters(dynaspritemasks_extra);
+  logCounters(dynaspritemasks_extra_active);
 }
 
 bool SerumData::SaveToFile(const char *filename) {
