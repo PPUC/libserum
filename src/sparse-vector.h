@@ -56,7 +56,7 @@ class SparseVector {
   mutable std::vector<uint8_t> decodeScratch;
   mutable bool forceDecodedReads = false;
   mutable std::unordered_map<uint32_t, std::vector<T>> forcedDecoded;
-  const char* profileLabel = nullptr;
+  const char *profileLabel = nullptr;
   mutable uint64_t profileAccessCount = 0;
   mutable uint64_t profileDecodeCount = 0;
   mutable uint64_t profileCacheHitCount = 0;
@@ -78,13 +78,12 @@ class SparseVector {
     static bool initialized = false;
     static bool enabled = false;
     if (!initialized) {
-      const char* value = std::getenv("SERUM_PROFILE_SPARSE_VECTORS");
-      enabled =
-          value && value[0] != '\0' &&
-          (strcmp(value, "1") == 0 || strcmp(value, "true") == 0 ||
-           strcmp(value, "TRUE") == 0 || strcmp(value, "yes") == 0 ||
-           strcmp(value, "YES") == 0 || strcmp(value, "on") == 0 ||
-           strcmp(value, "ON") == 0);
+      const char *value = std::getenv("SERUM_PROFILE_SPARSE_VECTORS");
+      enabled = value && value[0] != '\0' &&
+                (strcmp(value, "1") == 0 || strcmp(value, "true") == 0 ||
+                 strcmp(value, "TRUE") == 0 || strcmp(value, "yes") == 0 ||
+                 strcmp(value, "YES") == 0 || strcmp(value, "on") == 0 ||
+                 strcmp(value, "ON") == 0);
       initialized = true;
     }
     return enabled;
@@ -838,12 +837,12 @@ class SparseVector {
     forcedDecoded.clear();
   }
 
-  void setProfileLabel(const char* label) { profileLabel = label; }
+  void setProfileLabel(const char *label) { profileLabel = label; }
 
-  const char* getProfileLabel() const { return profileLabel; }
+  const char *getProfileLabel() const { return profileLabel; }
 
-  void consumeProfileCounters(uint64_t& accesses, uint64_t& decodes,
-                              uint64_t& cacheHits, uint64_t& directHits) {
+  void consumeProfileCounters(uint64_t &accesses, uint64_t &decodes,
+                              uint64_t &cacheHits, uint64_t &directHits) {
     accesses = profileAccessCount;
     decodes = profileDecodeCount;
     cacheHits = profileCacheHitCount;

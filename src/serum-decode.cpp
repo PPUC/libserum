@@ -146,6 +146,8 @@ uint8_t monochromePaletteV2Length = 0;
 uint32_t Serum_RenderScene(void);
 static void BuildFrameLookupVectors(void);
 static uint64_t MakeFrameSignature(uint8_t mask, uint8_t shape, uint32_t hash);
+static uint64_t MakeSceneTripletKey(uint16_t sceneId, uint8_t group,
+                                    uint16_t frameIndex);
 static void InitFrameLookupRuntimeStateFromStoredData(void);
 static void StopV2ColorRotations(void);
 static bool CaptureMonochromePaletteFromFrameV2(uint32_t frameId);
@@ -154,6 +156,7 @@ static void ConfigureSceneEndHold(uint16_t sceneId, bool interruptable,
                                   uint8_t sceneOptions);
 static void ForceNormalFrameRefreshAfterSceneEnd(void);
 static bool ValidateLoadedGeometry(bool isV2, const char* sourceTag);
+uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested);
 
 struct SceneResumeState {
   uint16_t nextFrame = 0;
@@ -170,6 +173,9 @@ uint32_t lastfound_normal = 0;  // last frame ID for non-scene frames
 uint32_t lastfound_scene = 0;   // last frame ID for scene frames
 uint32_t lastframe_full_crc_normal = 0;
 uint32_t lastframe_full_crc_scene = 0;
+bool first_match_normal = true;
+bool first_match_scene = true;
+uint32_t forced_scene_frame_id = IDENTIFY_NO_FRAME;
 uint32_t lastframe_found = GetMonotonicTimeMs();
 uint32_t lastTriggerID = 0xffffffff;  // last trigger ID found
 uint32_t lasttriggerTimestamp = 0;
@@ -370,6 +376,9 @@ void Serum_free(void) {
   lastfound_scene = 0;
   lastframe_full_crc_normal = 0;
   lastframe_full_crc_scene = 0;
+  first_match_normal = true;
+  first_match_scene = true;
+  forced_scene_frame_id = IDENTIFY_NO_FRAME;
   sceneEndHoldUntilMs = 0;
   sceneEndHoldDurationMs = 0;
   monochromeMode = false;
@@ -1376,6 +1385,7 @@ static void BuildFrameLookupVectors(void) {
   uint32_t numSceneFrames = 0;
   g_serumData.frameIsScene.clear();
   g_serumData.sceneFramesBySignature.clear();
+  g_serumData.sceneFrameIdByTriplet.clear();
 
   if (g_serumData.nframes == 0) return;
   g_serumData.frameIsScene.resize(g_serumData.nframes, 0);
@@ -1439,6 +1449,56 @@ static void BuildFrameLookupVectors(void) {
         numSceneFrames++;
       }
     }
+
+    if (g_serumData.concentrateFileVersion >= 6) {
+      // Build direct lookup table: (sceneId, group, frameIndex) -> frameId.
+      // Keep this as a preprocessing step only; runtime scene rendering can
+      // use it to bypass generic scene identification.
+      const uint32_t saved_lastfound = lastfound;
+      const uint32_t saved_lastfound_scene = lastfound_scene;
+      const uint32_t saved_lastframe_full_crc_scene = lastframe_full_crc_scene;
+      const bool saved_first_match_scene = first_match_scene;
+      const uint32_t saved_forced_scene_frame_id = forced_scene_frame_id;
+
+      first_match_scene = true;
+      lastfound_scene = 0;
+      lastframe_full_crc_scene = 0;
+      forced_scene_frame_id = IDENTIFY_NO_FRAME;
+
+      for (const auto& scene : scenes) {
+        const int groups = scene.frameGroups > 0 ? scene.frameGroups : 1;
+        for (int group = 1; group <= groups; ++group) {
+          for (uint16_t frameIndex = 0; frameIndex < scene.frameCount;
+               ++frameIndex) {
+            if (g_serumData.sceneGenerator->generateFrame(
+                    scene.sceneId, frameIndex, generatedSceneFrame, group,
+                    true) != 0xffff) {
+              continue;
+            }
+            const uint32_t identified =
+                Identify_Frame(generatedSceneFrame, true);
+            if (identified == IDENTIFY_NO_FRAME) {
+              continue;
+            }
+            const uint32_t frameId = (identified == IDENTIFY_SAME_FRAME)
+                                         ? lastfound_scene
+                                         : identified;
+            if (frameId >= g_serumData.nframes) {
+              continue;
+            }
+            g_serumData.sceneFrameIdByTriplet[MakeSceneTripletKey(
+                scene.sceneId, static_cast<uint8_t>(group), frameIndex)] =
+                frameId;
+          }
+        }
+      }
+
+      lastfound = saved_lastfound;
+      lastfound_scene = saved_lastfound_scene;
+      lastframe_full_crc_scene = saved_lastframe_full_crc_scene;
+      first_match_scene = saved_first_match_scene;
+      forced_scene_frame_id = saved_forced_scene_frame_id;
+    }
   }
 
   Log("Loaded %d frames and %d rotation scene frames",
@@ -1463,6 +1523,12 @@ static void BuildFrameLookupVectors(void) {
 
 static uint64_t MakeFrameSignature(uint8_t mask, uint8_t shape, uint32_t hash) {
   return (uint64_t(mask) << 40) | (uint64_t(shape) << 32) | hash;
+}
+
+static uint64_t MakeSceneTripletKey(uint16_t sceneId, uint8_t group,
+                                    uint16_t frameIndex) {
+  return (uint64_t(sceneId) << 24) | (uint64_t(group) << 16) |
+         uint64_t(frameIndex);
 }
 
 static void InitFrameLookupRuntimeStateFromStoredData(void) {
@@ -1496,12 +1562,23 @@ static void InitFrameLookupRuntimeStateFromStoredData(void) {
 }
 
 uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
-  // Usually the first frame has the ID 0, but lastfound is also initialized
-  // with 0. So we need a helper to be able to detect frame 0 as new.
-  static bool first_match_normal = true;
-  static bool first_match_scene = true;
-
   if (!cromloaded) return IDENTIFY_NO_FRAME;
+  uint32_t tj = sceneFrameRequested
+                    ? lastfound_scene
+                    : lastfound_normal;  // stream-local search start
+  const uint32_t pixels = g_serumData.is256x64
+                              ? (256 * 64)
+                              : (g_serumData.fwidth * g_serumData.fheight);
+  if (sceneFrameRequested && forced_scene_frame_id < g_serumData.nframes &&
+      g_serumData.frameIsScene.size() == g_serumData.nframes &&
+      g_serumData.frameIsScene[forced_scene_frame_id]) {
+    lastfound_scene = forced_scene_frame_id;
+    lastfound = forced_scene_frame_id;
+    lastframe_full_crc_scene = crc32_fast(frame, pixels);
+    first_match_scene = false;
+    return forced_scene_frame_id;
+  }
+
   memset(framechecked, false, g_serumData.nframes);
   uint32_t& lastfound_stream =
       sceneFrameRequested ? lastfound_scene : lastfound_normal;
@@ -1510,11 +1587,6 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   uint32_t& lastframe_full_crc = sceneFrameRequested
                                      ? lastframe_full_crc_scene
                                      : lastframe_full_crc_normal;
-  uint32_t tj =
-      lastfound_stream;  // we start from the last found frame in this stream
-  const uint32_t pixels = g_serumData.is256x64
-                              ? (256 * 64)
-                              : (g_serumData.fwidth * g_serumData.fheight);
   do {
     if (g_serumData.frameIsScene[tj] != (sceneFrameRequested ? 1 : 0)) {
       if (++tj >= g_serumData.nframes) tj = 0;
@@ -1907,13 +1979,12 @@ void Colorize_Framev1(uint8_t* frame, uint32_t IDfound) {
   uint16_t tj, ti;
   // Generate the colorized version of a frame once identified in the crom
   // frames
-  const bool frameHasDynamic =
-      IDfound < g_serumData.frameHasDynamic.size() &&
-      g_serumData.frameHasDynamic[IDfound] > 0;
-  const uint8_t* frameDyna = frameHasDynamic ? g_serumData.dynamasks[IDfound] : nullptr;
-  const uint8_t* frameDynaActive = frameHasDynamic
-                                       ? g_serumData.dynamasks_active[IDfound]
-                                       : nullptr;
+  const bool frameHasDynamic = IDfound < g_serumData.frameHasDynamic.size() &&
+                               g_serumData.frameHasDynamic[IDfound] > 0;
+  const uint8_t* frameDyna =
+      frameHasDynamic ? g_serumData.dynamasks[IDfound] : nullptr;
+  const uint8_t* frameDynaActive =
+      frameHasDynamic ? g_serumData.dynamasks_active[IDfound] : nullptr;
   for (tj = 0; tj < g_serumData.fheight; tj++) {
     for (ti = 0; ti < g_serumData.fwidth; ti++) {
       uint16_t tk = tj * g_serumData.fwidth + ti;
@@ -2065,13 +2136,11 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     const uint16_t backgroundId = g_serumData.backgroundIDs[IDfound][0];
     const bool hasBackground = backgroundId < g_serumData.nbackgrounds;
     const uint8_t* frameBackgroundMask = g_serumData.backgroundmask[IDfound];
-    const uint16_t* frameBackground = hasBackground
-                                          ? g_serumData.backgroundframes_v2[backgroundId]
-                                          : nullptr;
+    const uint16_t* frameBackground =
+        hasBackground ? g_serumData.backgroundframes_v2[backgroundId] : nullptr;
     const uint16_t* frameColors = g_serumData.cframes_v2[IDfound];
-    const bool frameHasDynamic =
-        IDfound < g_serumData.frameHasDynamic.size() &&
-        g_serumData.frameHasDynamic[IDfound] > 0;
+    const bool frameHasDynamic = IDfound < g_serumData.frameHasDynamic.size() &&
+                                 g_serumData.frameHasDynamic[IDfound] > 0;
     const uint8_t* frameDyna =
         frameHasDynamic ? g_serumData.dynamasks[IDfound] : nullptr;
     const uint8_t* frameDynaActive =
@@ -2103,7 +2172,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     for (tj = 0; tj < g_serumData.fheight; tj++) {
       for (ti = 0; ti < g_serumData.fwidth; ti++) {
         uint16_t tk = tj * g_serumData.fwidth + ti;
-        if (hasBackground && (frame[tk] == 0) && (frameBackgroundMask[tk] > 0)) {
+        if (hasBackground && (frame[tk] == 0) &&
+            (frameBackgroundMask[tk] > 0)) {
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
               pfr[tk] = sceneBackgroundFrame[tk];
@@ -2122,8 +2192,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         } else {
           if (!frameHasDynamic || frameDynaActive[tk] == 0) {
             if (isdynapix[tk] == 0) {
-              if (blackOutStaticContent &&
-                  hasBackground && (frame[tk] > 0) &&
+              if (blackOutStaticContent && hasBackground && (frame[tk] > 0) &&
                   (frameBackgroundMask[tk] > 0)) {
                 pfr[tk] = sceneBackgroundFrame[tk];
               } else {
@@ -2168,12 +2237,11 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     const bool frameHasDynamicExtra =
         IDfound < g_serumData.frameHasDynamicExtra.size() &&
         g_serumData.frameHasDynamicExtra[IDfound] > 0;
-    const uint8_t* frameDynaExtra = frameHasDynamicExtra
-                                        ? g_serumData.dynamasks_extra[IDfound]
-                                        : nullptr;
-    const uint8_t* frameDynaExtraActive = frameHasDynamicExtra
-                                              ? g_serumData.dynamasks_extra_active[IDfound]
-                                              : nullptr;
+    const uint8_t* frameDynaExtra =
+        frameHasDynamicExtra ? g_serumData.dynamasks_extra[IDfound] : nullptr;
+    const uint8_t* frameDynaExtraActive =
+        frameHasDynamicExtra ? g_serumData.dynamasks_extra_active[IDfound]
+                             : nullptr;
     const uint16_t* frameDynaColorsExtra =
         frameHasDynamicExtra ? g_serumData.dyna4cols_v2_extra[IDfound]
                              : nullptr;
@@ -2230,8 +2298,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         } else {
           if (!frameHasDynamicExtra || frameDynaExtraActive[tk] == 0) {
             if (isdynapix[tk] == 0) {
-              if (blackOutStaticContent &&
-                  hasBackground && (frame[tl] > 0) &&
+              if (blackOutStaticContent && hasBackground && (frame[tl] > 0) &&
                   (frameBackgroundMaskExtra[tk] > 0)) {
                 pfr[tk] = sceneBackgroundFrame[tk];
               } else {
@@ -2268,7 +2335,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
 void Colorize_Spritev1(uint8_t nosprite, uint16_t frx, uint16_t fry,
                        uint16_t spx, uint16_t spy, uint16_t wid, uint16_t hei) {
   if (!g_serumData.spritedescriptionso_opaque.hasData(nosprite)) return;
-  const uint8_t* spriteOpaque = g_serumData.spritedescriptionso_opaque[nosprite];
+  const uint8_t* spriteOpaque =
+      g_serumData.spritedescriptionso_opaque[nosprite];
   for (uint16_t tj = 0; tj < hei; tj++) {
     for (uint16_t ti = 0; ti < wid; ti++) {
       if (spriteOpaque[(tj + spy) * MAX_SPRITE_SIZE + ti + spx] > 0) {
@@ -2889,12 +2957,10 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
         if (profileNow) {
           ++g_profileColorizeCalls;
           if ((g_profileColorizeCalls % 240u) == 0u) {
-            const double frameMs =
-                (double)g_profileColorizeFrameV2Ns /
-                (double)g_profileColorizeCalls / 1000000.0;
-            const double spriteMs =
-                (double)g_profileColorizeSpriteV2Ns /
-                (double)g_profileColorizeCalls / 1000000.0;
+            const double frameMs = (double)g_profileColorizeFrameV2Ns /
+                                   (double)g_profileColorizeCalls / 1000000.0;
+            const double spriteMs = (double)g_profileColorizeSpriteV2Ns /
+                                    (double)g_profileColorizeCalls / 1000000.0;
             Log("Perf dynamic avg: Colorize_Framev2=%.3fms "
                 "Colorize_Spritev2=%.3fms over %u frames",
                 frameMs, spriteMs, (uint32_t)g_profileColorizeCalls);
@@ -3156,77 +3222,100 @@ uint32_t Serum_RenderScene(void) {
       return FLAG_RETURNED_V2_SCENE;
     }
 
-    uint16_t result = g_serumData.sceneGenerator->generateFrame(
-        lastTriggerID, sceneCurrentFrame, sceneFrame);
-    // if result is 0xffff, the frame was generated and we can go
-    if (0xffff == result) {
-      mySerum.rotationtimer = sceneDurationPerFrame;
-      Serum_ColorizeWithMetadatav2(sceneFrame, true);
-      sceneCurrentFrame++;
-      if (sceneCurrentFrame >= sceneFrameCount && sceneRepeatCount > 0) {
-        if (sceneRepeatCount == 1) {
-          sceneCurrentFrame = 0;  // loop
-        } else {
-          sceneCurrentFrame = 0;  // repeat the scene
-          if (--sceneRepeatCount <= 1) {
-            sceneRepeatCount = 0;  // no more repeat
-          }
-        }
+    bool renderedFromDirectTriplet = false;
+    uint8_t currentGroup = 1;
+    bool hasGroup = g_serumData.sceneGenerator->updateAndGetCurrentGroup(
+        static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame, -1,
+        currentGroup);
+    if (hasGroup && !g_serumData.sceneFrameIdByTriplet.empty()) {
+      auto it = g_serumData.sceneFrameIdByTriplet.find(
+          MakeSceneTripletKey(static_cast<uint16_t>(lastTriggerID),
+                              currentGroup, sceneCurrentFrame));
+      if (it != g_serumData.sceneFrameIdByTriplet.end() &&
+          it->second < g_serumData.nframes) {
+        memset(sceneFrame, 0, sizeof(sceneFrame));
+        mySerum.rotationtimer = sceneDurationPerFrame;
+        forced_scene_frame_id = it->second;
+        Serum_ColorizeWithMetadatav2(sceneFrame, true);
+        forced_scene_frame_id = IDENTIFY_NO_FRAME;
+        renderedFromDirectTriplet = true;
       }
+    }
 
-      if (sceneCurrentFrame >= sceneFrameCount) {
-        if (sceneEndHoldDurationMs > 0) {
-          sceneEndHoldUntilMs = now + sceneEndHoldDurationMs;
-          mySerum.rotationtimer = sceneEndHoldDurationMs;
-          return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_SCENE;
-        }
-
-        sceneFrameCount = 0;  // scene ended
+    if (!renderedFromDirectTriplet) {
+      uint16_t result = g_serumData.sceneGenerator->generateFrame(
+          lastTriggerID, sceneCurrentFrame, sceneFrame,
+          hasGroup ? currentGroup : -1);
+      if (result > 0 && result < 0xffff) {
+        // frame not ready yet, return the time to wait
+        mySerum.rotationtimer = result;
+        return mySerum.rotationtimer | FLAG_RETURNED_V2_SCENE;
+      }
+      if (result != 0xffff) {
+        sceneFrameCount = 0;  // error generating scene frame, stop the scene
         mySerum.rotationtimer = 0;
         ForceNormalFrameRefreshAfterSceneEnd();
+        return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_ROTATED32 |
+               FLAG_RETURNED_V2_ROTATED64 | FLAG_RETURNED_V2_SCENE;
+      }
+      mySerum.rotationtimer = sceneDurationPerFrame;
+      Serum_ColorizeWithMetadatav2(sceneFrame, true);
+    }
 
-        switch (sceneOptionFlags) {
-          case FLAG_SCENE_BLACK_WHEN_FINISHED:
+    sceneCurrentFrame++;
+    if (sceneCurrentFrame >= sceneFrameCount && sceneRepeatCount > 0) {
+      if (sceneRepeatCount == 1) {
+        sceneCurrentFrame = 0;  // loop
+      } else {
+        sceneCurrentFrame = 0;  // repeat the scene
+        if (--sceneRepeatCount <= 1) {
+          sceneRepeatCount = 0;  // no more repeat
+        }
+      }
+    }
+
+    if (sceneCurrentFrame >= sceneFrameCount) {
+      if (sceneEndHoldDurationMs > 0) {
+        sceneEndHoldUntilMs = now + sceneEndHoldDurationMs;
+        mySerum.rotationtimer = sceneEndHoldDurationMs;
+        return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_SCENE;
+      }
+
+      sceneFrameCount = 0;  // scene ended
+      mySerum.rotationtimer = 0;
+      ForceNormalFrameRefreshAfterSceneEnd();
+
+      switch (sceneOptionFlags) {
+        case FLAG_SCENE_BLACK_WHEN_FINISHED:
+          if (mySerum.frame32) memset(mySerum.frame32, 0, 32 * mySerum.width32);
+          if (mySerum.frame64) memset(mySerum.frame64, 0, 64 * mySerum.width64);
+          break;
+
+        case FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED:
+          if (lastfound < MAX_NUMBER_FRAMES &&
+              g_serumData.activeframes[lastfound][0] != 0) {
+            Serum_ColorizeWithMetadatav2(lastFrame);
+          } else {
             if (mySerum.frame32)
               memset(mySerum.frame32, 0, 32 * mySerum.width32);
             if (mySerum.frame64)
               memset(mySerum.frame64, 0, 64 * mySerum.width64);
-            break;
+          }
+          break;
 
-          case FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED:
-            if (lastfound < MAX_NUMBER_FRAMES &&
-                g_serumData.activeframes[lastfound][0] != 0) {
-              Serum_ColorizeWithMetadatav2(lastFrame);
-            } else {
-              if (mySerum.frame32)
-                memset(mySerum.frame32, 0, 32 * mySerum.width32);
-              if (mySerum.frame64)
-                memset(mySerum.frame64, 0, 64 * mySerum.width64);
-            }
+        case 0:  // keep the last frame of the scene
+        default:
+          if (sceneEndHoldDurationMs > 0 && !sceneInterruptable) {
+            // autoStart+flag0 for non-interruptable scene means timed end-hold.
             break;
-
-          case 0:  // keep the last frame of the scene
-          default:
-            if (sceneEndHoldDurationMs > 0 && !sceneInterruptable) {
-              // autoStart+flag0 for non-interruptable scene means timed
-              // end-hold.
-              break;
-            }
-            if (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) {
-              sceneIsLastBackgroundFrame = true;
-            }
-            break;
-        }
+          }
+          if (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) {
+            sceneIsLastBackgroundFrame = true;
+          }
+          break;
       }
-    } else if (result > 0) {
-      // frame not ready yet, return the time to wait
-      mySerum.rotationtimer = result;
-      return mySerum.rotationtimer | FLAG_RETURNED_V2_SCENE;
-    } else {
-      sceneFrameCount = 0;  // error generating scene frame, stop the scene
-      mySerum.rotationtimer = 0;
-      ForceNormalFrameRefreshAfterSceneEnd();
     }
+
     return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_ROTATED32 |
            FLAG_RETURNED_V2_ROTATED64 |
            FLAG_RETURNED_V2_SCENE;  // scene frame, so we consider both frames

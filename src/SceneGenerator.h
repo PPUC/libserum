@@ -54,6 +54,9 @@ class SceneGenerator {
                     uint16_t &durationPerFrame, bool &interruptable,
                     bool &startImmediately, uint8_t &repeat,
                     uint8_t &sceneOptions) const;
+  bool updateAndGetCurrentGroup(uint16_t sceneId, uint16_t frameIndex,
+                                int requestedGroup, uint8_t &group);
+  bool getCurrentGroup(uint16_t sceneId, uint8_t &group) const;
   bool getSceneEndHoldDurationMs(uint16_t sceneId, uint32_t &durationMs) const;
   bool getAutoStartSceneInfo(uint16_t &frameCount, uint16_t &durationPerFrame,
                              bool &interruptable, bool &startImmediately,

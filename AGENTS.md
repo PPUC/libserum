@@ -23,6 +23,7 @@ Main global runtime state (in `serum-decode.cpp`):
 - Scene lookup acceleration:
   - `g_serumData.frameIsScene`: frame ID -> scene/non-scene marker.
   - `g_serumData.sceneFramesBySignature`: `(mask,shape,hash)` -> matching scene frame IDs.
+  - `g_serumData.sceneFrameIdByTriplet`: `(sceneId,group,frameIndex)` -> frame ID.
 
 ## SparseVector storage and compression
 `SparseVector` now supports both legacy map payloads and packed sparse blobs.
@@ -114,6 +115,11 @@ Behavior:
   - scene search skips normal frames
   using `g_serumData.frameIsScene`.
 - Scene requests use signature lookup in `sceneFramesBySignature` for the current `(mask,shape,hash)`.
+- Scene rendering can bypass generic scene identification when a direct triplet
+  entry exists in `sceneFrameIdByTriplet`.
+- During scene playback, direct-triplet mode uses lightweight group progression
+  (`SceneGenerator::updateAndGetCurrentGroup`) and does not call
+  `generateFrame(...)` per tick unless fallback is needed.
 - Legacy same-frame behavior (`IDENTIFY_SAME_FRAME`) is preserved with full-frame CRC check.
 
 Return values:
@@ -139,7 +145,11 @@ How it works:
 4. For each loaded frame ID, if `(mask,shape,hashcodes[id])` signature is in scene signature set:
    - mark `frameIsScene[id] = 1`
    - add to `sceneFramesBySignature[signature]`.
-5. Initialize `lastfound_scene` / `lastfound_normal` from first available IDs.
+5. For v6 (`concentrateFileVersion >= 6`), precompute direct scene frame IDs:
+   - generate each `(sceneId,group,frameIndex)` scene marker frame
+   - identify it once
+   - persist mapping in `sceneFrameIdByTriplet`.
+6. Initialize `lastfound_scene` / `lastfound_normal` from first available IDs.
 
 Log line:
 - `Loaded X frames and Y rotation scene frames`
@@ -184,6 +194,7 @@ Stored in v6:
 - Scene lookup acceleration:
   - `frameIsScene`
   - `sceneFramesBySignature`
+  - `sceneFrameIdByTriplet`
 - Sparse vectors in packed sparse layout.
 - Normalized sentinel vectors plus sidecar flag vectors for transparency and
   dynamic-zone activity.
@@ -193,6 +204,7 @@ Backward compatibility:
 - v5 sparse vectors are deserialized with legacy sparse-vector layout and converted to packed representation after load.
 - For v5 loads, scene lookup vectors are rebuilt at startup.
 - For v6 loads, stored lookup vectors are reused unless scene data changed in this load cycle (for example CSV update), in which case lookup vectors are rebuilt.
+- Direct scene-triplet preprocessing is only executed for v6.
 
 v6 snapshot policy:
 - Compatibility between unreleased v6 development snapshots is not required.
@@ -214,6 +226,7 @@ v6 snapshot policy:
 ## Safety invariants
 - `frameIsScene.size()` must equal `nframes` before identification.
 - `sceneFramesBySignature` must correspond to current scene data and current loaded frame definitions.
+- `sceneFrameIdByTriplet` (when present) must correspond to current scene data.
 - Any change to scene generation domain (`mask/shape/hash`), sparse-vector serialization layout, or cROMc schema requires updating this file.
 
 ## How to validate after changes

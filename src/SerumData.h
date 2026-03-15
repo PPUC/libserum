@@ -76,7 +76,6 @@ class SerumData {
   uint32_t nsprites;
   uint16_t nbackgrounds;
   bool is256x64;
-  std::vector<uint8_t> packingStorage;
 
   // Vector data
   SparseVector<uint32_t> hashcodes;
@@ -140,6 +139,7 @@ class SerumData {
   std::vector<uint8_t> frameHasDynamicExtra;
   std::vector<uint8_t> frameIsScene;
   std::unordered_map<uint64_t, std::vector<uint32_t>> sceneFramesBySignature;
+  std::unordered_map<uint64_t, uint32_t> sceneFrameIdByTriplet;
 
   SceneGenerator *sceneGenerator;
 
@@ -151,6 +151,7 @@ class SerumData {
 
   uint8_t m_loadFlags = 0;
   bool m_packingSidecarsNormalized = false;
+  std::vector<uint8_t> m_packingSidecarsStorage;
 
   friend class cereal::access;
 
@@ -178,19 +179,20 @@ class SerumData {
         ar(frameIsScene, sceneFramesBySignature, spriteoriginal_opaque,
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
-           dynaspritemasks_extra_active, frameHasDynamic,
-           frameHasDynamicExtra);
+           dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
+           sceneFrameIdByTriplet);
       }
     } else {
       if (concentrateFileVersion >= 6) {
         ar(frameIsScene, sceneFramesBySignature, spriteoriginal_opaque,
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
-           dynaspritemasks_extra_active, frameHasDynamic,
-           frameHasDynamicExtra);
+           dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
+           sceneFrameIdByTriplet);
       } else {
         frameIsScene.clear();
         sceneFramesBySignature.clear();
+        sceneFrameIdByTriplet.clear();
         spriteoriginal_opaque.clear();
         spritemask_extra_opaque.clear();
         spritedescriptionso_opaque.clear();

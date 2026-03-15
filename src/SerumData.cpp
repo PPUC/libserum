@@ -80,7 +80,8 @@ SerumData::SerumData()
   dynaspritemasks_extra.setProfileLabel("dynaspritemasks_extra");
   dynaspritemasks_extra_active.setProfileLabel("dynaspritemasks_extra_active");
   sceneGenerator = new SceneGenerator();
-  if (is_real_machine()) packingStorage.assign(384u * 1024u * 1024u, 0xA5);
+  if (is_real_machine())
+    m_packingSidecarsStorage.assign(384u * 1024u * 1024u, 0xA5);
 }
 
 SerumData::~SerumData() {}
@@ -146,6 +147,7 @@ void SerumData::Clear() {
   frameHasDynamicExtra.clear();
   frameIsScene.clear();
   sceneFramesBySignature.clear();
+  sceneFrameIdByTriplet.clear();
 }
 
 void SerumData::BuildPackingSidecarsAndNormalize() {
@@ -372,24 +374,26 @@ void SerumData::PrepareRuntimeDynamicHotCache() {
   dynaspritemasks_extra.enableForcedDecodedReadsForIds(spriteIds);
   dynaspritemasks_extra_active.enableForcedDecodedReadsForIds(spriteIds);
 
-  Log("Prepared runtime dynamic hot cache: %u frame masks, %u extra frame masks,"
+  Log("Prepared runtime dynamic hot cache: %u frame masks, %u extra frame "
+      "masks,"
       " %u sprite masks",
       (uint32_t)frameIds.size(), (uint32_t)extraFrameIds.size(),
       (uint32_t)spriteIds.size());
 }
 
 void SerumData::LogSparseVectorProfileSnapshot() {
-  auto logCounters = [&](auto& vec) {
+  auto logCounters = [&](auto &vec) {
     uint64_t accesses = 0;
     uint64_t decodes = 0;
     uint64_t cacheHits = 0;
     uint64_t directHits = 0;
     vec.consumeProfileCounters(accesses, decodes, cacheHits, directHits);
-    const char* label = vec.getProfileLabel();
+    const char *label = vec.getProfileLabel();
     if (!label || accesses == 0) {
       return;
     }
-    Log("SparseProfile %s: accesses=%llu decodes=%llu cacheHits=%llu direct=%llu",
+    Log("SparseProfile %s: accesses=%llu decodes=%llu cacheHits=%llu "
+        "direct=%llu",
         label, (unsigned long long)accesses, (unsigned long long)decodes,
         (unsigned long long)cacheHits, (unsigned long long)directHits);
   };
