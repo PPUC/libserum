@@ -1364,6 +1364,9 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     } else {
       InitFrameLookupRuntimeStateFromStoredData();
     }
+    if (g_serumData.colorRotationLookupByFrameAndColor.empty()) {
+      g_serumData.BuildColorRotationLookup();
+    }
     if (g_disableDynamicPackedReads) {
       g_serumData.PrepareRuntimeDynamicHotCache();
       Log("Dynamic packed reads disabled for runtime via "
@@ -2015,26 +2018,12 @@ bool CheckExtraFrameAvailable(uint32_t frID) {
 
 bool ColorInRotation(uint32_t IDfound, uint16_t col, uint16_t* norot,
                      uint16_t* posinrot, bool isextra) {
-  // TODO(perf #1): replace this per-pixel linear scan with a precomputed
-  // O(1) color->rotation lookup table persisted in v6 cROMc.
-  uint16_t* pcol = NULL;
-  if (isextra)
-    pcol = g_serumData.colorrotations_v2_extra[IDfound];
-  else
-    pcol = g_serumData.colorrotations_v2[IDfound];
-  *norot = 0xffff;
-  for (uint32_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
-    for (uint32_t tj = 2; tj < 2u + pcol[ti * MAX_LENGTH_COLOR_ROTATION];
-         tj++)  // val [0] is for length and val [1] is for duration in ms
-    {
-      if (col == pcol[ti * MAX_LENGTH_COLOR_ROTATION + tj]) {
-        *norot = ti;
-        *posinrot =
-            tj - 2;  // val [0] is for length and val [1] is for duration in ms
-        return true;
-      }
-    }
+  // Fast path: precomputed O(1) lookup built at load time.
+  if (g_serumData.TryGetColorRotation(IDfound, col, isextra, *norot,
+                                      *posinrot)) {
+    return true;
   }
+  *norot = 0xffff;
   return false;
 }
 

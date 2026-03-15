@@ -148,6 +148,7 @@ void SerumData::Clear() {
   frameIsScene.clear();
   sceneFramesBySignature.clear();
   sceneFrameIdByTriplet.clear();
+  colorRotationLookupByFrameAndColor.clear();
 }
 
 void SerumData::BuildPackingSidecarsAndNormalize() {
@@ -410,6 +411,53 @@ void SerumData::LogSparseVectorProfileSnapshot() {
   logCounters(dynaspritemasks_active);
   logCounters(dynaspritemasks_extra);
   logCounters(dynaspritemasks_extra_active);
+}
+
+void SerumData::BuildColorRotationLookup() {
+  colorRotationLookupByFrameAndColor.clear();
+  if (SerumVersion != SERUM_V2 || nframes == 0) {
+    return;
+  }
+
+  colorRotationLookupByFrameAndColor.reserve(nframes * 8);
+  auto buildPlane = [&](bool isextra) {
+    for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+      uint16_t *pcol = isextra ? colorrotations_v2_extra[frameId]
+                               : colorrotations_v2[frameId];
+      for (uint32_t rot = 0; rot < MAX_COLOR_ROTATION_V2; ++rot) {
+        const uint32_t base = rot * MAX_LENGTH_COLOR_ROTATION;
+        const uint16_t length = pcol[base];
+        for (uint16_t pos = 0; pos < length; ++pos) {
+          const uint16_t color = pcol[base + 2 + pos];
+          const uint64_t key = (uint64_t(frameId) << 17) |
+                               (uint64_t(isextra ? 1 : 0) << 16) | color;
+          // Keep first assignment in case of duplicates.
+          if (colorRotationLookupByFrameAndColor.find(key) ==
+              colorRotationLookupByFrameAndColor.end()) {
+            colorRotationLookupByFrameAndColor[key] =
+                static_cast<uint16_t>((rot << 8) | (pos & 0xff));
+          }
+        }
+      }
+    }
+  };
+
+  buildPlane(false);
+  buildPlane(true);
+}
+
+bool SerumData::TryGetColorRotation(uint32_t frameId, uint16_t color,
+                                    bool isextra, uint16_t &rotationIndex,
+                                    uint16_t &positionInRotation) const {
+  const uint64_t key =
+      (uint64_t(frameId) << 17) | (uint64_t(isextra ? 1 : 0) << 16) | color;
+  auto it = colorRotationLookupByFrameAndColor.find(key);
+  if (it == colorRotationLookupByFrameAndColor.end()) {
+    return false;
+  }
+  rotationIndex = static_cast<uint16_t>((it->second >> 8) & 0xff);
+  positionInRotation = static_cast<uint16_t>(it->second & 0xff);
+  return true;
 }
 
 bool SerumData::SaveToFile(const char *filename) {

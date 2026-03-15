@@ -62,6 +62,10 @@ class SerumData {
   bool LoadFromBuffer(const uint8_t *data, size_t size, const uint8_t flags);
   void BuildPackingSidecarsAndNormalize();
   void PrepareRuntimeDynamicHotCache();
+  void BuildColorRotationLookup();
+  bool TryGetColorRotation(uint32_t frameId, uint16_t color, bool isextra,
+                           uint16_t &rotationIndex,
+                           uint16_t &positionInRotation) const;
   void LogSparseVectorProfileSnapshot();
 
   // Header data
@@ -140,6 +144,7 @@ class SerumData {
   std::vector<uint8_t> frameIsScene;
   std::unordered_map<uint64_t, std::vector<uint32_t>> sceneFramesBySignature;
   std::unordered_map<uint64_t, uint32_t> sceneFrameIdByTriplet;
+  std::unordered_map<uint64_t, uint16_t> colorRotationLookupByFrameAndColor;
 
   SceneGenerator *sceneGenerator;
 
@@ -180,7 +185,7 @@ class SerumData {
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
-           sceneFrameIdByTriplet);
+           sceneFrameIdByTriplet, colorRotationLookupByFrameAndColor);
       }
     } else {
       if (concentrateFileVersion >= 6) {
@@ -188,11 +193,12 @@ class SerumData {
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
-           sceneFrameIdByTriplet);
+           sceneFrameIdByTriplet, colorRotationLookupByFrameAndColor);
       } else {
         frameIsScene.clear();
         sceneFramesBySignature.clear();
         sceneFrameIdByTriplet.clear();
+        colorRotationLookupByFrameAndColor.clear();
         spriteoriginal_opaque.clear();
         spritemask_extra_opaque.clear();
         spritedescriptionso_opaque.clear();
@@ -206,8 +212,25 @@ class SerumData {
     }
 
     if constexpr (Archive::is_saving::value) {
-      ar(sceneGenerator ? sceneGenerator->getSceneData()
-                        : std::vector<SceneData>{});
+      if (concentrateFileVersion >= 6) {
+        constexpr uint32_t kSceneDataMagic = 0x53434431;  // "SCD1"
+        constexpr uint32_t kMaxSceneDataEntries = 100000;
+        uint32_t magic = kSceneDataMagic;
+        const std::vector<SceneData> scenes =
+            sceneGenerator ? sceneGenerator->getSceneData()
+                           : std::vector<SceneData>{};
+        uint32_t count = static_cast<uint32_t>(scenes.size());
+        if (count > kMaxSceneDataEntries) {
+          count = kMaxSceneDataEntries;
+        }
+        ar(magic, count);
+        for (uint32_t i = 0; i < count; ++i) {
+          ar(scenes[i]);
+        }
+      } else {
+        ar(sceneGenerator ? sceneGenerator->getSceneData()
+                          : std::vector<SceneData>{});
+      }
     } else {
       if (SERUM_V2 == SerumVersion &&
           ((fheight == 32 && !(m_loadFlags & FLAG_REQUEST_64P_FRAMES)) ||
@@ -237,7 +260,27 @@ class SerumData {
       backgroundBB.setParent(&backgroundIDs);
 
       std::vector<SceneData> loadedScenes;
-      ar(loadedScenes);
+      if (concentrateFileVersion >= 6) {
+        constexpr uint32_t kSceneDataMagic = 0x53434431;  // "SCD1"
+        constexpr uint32_t kMaxSceneDataEntries = 100000;
+        uint32_t magic = 0;
+        uint32_t count = 0;
+        ar(magic, count);
+        if (magic != kSceneDataMagic) {
+          throw std::runtime_error("Invalid scene data block in cROMc");
+        }
+        if (count > kMaxSceneDataEntries) {
+          throw std::runtime_error("Scene data count exceeds hard limit");
+        }
+        loadedScenes.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+          SceneData scene;
+          ar(scene);
+          loadedScenes.push_back(scene);
+        }
+      } else {
+        ar(loadedScenes);
+      }
       if (sceneGenerator) {
         sceneGenerator->setSceneData(std::move(loadedScenes));
         sceneGenerator->setDepth(nocolors == 16 ? 4 : 2);

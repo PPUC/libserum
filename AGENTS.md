@@ -62,6 +62,10 @@ Vector policy currently used in `SerumData`:
   - `frameHasDynamicExtra`
 - `Colorize_Framev1/v2` uses these flags to bypass dynamic-mask branches
   entirely for frames without active dynamic pixels.
+- Color rotations use a precomputed lookup index:
+  `colorRotationLookupByFrameAndColor[(frameId,isExtra,color)] -> (rotation,position)`
+  restored from v6 cROMc when present and rebuilt at load time otherwise.
+  - `ColorInRotation` uses lookup-only runtime path (no linear scan fallback).
 - Runtime uses sidecar flags instead of `255` sentinels for transparency / dynamic-zone activity.
 - Runtime does not include sentinel-based fallback in sprite/dynamic helpers;
   missing/incorrect sidecars are treated as a conversion/load bug and are not
@@ -195,6 +199,10 @@ Stored in v6:
   - `frameIsScene`
   - `sceneFramesBySignature`
   - `sceneFrameIdByTriplet`
+- Color-rotation lookup acceleration:
+  - `colorRotationLookupByFrameAndColor`
+- Scene data block uses guarded encoding (`SCD1` magic + bounded count) to
+  prevent unbounded allocations on corrupted/misaligned input.
 - Sparse vectors in packed sparse layout.
 - Normalized sentinel vectors plus sidecar flag vectors for transparency and
   dynamic-zone activity.
@@ -205,6 +213,8 @@ Backward compatibility:
 - For v5 loads, scene lookup vectors are rebuilt at startup.
 - For v6 loads, stored lookup vectors are reused unless scene data changed in this load cycle (for example CSV update), in which case lookup vectors are rebuilt.
 - Direct scene-triplet preprocessing is only executed for v6.
+- v6 scene-data deserialization validates block magic and count before
+  allocation.
 
 v6 snapshot policy:
 - Compatibility between unreleased v6 development snapshots is not required.
@@ -243,3 +253,5 @@ Minimum validation:
    - background scene
    - end-of-scene behavior flags
    - resume flag `16`
+10. Build color-rotation lookup index via `BuildColorRotationLookup()` for
+    O(1) `ColorInRotation` checks only when missing from loaded v6 data.
