@@ -53,8 +53,14 @@ class SparseVector {
   mutable uint32_t secondAccessedId = UINT32_MAX;
   mutable std::vector<T> lastDecompressed;
   mutable std::vector<T> secondDecompressed;
-  // TODO(perf #5): evaluate a tiny bounded LRU decoded cache (4-8 entries)
-  // for alternating hot IDs to reduce decode churn with minimal RAM overhead.
+  struct DecodedCacheEntry {
+    uint32_t id = UINT32_MAX;
+    uint64_t stamp = 0;
+    std::vector<T> values;
+  };
+  static constexpr size_t kDecodedCacheCapacity = 6;
+  mutable std::vector<DecodedCacheEntry> decodedCache;
+  mutable uint64_t decodedCacheStamp = 0;
   mutable std::vector<uint8_t> decodeScratch;
   mutable bool forceDecodedReads = false;
   mutable std::unordered_map<uint32_t, std::vector<T>> forcedDecoded;
@@ -200,6 +206,68 @@ class SparseVector {
     if (lastDecompressed.size() < elementSize) {
       lastDecompressed.resize(elementSize);
     }
+  }
+
+  DecodedCacheEntry *findDecodedCacheEntry(uint32_t elementId) const {
+    for (auto &entry : decodedCache) {
+      if (entry.id == elementId && !entry.values.empty()) {
+        entry.stamp = ++decodedCacheStamp;
+        return &entry;
+      }
+    }
+    return nullptr;
+  }
+
+  DecodedCacheEntry *reserveDecodedCacheEntry(uint32_t elementId) const {
+    DecodedCacheEntry *target = nullptr;
+
+    for (auto &entry : decodedCache) {
+      if (entry.id == elementId) {
+        target = &entry;
+        break;
+      }
+      if (!target && entry.id == UINT32_MAX) {
+        target = &entry;
+      }
+    }
+
+    if (!target) {
+      target = &decodedCache.front();
+      for (auto &entry : decodedCache) {
+        if (entry.stamp < target->stamp) {
+          target = &entry;
+        }
+      }
+    }
+
+    target->id = elementId;
+    target->stamp = ++decodedCacheStamp;
+    if (target->values.size() < elementSize) {
+      target->values.resize(elementSize);
+    }
+    return target;
+  }
+
+  T *cacheDecodedFromBytes(uint32_t elementId, const uint8_t *bytes,
+                           size_t bytesSize) const {
+    const size_t rawBytes = rawByteSize();
+    if (!bytes || bytesSize != rawBytes) {
+      return const_cast<T *>(noData.data());
+    }
+    auto *entry = reserveDecodedCacheEntry(elementId);
+    memcpy(entry->values.data(), bytes, rawBytes);
+    return entry->values.data();
+  }
+
+  void resetDecodedCaches() {
+    lastAccessedId = UINT32_MAX;
+    secondAccessedId = UINT32_MAX;
+    lastDecompressed.clear();
+    secondDecompressed.clear();
+    decodedCache.clear();
+    decodedCache.resize(kDecodedCacheCapacity);
+    decodedCacheStamp = 0;
+    decodeScratch.clear();
   }
 
   T *decodeValuePackedAndCache(uint32_t elementId, const uint8_t *payload) {
@@ -456,6 +524,7 @@ class SparseVector {
           "Binary bit packing is only supported for uint8_t SparseVector");
     }
     noData.resize(1, noDataSignature);
+    decodedCache.resize(kDecodedCacheCapacity);
   }
 
   SparseVector(T noDataSignature)
@@ -465,6 +534,7 @@ class SparseVector {
         bitPackFalseValue(noDataSignature),
         bitPackTrueValue(static_cast<T>(1)) {
     noData.resize(1, noDataSignature);
+    decodedCache.resize(kDecodedCacheCapacity);
   }
 
   T *operator[](const uint32_t elementId) {
@@ -503,6 +573,14 @@ class SparseVector {
           ++profileCacheHitCount;
         }
         return lastDecompressed.data();
+      }
+      if (useCompression) {
+        if (auto *entry = findDecodedCacheEntry(elementId)) {
+          if (isProfilingEnabled()) {
+            ++profileCacheHitCount;
+          }
+          return entry->values.data();
+        }
       }
 
       const uint8_t *payload = nullptr;
@@ -571,7 +649,7 @@ class SparseVector {
             if (isProfilingEnabled()) {
               ++profileDirectHitCount;
             }
-            return reinterpret_cast<T *>(const_cast<uint8_t *>(payload));
+            return cacheDecodedFromBytes(elementId, payload, payloadSize);
           }
           return noData.data();
         }
@@ -593,6 +671,7 @@ class SparseVector {
         prepareDecodedCacheForWrite(elementId);
         memcpy(lastDecompressed.data(), decodeScratch.data(), rawBytes);
         lastAccessedId = elementId;
+        cacheDecodedFromBytes(elementId, decodeScratch.data(), rawBytes);
         return lastDecompressed.data();
       }
 
@@ -638,9 +717,7 @@ class SparseVector {
     restoreDataFromPacked();
     elementSize = size;
     clearPacked();
-    lastAccessedId = UINT32_MAX;
-    lastDecompressed.clear();
-    decodeScratch.clear();
+    resetDecodedCaches();
 
     if (decompBuffer.size() < (elementSize * sizeof(T))) {
       decompBuffer.resize(elementSize * sizeof(T));
@@ -735,11 +812,7 @@ class SparseVector {
     lastPayloadId = UINT32_MAX;
     lastPayloadPtr = nullptr;
     lastPayloadSize = 0;
-    lastAccessedId = UINT32_MAX;
-    secondAccessedId = UINT32_MAX;
-    lastDecompressed.clear();
-    secondDecompressed.clear();
-    decodeScratch.clear();
+    resetDecodedCaches();
     forceDecodedReads = false;
     forcedDecoded.clear();
   }
@@ -799,11 +872,7 @@ class SparseVector {
       lastPayloadId = UINT32_MAX;
       lastPayloadPtr = nullptr;
       lastPayloadSize = 0;
-      lastAccessedId = UINT32_MAX;
-      secondAccessedId = UINT32_MAX;
-      lastDecompressed.clear();
-      secondDecompressed.clear();
-      decodeScratch.clear();
+      resetDecodedCaches();
       forceDecodedReads = false;
       forcedDecoded.clear();
       return;
@@ -825,11 +894,7 @@ class SparseVector {
     lastPayloadId = UINT32_MAX;
     lastPayloadPtr = nullptr;
     lastPayloadSize = 0;
-    lastAccessedId = UINT32_MAX;
-    secondAccessedId = UINT32_MAX;
-    lastDecompressed.clear();
-    secondDecompressed.clear();
-    decodeScratch.clear();
+    resetDecodedCaches();
     forceDecodedReads = false;
     forcedDecoded.clear();
   }
@@ -913,11 +978,7 @@ class SparseVector {
     lastPayloadId = UINT32_MAX;
     lastPayloadPtr = nullptr;
     lastPayloadSize = 0;
-    lastAccessedId = UINT32_MAX;
-    secondAccessedId = UINT32_MAX;
-    lastDecompressed.clear();
-    secondDecompressed.clear();
-    decodeScratch.clear();
+    resetDecodedCaches();
     forceDecodedReads = false;
     forcedDecoded.clear();
   }

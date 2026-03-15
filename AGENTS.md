@@ -45,6 +45,9 @@ Behavior:
 - Value packing preserves exact values for packed modes (no nonzero->1 normalization).
 - Packed vectors can still be modified at runtime (`set()`); mutable map storage is restored lazily when needed.
 - Runtime lookup uses dense index fast-path when IDs are dense.
+- Compressed sparse vectors keep a tiny bounded decoded cache (6 entries, LRU
+  replacement) in addition to the last/second hot-entry cache, reducing decode
+  churn for alternating IDs without large RAM growth.
 
 Vector policy currently used in `SerumData`:
 - `dyna4cols_v2` and `dyna4cols_v2_extra` are LZ4-compressed sparse vectors.
@@ -169,6 +172,13 @@ Main phases:
 5. Optional background-scene overlay via second `Colorize_Framev2(..., applySceneBackground=true, ...)`.
 6. Optional sprite overlays.
 7. Configure color rotations and return next timer.
+
+Dynamic-shadow hot path:
+- `CheckDynaShadow(...)` receives pre-fetched per-frame shadow vectors
+  (`dynashadowsdir*`, `dynashadowscol*`) from `Colorize_Framev2` instead of
+  loading sparse vectors per pixel.
+- Neighbor probing is done by iterating a compact offset table
+  (8-connected neighbors) rather than repeated hand-written branch blocks.
 
 Background placeholder policy:
 - `Colorize_Framev2` supports `suppressFrameBackgroundImage`.

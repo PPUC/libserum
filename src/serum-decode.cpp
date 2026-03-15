@@ -2027,69 +2027,26 @@ bool ColorInRotation(uint32_t IDfound, uint16_t col, uint16_t* norot,
   return false;
 }
 
-void CheckDynaShadow(uint16_t* pfr, uint32_t nofr, uint8_t dynacouche,
+void CheckDynaShadow(uint16_t* pfr, const uint8_t* shadowDirByLayer,
+                     const uint16_t* shadowColorByLayer, uint8_t dynacouche,
                      uint8_t* isdynapix, uint16_t fx, uint16_t fy, uint32_t fw,
-                     uint32_t fh, bool isextra) {
-  // TODO(perf #3): precompute active neighbor offsets per dynacouche to reduce
-  // branch-heavy checks in this hot path.
-  uint8_t dsdir;
-  if (isextra)
-    dsdir = g_serumData.dynashadowsdir_extra[nofr][dynacouche];
-  else
-    dsdir = g_serumData.dynashadowsdir[nofr][dynacouche];
+                     uint32_t fh) {
+  if (!shadowDirByLayer || !shadowColorByLayer) return;
+  const uint8_t dsdir = shadowDirByLayer[dynacouche];
   if (dsdir == 0) return;
-  uint16_t tcol;
-  if (isextra)
-    tcol = g_serumData.dynashadowscol_extra[nofr][dynacouche];
-  else
-    tcol = g_serumData.dynashadowscol[nofr][dynacouche];
-  if ((dsdir & 0b1) > 0 && fx > 0 && fy > 0 &&
-      isdynapix[(fy - 1) * fw + fx - 1] == 0)  // dyna shadow top left
-  {
-    isdynapix[(fy - 1) * fw + fx - 1] = 1;
-    pfr[(fy - 1) * fw + fx - 1] = tcol;
-  }
-  if ((dsdir & 0b10) > 0 && fy > 0 &&
-      isdynapix[(fy - 1) * fw + fx] == 0)  // dyna shadow top
-  {
-    isdynapix[(fy - 1) * fw + fx] = 1;
-    pfr[(fy - 1) * fw + fx] = tcol;
-  }
-  if ((dsdir & 0b100) > 0 && fx < fw - 1 && fy > 0 &&
-      isdynapix[(fy - 1) * fw + fx + 1] == 0)  // dyna shadow top right
-  {
-    isdynapix[(fy - 1) * fw + fx + 1] = 1;
-    pfr[(fy - 1) * fw + fx + 1] = tcol;
-  }
-  if ((dsdir & 0b1000) > 0 && fx < fw - 1 &&
-      isdynapix[fy * fw + fx + 1] == 0)  // dyna shadow right
-  {
-    isdynapix[fy * fw + fx + 1] = 1;
-    pfr[fy * fw + fx + 1] = tcol;
-  }
-  if ((dsdir & 0b10000) > 0 && fx < fw - 1 && fy < fh - 1 &&
-      isdynapix[(fy + 1) * fw + fx + 1] == 0)  // dyna shadow bottom right
-  {
-    isdynapix[(fy + 1) * fw + fx + 1] = 1;
-    pfr[(fy + 1) * fw + fx + 1] = tcol;
-  }
-  if ((dsdir & 0b100000) > 0 && fy < fh - 1 &&
-      isdynapix[(fy + 1) * fw + fx] == 0)  // dyna shadow bottom
-  {
-    isdynapix[(fy + 1) * fw + fx] = 1;
-    pfr[(fy + 1) * fw + fx] = tcol;
-  }
-  if ((dsdir & 0b1000000) > 0 && fx > 0 && fy < fh - 1 &&
-      isdynapix[(fy + 1) * fw + fx - 1] == 0)  // dyna shadow bottom left
-  {
-    isdynapix[(fy + 1) * fw + fx - 1] = 1;
-    pfr[(fy + 1) * fw + fx - 1] = tcol;
-  }
-  if ((dsdir & 0b10000000) > 0 && fx > 0 &&
-      isdynapix[fy * fw + fx - 1] == 0)  // dyna shadow left
-  {
-    isdynapix[fy * fw + fx - 1] = 1;
-    pfr[fy * fw + fx - 1] = tcol;
+  const uint16_t tcol = shadowColorByLayer[dynacouche];
+
+  static const int8_t kNeighborDx[8] = {-1, 0, 1, 1, 1, 0, -1, -1};
+  static const int8_t kNeighborDy[8] = {-1, -1, -1, 0, 1, 1, 1, 0};
+  for (uint8_t bit = 0; bit < 8; ++bit) {
+    if ((dsdir & (1u << bit)) == 0) continue;
+    const int32_t nx = (int32_t)fx + kNeighborDx[bit];
+    const int32_t ny = (int32_t)fy + kNeighborDy[bit];
+    if (nx < 0 || ny < 0 || nx >= (int32_t)fw || ny >= (int32_t)fh) continue;
+    const uint32_t neighborIndex = (uint32_t)ny * fw + (uint32_t)nx;
+    if (isdynapix[neighborIndex] != 0) continue;
+    isdynapix[neighborIndex] = 1;
+    pfr[neighborIndex] = tcol;
   }
 }
 
@@ -2127,6 +2084,10 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         frameHasDynamic ? g_serumData.dynamasks_active[IDfound] : nullptr;
     const uint16_t* frameDynaColors =
         frameHasDynamic ? g_serumData.dyna4cols_v2[IDfound] : nullptr;
+    const uint8_t* frameShadowDir =
+        frameHasDynamic ? g_serumData.dynashadowsdir[IDfound] : nullptr;
+    const uint16_t* frameShadowColor =
+        frameHasDynamic ? g_serumData.dynashadowscol[IDfound] : nullptr;
     // create the original res frame
     if (g_serumData.fheight == 32) {
       pfr = mySerum.frame32;
@@ -2188,8 +2149,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
           } else {
             const uint8_t dynacouche = frameDyna[tk];
             if (frame[tk] > 0) {
-              CheckDynaShadow(pfr, IDfound, dynacouche, isdynapix, ti, tj,
-                              g_serumData.fwidth, g_serumData.fheight, false);
+              CheckDynaShadow(pfr, frameShadowDir, frameShadowColor, dynacouche,
+                              isdynapix, ti, tj, g_serumData.fwidth,
+                              g_serumData.fheight);
               isdynapix[tk] = 1;
               pfr[tk] = frameDynaColors[dynacouche * g_serumData.nocolors +
                                         frame[tk]];
@@ -2224,6 +2186,12 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                              : nullptr;
     const uint16_t* frameDynaColorsExtra =
         frameHasDynamicExtra ? g_serumData.dyna4cols_v2_extra[IDfound]
+                             : nullptr;
+    const uint8_t* frameShadowDirExtra = frameHasDynamicExtra
+                                             ? g_serumData.dynashadowsdir_extra[IDfound]
+                                             : nullptr;
+    const uint16_t* frameShadowColorExtra =
+        frameHasDynamicExtra ? g_serumData.dynashadowscol_extra[IDfound]
                              : nullptr;
     // create the extra res frame
     if (g_serumData.fheight_extra == 32) {
@@ -2295,9 +2263,10 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
           } else {
             const uint8_t dynacouche = frameDynaExtra[tk];
             if (frame[tl] > 0) {
-              CheckDynaShadow(pfr, IDfound, dynacouche, isdynapix, ti, tj,
+              CheckDynaShadow(pfr, frameShadowDirExtra, frameShadowColorExtra,
+                              dynacouche, isdynapix, ti, tj,
                               g_serumData.fwidth_extra,
-                              g_serumData.fheight_extra, true);
+                              g_serumData.fheight_extra);
               isdynapix[tk] = 1;
               pfr[tk] = frameDynaColorsExtra[dynacouche * g_serumData.nocolors +
                                              frame[tl]];
