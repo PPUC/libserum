@@ -1575,33 +1575,40 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
 
 static inline bool IsSpriteOpaqueV1(uint8_t spriteId, uint32_t pixelIndex) {
   // Sidecar flags are the single source of truth after load-time normalization.
+  if (!g_serumData.spritedescriptionso_opaque.hasData(spriteId)) return false;
   return g_serumData.spritedescriptionso_opaque[spriteId][pixelIndex] > 0;
 }
 
 static inline bool IsSpriteOpaqueV2(uint8_t spriteId, uint32_t pixelIndex) {
+  if (!g_serumData.spriteoriginal_opaque.hasData(spriteId)) return false;
   return g_serumData.spriteoriginal_opaque[spriteId][pixelIndex] > 0;
 }
 
 static inline bool IsSpriteExtraOpaqueV2(uint8_t spriteId,
                                          uint32_t pixelIndex) {
+  if (!g_serumData.spritemask_extra_opaque.hasData(spriteId)) return false;
   return g_serumData.spritemask_extra_opaque[spriteId][pixelIndex] > 0;
 }
 
 static inline bool IsFrameDynaActive(uint32_t frameId, uint32_t pixelIndex) {
+  if (!g_serumData.dynamasks_active.hasData(frameId)) return false;
   return g_serumData.dynamasks_active[frameId][pixelIndex] > 0;
 }
 
 static inline bool IsFrameExtraDynaActive(uint32_t frameId,
                                           uint32_t pixelIndex) {
+  if (!g_serumData.dynamasks_extra_active.hasData(frameId)) return false;
   return g_serumData.dynamasks_extra_active[frameId][pixelIndex] > 0;
 }
 
 static inline bool IsSpriteDynaActive(uint8_t spriteId, uint32_t pixelIndex) {
+  if (!g_serumData.dynaspritemasks_active.hasData(spriteId)) return false;
   return g_serumData.dynaspritemasks_active[spriteId][pixelIndex] > 0;
 }
 
 static inline bool IsSpriteExtraDynaActive(uint8_t spriteId,
                                            uint32_t pixelIndex) {
+  if (!g_serumData.dynaspritemasks_extra_active.hasData(spriteId)) return false;
   return g_serumData.dynaspritemasks_extra_active[spriteId][pixelIndex] > 0;
 }
 
