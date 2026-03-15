@@ -57,6 +57,9 @@ Vector policy currently used in `SerumData`:
   - `dynaspritemasks` + `dynaspritemasks_active`
   - `dynaspritemasks_extra` + `dynaspritemasks_extra_active`
 - Runtime uses sidecar flags instead of `255` sentinels for transparency / dynamic-zone activity.
+- Runtime does not include sentinel-based fallback in sprite/dynamic helpers;
+  missing/incorrect sidecars are treated as a conversion/load bug and are not
+  masked by `255` compatibility logic.
 - Dynamic-zone value vectors (`dynamasks*`, `dynaspritemasks*`) use adaptive
   value packing + compression, with sidecar active flags for sentinel-free
   semantics.
