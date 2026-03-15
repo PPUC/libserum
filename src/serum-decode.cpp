@@ -175,7 +175,6 @@ uint32_t lastframe_full_crc_normal = 0;
 uint32_t lastframe_full_crc_scene = 0;
 bool first_match_normal = true;
 bool first_match_scene = true;
-uint32_t forced_scene_frame_id = IDENTIFY_NO_FRAME;
 uint32_t lastframe_found = GetMonotonicTimeMs();
 uint32_t lastTriggerID = 0xffffffff;  // last trigger ID found
 uint32_t lasttriggerTimestamp = 0;
@@ -378,7 +377,6 @@ void Serum_free(void) {
   lastframe_full_crc_scene = 0;
   first_match_normal = true;
   first_match_scene = true;
-  forced_scene_frame_id = IDENTIFY_NO_FRAME;
   sceneEndHoldUntilMs = 0;
   sceneEndHoldDurationMs = 0;
   monochromeMode = false;
@@ -1458,12 +1456,10 @@ static void BuildFrameLookupVectors(void) {
       const uint32_t saved_lastfound_scene = lastfound_scene;
       const uint32_t saved_lastframe_full_crc_scene = lastframe_full_crc_scene;
       const bool saved_first_match_scene = first_match_scene;
-      const uint32_t saved_forced_scene_frame_id = forced_scene_frame_id;
 
       first_match_scene = true;
       lastfound_scene = 0;
       lastframe_full_crc_scene = 0;
-      forced_scene_frame_id = IDENTIFY_NO_FRAME;
 
       for (const auto& scene : scenes) {
         const int groups = scene.frameGroups > 0 ? scene.frameGroups : 1;
@@ -1497,7 +1493,6 @@ static void BuildFrameLookupVectors(void) {
       lastfound_scene = saved_lastfound_scene;
       lastframe_full_crc_scene = saved_lastframe_full_crc_scene;
       first_match_scene = saved_first_match_scene;
-      forced_scene_frame_id = saved_forced_scene_frame_id;
     }
   }
 
@@ -1569,16 +1564,6 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   const uint32_t pixels = g_serumData.is256x64
                               ? (256 * 64)
                               : (g_serumData.fwidth * g_serumData.fheight);
-  if (sceneFrameRequested && forced_scene_frame_id < g_serumData.nframes &&
-      g_serumData.frameIsScene.size() == g_serumData.nframes &&
-      g_serumData.frameIsScene[forced_scene_frame_id]) {
-    lastfound_scene = forced_scene_frame_id;
-    lastfound = forced_scene_frame_id;
-    lastframe_full_crc_scene = crc32_fast(frame, pixels);
-    first_match_scene = false;
-    return forced_scene_frame_id;
-  }
-
   memset(framechecked, false, g_serumData.nframes);
   uint32_t& lastfound_stream =
       sceneFrameRequested ? lastfound_scene : lastfound_normal;
@@ -1829,6 +1814,8 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                      uint8_t* pquelsprites, uint8_t* nspr, uint16_t* pfrx,
                      uint16_t* pfry, uint16_t* pspx, uint16_t* pspy,
                      uint16_t* pwid, uint16_t* phei) {
+  // TODO(perf #4): add a cheap prefilter/early-out before full detection-area
+  // matching to reduce sprite scan cost on frames without sprites.
   uint8_t ti = 0;
   uint32_t mdword;
   *nspr = 0;
@@ -2028,6 +2015,8 @@ bool CheckExtraFrameAvailable(uint32_t frID) {
 
 bool ColorInRotation(uint32_t IDfound, uint16_t col, uint16_t* norot,
                      uint16_t* posinrot, bool isextra) {
+  // TODO(perf #1): replace this per-pixel linear scan with a precomputed
+  // O(1) color->rotation lookup table persisted in v6 cROMc.
   uint16_t* pcol = NULL;
   if (isextra)
     pcol = g_serumData.colorrotations_v2_extra[IDfound];
@@ -2052,6 +2041,8 @@ bool ColorInRotation(uint32_t IDfound, uint16_t col, uint16_t* norot,
 void CheckDynaShadow(uint16_t* pfr, uint32_t nofr, uint8_t dynacouche,
                      uint8_t* isdynapix, uint16_t fx, uint16_t fy, uint32_t fw,
                      uint32_t fh, bool isextra) {
+  // TODO(perf #3): precompute active neighbor offsets per dynacouche to reduce
+  // branch-heavy checks in this hot path.
   uint8_t dsdir;
   if (isextra)
     dsdir = g_serumData.dynashadowsdir_extra[nofr][dynacouche];
@@ -2737,8 +2728,8 @@ static void ForceNormalFrameRefreshAfterSceneEnd(void) {
   lastframe_full_crc_normal = 0xffffffff;
 }
 
-SERUM_API uint32_t
-Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
+static uint32_t Serum_ColorizeWithMetadatav2Internal(
+    uint8_t* frame, bool sceneFrameRequested, uint32_t knownFrameId) {
   // return IDENTIFY_NO_FRAME if no new frame detected
   // return 0 if new frame with no rotation detected
   // return > 0 if new frame with rotations detected, the value is the delay
@@ -2746,8 +2737,23 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
   mySerum.triggerID = 0xffffffff;
   mySerum.frameID = IDENTIFY_NO_FRAME;
 
-  // Let's first identify the incoming frame among the ones we have in the crom
-  uint32_t frameID = Identify_Frame(frame, sceneFrameRequested);
+  // Identify frame unless caller already resolved a concrete frame ID.
+  uint32_t frameID = IDENTIFY_NO_FRAME;
+  if (knownFrameId < g_serumData.nframes) {
+    frameID = knownFrameId;
+    lastfound = knownFrameId;
+    if (sceneFrameRequested) {
+      lastfound_scene = knownFrameId;
+      first_match_scene = false;
+      lastframe_full_crc_scene = 0;
+    } else {
+      lastfound_normal = knownFrameId;
+      first_match_normal = false;
+      lastframe_full_crc_normal = 0;
+    }
+  } else {
+    frameID = Identify_Frame(frame, sceneFrameRequested);
+  }
   uint32_t now = GetMonotonicTimeMs();
   bool rotationIsScene = false;
   if (is_real_machine() && !showStatusMessages) {
@@ -3127,6 +3133,13 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
   return IDENTIFY_NO_FRAME;  // no new frame, client has to update rotations!
 }
 
+SERUM_API uint32_t
+Serum_ColorizeWithMetadatav2(uint8_t* frame,
+                             bool sceneFrameRequested = false) {
+  return Serum_ColorizeWithMetadatav2Internal(frame, sceneFrameRequested,
+                                              IDENTIFY_NO_FRAME);
+}
+
 SERUM_API uint32_t Serum_Colorize(uint8_t* frame) {
   // return IDENTIFY_NO_FRAME if no new frame detected
   // return 0 if new frame with no rotation detected
@@ -3235,9 +3248,7 @@ uint32_t Serum_RenderScene(void) {
           it->second < g_serumData.nframes) {
         memset(sceneFrame, 0, sizeof(sceneFrame));
         mySerum.rotationtimer = sceneDurationPerFrame;
-        forced_scene_frame_id = it->second;
-        Serum_ColorizeWithMetadatav2(sceneFrame, true);
-        forced_scene_frame_id = IDENTIFY_NO_FRAME;
+        Serum_ColorizeWithMetadatav2Internal(sceneFrame, true, it->second);
         renderedFromDirectTriplet = true;
       }
     }

@@ -53,6 +53,8 @@ class SparseVector {
   mutable uint32_t secondAccessedId = UINT32_MAX;
   mutable std::vector<T> lastDecompressed;
   mutable std::vector<T> secondDecompressed;
+  // TODO(perf #5): evaluate a tiny bounded LRU decoded cache (4-8 entries)
+  // for alternating hot IDs to reduce decode churn with minimal RAM overhead.
   mutable std::vector<uint8_t> decodeScratch;
   mutable bool forceDecodedReads = false;
   mutable std::unordered_map<uint32_t, std::vector<T>> forcedDecoded;
