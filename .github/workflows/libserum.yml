@@ -15,7 +15,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       serumversion: ${{ steps.version.outputs.serumversion }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - id: version
@@ -78,7 +78,7 @@ jobs:
             platform: tvos
             arch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - if: (!(matrix.platform == 'linux' && matrix.arch == 'aarch64'))
         name: Build libserum-${{ matrix.platform }}-${{ matrix.arch }}
         run: |
