@@ -198,6 +198,9 @@ Sprite matching prefilter:
   detection-area scans for detection words that are not present.
 - This replaces the Bloom prefilter path (no false positives from hash
   collisions).
+- Shape-mode sprites use a separate exact dword index built from the binary
+  `frameshape` domain, so shape detection words are not filtered against raw
+  grayscale frame dwords.
 - Detection-area verification uses precomputed opaque row-segment runs to avoid
   per-pixel checks on transparent sprite zones.
 

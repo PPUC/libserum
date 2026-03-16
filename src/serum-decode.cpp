@@ -1839,6 +1839,8 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
       frameDwords.insert(dword);
     }
   }
+  std::unordered_set<uint32_t> frameShapeDwords;
+  bool frameShapeDwordsBuilt = false;
 
   const uint16_t* frameSpriteBoundingBoxes = g_serumData.framespriteBB[quelleframe];
   uint32_t candidateStart = 0;
@@ -1903,6 +1905,22 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
         hasShapeFrameBuffer = true;
       }
       Frame = frameshape;
+      if (!frameShapeDwordsBuilt) {
+        frameShapeDwords.clear();
+        frameShapeDwords.reserve(static_cast<size_t>(g_serumData.fheight) *
+                                 std::max(1u, g_serumData.fwidth - 3));
+        for (uint32_t y = 0; y < g_serumData.fheight; ++y) {
+          const uint32_t rowBase = y * g_serumData.fwidth;
+          uint32_t dword = (uint32_t)(frameshape[rowBase] << 8) |
+                           (uint32_t)(frameshape[rowBase + 1] << 16) |
+                           (uint32_t)(frameshape[rowBase + 2] << 24);
+          for (uint32_t x = 0; x <= g_serumData.fwidth - 4; ++x) {
+            dword = (dword >> 8) | (uint32_t)(frameshape[rowBase + x + 3] << 24);
+            frameShapeDwords.insert(dword);
+          }
+        }
+        frameShapeDwordsBuilt = true;
+      }
     }
 
     const int spw = (qspr < g_serumData.spriteWidth.size())
@@ -1929,7 +1947,12 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
             : detectStart;
     for (uint32_t tm = detectStart; tm < detectEnd; tm++) {
       const auto& detMeta = g_serumData.spriteDetectMeta[tm];
-      if (frameDwords.find(detMeta.detectionWord) == frameDwords.end()) {
+      const bool hasDetectionWord =
+          isshapecheck
+              ? (frameShapeDwords.find(detMeta.detectionWord) !=
+                 frameShapeDwords.end())
+              : (frameDwords.find(detMeta.detectionWord) != frameDwords.end());
+      if (!hasDetectionWord) {
         continue;
       }
 
