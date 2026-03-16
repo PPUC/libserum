@@ -82,9 +82,26 @@ static bool IsEnvFlagEnabled(const char* name) {
          strcasecmp(value, "yes") == 0 || strcasecmp(value, "on") == 0;
 }
 
+static uint32_t GetEnvUintClamped(const char* name, uint32_t maxValue) {
+  const char* value = std::getenv(name);
+  if (!value || value[0] == '\0') {
+    return 0;
+  }
+  char* endPtr = nullptr;
+  unsigned long parsed = std::strtoul(value, &endPtr, 10);
+  if (endPtr == value || *endPtr != '\0') {
+    return 0;
+  }
+  if (parsed > maxValue) {
+    parsed = maxValue;
+  }
+  return static_cast<uint32_t>(parsed);
+}
+
 static bool g_profileDynamicHotPaths = false;
 static bool g_profileSparseVectors = false;
 static bool g_disableDynamicPackedReads = false;
+static uint32_t g_frameLookaheadDepth = 0;
 static uint64_t g_profileColorizeFrameV2Ns = 0;
 static uint64_t g_profileColorizeSpriteV2Ns = 0;
 static uint64_t g_profileColorizeCalls = 0;
@@ -1254,9 +1271,14 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   g_profileSparseVectors = IsEnvFlagEnabled("SERUM_PROFILE_SPARSE_VECTORS");
   g_disableDynamicPackedReads =
       IsEnvFlagEnabled("SERUM_DISABLE_DYNAMIC_PACKED_READS");
+  g_frameLookaheadDepth = GetEnvUintClamped("SERUM_LOOKAHEAD_DEPTH", 8);
   g_profileColorizeFrameV2Ns = 0;
   g_profileColorizeSpriteV2Ns = 0;
   g_profileColorizeCalls = 0;
+  if (g_frameLookaheadDepth > 0) {
+    Log("Frame lookahead prefetch enabled via SERUM_LOOKAHEAD_DEPTH=%u",
+        g_frameLookaheadDepth);
+  }
 
   mySerum.SerumVersion = g_serumData.SerumVersion = 0;
   mySerum.flags = 0;
@@ -1662,6 +1684,104 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   } while (tj != lastfound_stream);
 
   return IDENTIFY_NO_FRAME;  // we found no corresponding frame
+}
+
+static void WarmFrameAssetsForId(uint32_t frameId) {
+  if (frameId >= g_serumData.nframes) {
+    return;
+  }
+
+  (void)g_serumData.activeframes[frameId][0];
+  (void)g_serumData.cframes_v2[frameId];
+  (void)g_serumData.colorrotations_v2[frameId];
+
+  if (g_serumData.isextraframe[frameId][0] > 0) {
+    (void)g_serumData.cframes_v2_extra[frameId];
+    (void)g_serumData.colorrotations_v2_extra[frameId];
+  }
+
+  const uint16_t backgroundId = g_serumData.backgroundIDs[frameId][0];
+  if (backgroundId < g_serumData.nbackgrounds) {
+    (void)g_serumData.backgroundmask[backgroundId];
+    (void)g_serumData.backgroundframes_v2[backgroundId];
+    if (g_serumData.isextrabackground[backgroundId][0] > 0) {
+      (void)g_serumData.backgroundmask_extra[backgroundId];
+      (void)g_serumData.backgroundframes_v2_extra[backgroundId];
+    }
+  }
+
+  if (frameId < g_serumData.frameHasDynamic.size() &&
+      g_serumData.frameHasDynamic[frameId] > 0) {
+    (void)g_serumData.dynamasks[frameId];
+    (void)g_serumData.dynamasks_active[frameId];
+    (void)g_serumData.dyna4cols_v2[frameId];
+    (void)g_serumData.dynashadowsdir[frameId];
+    (void)g_serumData.dynashadowscol[frameId];
+  }
+
+  if (frameId < g_serumData.frameHasDynamicExtra.size() &&
+      g_serumData.frameHasDynamicExtra[frameId] > 0 &&
+      g_serumData.isextraframe[frameId][0] > 0) {
+    (void)g_serumData.dynamasks_extra[frameId];
+    (void)g_serumData.dynamasks_extra_active[frameId];
+    (void)g_serumData.dyna4cols_v2_extra[frameId];
+    (void)g_serumData.dynashadowsdir_extra[frameId];
+    (void)g_serumData.dynashadowscol_extra[frameId];
+  }
+
+  if (g_serumData.spriteCandidateOffsets.size() ==
+          static_cast<size_t>(g_serumData.nframes) + 1 &&
+      g_serumData.spriteCandidateIds.size() ==
+          g_serumData.spriteCandidateSlots.size()) {
+    uint32_t start = g_serumData.spriteCandidateOffsets[frameId];
+    uint32_t end = g_serumData.spriteCandidateOffsets[frameId + 1];
+    if (end > g_serumData.spriteCandidateIds.size()) {
+      end = static_cast<uint32_t>(g_serumData.spriteCandidateIds.size());
+    }
+    for (uint32_t i = start; i < end; ++i) {
+      const uint8_t spriteId = g_serumData.spriteCandidateIds[i];
+      if (spriteId >= g_serumData.nsprites) {
+        continue;
+      }
+      (void)g_serumData.spriteoriginal[spriteId];
+      (void)g_serumData.spriteoriginal_opaque[spriteId];
+      (void)g_serumData.spritecolored[spriteId];
+      if (g_serumData.isextrasprite[spriteId][0] > 0) {
+        (void)g_serumData.spritemask_extra[spriteId];
+        (void)g_serumData.spritemask_extra_opaque[spriteId];
+        (void)g_serumData.spritecolored_extra[spriteId];
+      }
+      (void)g_serumData.dynaspritemasks[spriteId];
+      (void)g_serumData.dynaspritemasks_active[spriteId];
+      if (g_serumData.isextrasprite[spriteId][0] > 0) {
+        (void)g_serumData.dynaspritemasks_extra[spriteId];
+        (void)g_serumData.dynaspritemasks_extra_active[spriteId];
+      }
+    }
+  }
+}
+
+static void PrefetchNextNormalFrameAssets(uint32_t currentFrameId) {
+  if (g_frameLookaheadDepth == 0 || g_serumData.nframes == 0) {
+    return;
+  }
+  uint32_t cursor = currentFrameId;
+  for (uint32_t level = 0; level < g_frameLookaheadDepth; ++level) {
+    bool found = false;
+    for (uint32_t hop = 0; hop < g_serumData.nframes; ++hop) {
+      cursor = (cursor + 1 >= g_serumData.nframes) ? 0 : (cursor + 1);
+      if (g_serumData.frameIsScene.size() == g_serumData.nframes &&
+          g_serumData.frameIsScene[cursor] > 0) {
+        continue;
+      }
+      WarmFrameAssetsForId(cursor);
+      found = true;
+      break;
+    }
+    if (!found) {
+      break;
+    }
+  }
 }
 
 void GetSpriteSize(uint8_t nospr, int* pswid, int* pshei,
@@ -2888,6 +3008,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(
       }
 
       mySerum.frameID = frameID;
+      if (!sceneFrameRequested) {
+        PrefetchNextNormalFrameAssets(frameID);
+      }
       if (!sceneFrameRequested) {
         memcpy(lastFrame, frame, g_serumData.fwidth * g_serumData.fheight);
         lastFrameId = frameID;

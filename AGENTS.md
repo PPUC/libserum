@@ -115,6 +115,12 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
      `PrepareRuntimeDynamicHotCache()` predecodes dynamic vectors
      (`dynamasks*`, `dynaspritemasks*`) into runtime hot caches.
    - Default runtime behavior is unchanged when this env var is not set.
+11. Optional normal-frame lookahead prefetch:
+   - Env `SERUM_LOOKAHEAD_DEPTH=<N>` (`N=0..8`, default `0`) enables cache
+     warming for up to `N` next non-scene frame IDs after each identified
+     normal frame.
+   - Prefetch performs sparse-vector reads only (no matching/render changes).
+   - Scene frames are skipped and frame-ID wrap-around is respected.
 
 Important:
 - `BuildFrameLookupVectors()` must run after final scene data is known for this load cycle.
@@ -273,6 +279,9 @@ v6 snapshot policy:
     logged at the same cadence (accesses, decode count, cache hits, direct hits)
     for key runtime vectors (`cframes_v2*`, `backgroundmask*`, `dynamasks*`,
     `dynaspritemasks*`).
+- Optional lookahead logging:
+  - When `SERUM_LOOKAHEAD_DEPTH>0`, load logs
+    `Frame lookahead prefetch enabled via SERUM_LOOKAHEAD_DEPTH=<N>`.
 
 ## Safety invariants
 - `frameIsScene.size()` must equal `nframes` before identification.
