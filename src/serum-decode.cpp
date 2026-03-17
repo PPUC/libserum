@@ -1761,6 +1761,71 @@ static void WarmFrameAssetsForId(uint32_t frameId) {
   }
 }
 
+static uint32_t BuildRuntimeFeatureFlags(uint32_t frameId) {
+  uint32_t featureFlags = 0;
+
+  if (frameId == IDENTIFY_NO_FRAME) {
+    return featureFlags;
+  }
+
+  if (frameId == 0xfffffffd) {
+    return SERUM_RUNTIME_FEATURE_MONOCHROME_FALLBACK;
+  }
+
+  if (frameId >= g_serumData.nframes) {
+    return featureFlags;
+  }
+
+  featureFlags |= SERUM_RUNTIME_FEATURE_MATCHED;
+
+  if (g_serumData.backgroundIDs[frameId][0] < g_serumData.nbackgrounds) {
+    featureFlags |= SERUM_RUNTIME_FEATURE_BACKGROUND;
+  }
+
+  if (frameId < g_serumData.frameHasDynamic.size() &&
+      g_serumData.frameHasDynamic[frameId] > 0) {
+    featureFlags |= SERUM_RUNTIME_FEATURE_DYNAMIC;
+  }
+
+  if (frameId < g_serumData.frameHasDynamicExtra.size() &&
+      g_serumData.frameHasDynamicExtra[frameId] > 0) {
+    featureFlags |= SERUM_RUNTIME_FEATURE_DYNAMIC_EXTRA;
+  }
+
+  for (uint8_t spriteIndex = 0; spriteIndex < MAX_SPRITES_PER_FRAME;
+       ++spriteIndex) {
+    if (g_serumData.framesprites[frameId][spriteIndex] < 255) {
+      featureFlags |= SERUM_RUNTIME_FEATURE_SPRITES;
+      break;
+    }
+  }
+
+  if (frameId < g_serumData.frameHasShapeSprite.size() &&
+      g_serumData.frameHasShapeSprite[frameId] > 0) {
+    featureFlags |= SERUM_RUNTIME_FEATURE_SHAPE_SPRITES;
+  }
+
+  const uint16_t* rotations = g_serumData.colorrotations_v2[frameId];
+  for (uint8_t rotationIndex = 0; rotationIndex < MAX_COLOR_ROTATION_V2;
+       ++rotationIndex) {
+    if (rotations[rotationIndex * MAX_LENGTH_COLOR_ROTATION] > 0) {
+      featureFlags |= SERUM_RUNTIME_FEATURE_COLOR_ROTATION;
+      break;
+    }
+  }
+
+  if (frameId < g_serumData.frameIsScene.size() &&
+      g_serumData.frameIsScene[frameId] > 0) {
+    featureFlags |= SERUM_RUNTIME_FEATURE_SCENE;
+  }
+
+  if (g_serumData.triggerIDs[frameId][0] < 0xffffffff) {
+    featureFlags |= SERUM_RUNTIME_FEATURE_TRIGGER;
+  }
+
+  return featureFlags;
+}
+
 static void PrefetchNextNormalFrameAssets(uint32_t currentFrameId) {
   if (g_frameLookaheadDepth == 0 || g_serumData.nframes == 0) {
     return;
@@ -3666,6 +3731,26 @@ SERUM_API void Serum_EnableColorization() { enabled = true; }
 SERUM_API void Serum_DisablePupTriggers(void) { keepTriggersInternal = true; }
 
 SERUM_API void Serum_EnablePupTrigers(void) { keepTriggersInternal = false; }
+
+SERUM_API bool Serum_GetRuntimeMetadata(Serum_Runtime_Metadata* metadata) {
+  if (metadata == nullptr) {
+    return false;
+  }
+
+  if (metadata->size != 0 &&
+      metadata->size < sizeof(Serum_Runtime_Metadata)) {
+    return false;
+  }
+
+  memset(metadata, 0, sizeof(*metadata));
+  metadata->size = sizeof(*metadata);
+  metadata->serumVersion = mySerum.SerumVersion;
+  metadata->frameID = mySerum.frameID;
+  metadata->triggerID = mySerum.triggerID;
+  metadata->rotationtimer = mySerum.rotationtimer;
+  metadata->featureFlags = BuildRuntimeFeatureFlags(mySerum.frameID);
+  return true;
+}
 
 SERUM_API bool Serum_Scene_ParseCSV(const char* const csv_filename) {
   if (!g_serumData.sceneGenerator) return false;

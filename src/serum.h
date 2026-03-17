@@ -62,6 +62,30 @@ enum  // returned flags that are added to the timings if there were rotations
   FLAG_RETURNED_V2_SCENE = 0x40000,
 };
 
+enum  // runtime metadata feature flags
+{
+  SERUM_RUNTIME_FEATURE_MATCHED = 1 << 0,
+  SERUM_RUNTIME_FEATURE_BACKGROUND = 1 << 1,
+  SERUM_RUNTIME_FEATURE_DYNAMIC = 1 << 2,
+  SERUM_RUNTIME_FEATURE_DYNAMIC_EXTRA = 1 << 3,
+  SERUM_RUNTIME_FEATURE_SPRITES = 1 << 4,
+  SERUM_RUNTIME_FEATURE_SHAPE_SPRITES = 1 << 5,
+  SERUM_RUNTIME_FEATURE_COLOR_ROTATION = 1 << 6,
+  SERUM_RUNTIME_FEATURE_SCENE = 1 << 7,
+  SERUM_RUNTIME_FEATURE_TRIGGER = 1 << 8,
+  SERUM_RUNTIME_FEATURE_MONOCHROME_FALLBACK = 1 << 9,
+};
+
+typedef struct _Serum_Runtime_Metadata {
+  uint32_t size;
+  uint32_t serumVersion;
+  uint32_t frameID;
+  uint32_t triggerID;
+  uint32_t rotationtimer;
+  uint32_t featureFlags;
+  uint32_t reserved;
+} Serum_Runtime_Metadata;
+
 typedef struct _Serum_Frame_Struc {
   // data for v1 Serum format
   uint8_t* frame;      // return the colorized frame
@@ -161,6 +185,7 @@ typedef void (*Serum_DisableColorizationFunc)(void);
 typedef void (*Serum_EnableColorizationFunc)(void);
 typedef void (*Serum_DisablePupTriggersFunc)(void);
 typedef void (*Serum_EnablePupTrigersFunc)(void);
+typedef bool (*Serum_GetRuntimeMetadataFunc)(Serum_Runtime_Metadata* metadata);
 typedef bool (*Serum_Scene_ParseCSVFunc)(const char* const csv_filename);
 typedef bool (*Serum_Scene_GenerateDumpFunc)(const char* const dump_filename,
                                              int id);
