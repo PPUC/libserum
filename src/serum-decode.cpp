@@ -1567,81 +1567,6 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   return IDENTIFY_NO_FRAME;  // we found no corresponding frame
 }
 
-static void WarmFrameAssetsForId(uint32_t frameId) {
-  if (frameId >= g_serumData.nframes) {
-    return;
-  }
-
-  (void)g_serumData.activeframes[frameId][0];
-  (void)g_serumData.cframes_v2[frameId];
-  (void)g_serumData.colorrotations_v2[frameId];
-
-  if (g_serumData.isextraframe[frameId][0] > 0) {
-    (void)g_serumData.cframes_v2_extra[frameId];
-    (void)g_serumData.colorrotations_v2_extra[frameId];
-  }
-
-  const uint16_t backgroundId = g_serumData.backgroundIDs[frameId][0];
-  if (backgroundId < g_serumData.nbackgrounds) {
-    (void)g_serumData.backgroundmask[backgroundId];
-    (void)g_serumData.backgroundframes_v2[backgroundId];
-    if (g_serumData.isextrabackground[backgroundId][0] > 0) {
-      (void)g_serumData.backgroundmask_extra[backgroundId];
-      (void)g_serumData.backgroundframes_v2_extra[backgroundId];
-    }
-  }
-
-  if (frameId < g_serumData.frameHasDynamic.size() &&
-      g_serumData.frameHasDynamic[frameId] > 0) {
-    (void)g_serumData.dynamasks[frameId];
-    (void)g_serumData.dynamasks_active[frameId];
-    (void)g_serumData.dyna4cols_v2[frameId];
-    (void)g_serumData.dynashadowsdir[frameId];
-    (void)g_serumData.dynashadowscol[frameId];
-  }
-
-  if (frameId < g_serumData.frameHasDynamicExtra.size() &&
-      g_serumData.frameHasDynamicExtra[frameId] > 0 &&
-      g_serumData.isextraframe[frameId][0] > 0) {
-    (void)g_serumData.dynamasks_extra[frameId];
-    (void)g_serumData.dynamasks_extra_active[frameId];
-    (void)g_serumData.dyna4cols_v2_extra[frameId];
-    (void)g_serumData.dynashadowsdir_extra[frameId];
-    (void)g_serumData.dynashadowscol_extra[frameId];
-  }
-
-  if (g_serumData.spriteCandidateOffsets.size() ==
-          static_cast<size_t>(g_serumData.nframes) + 1 &&
-      g_serumData.spriteCandidateIds.size() ==
-          g_serumData.spriteCandidateSlots.size()) {
-    uint32_t start = g_serumData.spriteCandidateOffsets[frameId];
-    uint32_t end = g_serumData.spriteCandidateOffsets[frameId + 1];
-    if (end > g_serumData.spriteCandidateIds.size()) {
-      end = static_cast<uint32_t>(g_serumData.spriteCandidateIds.size());
-    }
-    for (uint32_t i = start; i < end; ++i) {
-      const uint8_t spriteId = g_serumData.spriteCandidateIds[i];
-      if (spriteId >= g_serumData.nsprites) {
-        continue;
-      }
-      (void)g_serumData.spriteoriginal[spriteId];
-      (void)g_serumData.spriteoriginal_opaque[spriteId];
-      (void)g_serumData.spritecolored[spriteId];
-      if (g_serumData.isextrasprite[spriteId][0] > 0) {
-        (void)g_serumData.spritemask_extra[spriteId];
-        (void)g_serumData.spritemask_extra_opaque[spriteId];
-        (void)g_serumData.spritecolored_extra[spriteId];
-      }
-      (void)g_serumData.dynaspritemasks[spriteId];
-      (void)g_serumData.dynaspritemasks_active[spriteId];
-      if (g_serumData.isextrasprite[spriteId][0] > 0) {
-        (void)g_serumData.dynaspritemasks_extra[spriteId];
-        (void)g_serumData.dynaspritemasks_extra_active[spriteId];
-      }
-    }
-  }
-}
-
 static uint32_t BuildRuntimeFeatureFlags(uint32_t frameId) {
   uint32_t featureFlags = 0;
 
@@ -1663,27 +1588,47 @@ static uint32_t BuildRuntimeFeatureFlags(uint32_t frameId) {
     featureFlags |= SERUM_RUNTIME_FEATURE_BACKGROUND;
   }
 
-  if (frameId < g_serumData.frameHasDynamic.size() &&
-      g_serumData.frameHasDynamic[frameId] > 0) {
-    featureFlags |= SERUM_RUNTIME_FEATURE_DYNAMIC;
+  const uint8_t* dynamicMask = g_serumData.dynamasks[frameId];
+  if (dynamicMask != nullptr) {
+    const size_t dynamicPixelCount =
+        static_cast<size_t>(g_serumData.fwidth) * g_serumData.fheight;
+    for (size_t pixelIndex = 0; pixelIndex < dynamicPixelCount; ++pixelIndex) {
+      if (dynamicMask[pixelIndex] != 255) {
+        featureFlags |= SERUM_RUNTIME_FEATURE_DYNAMIC;
+        break;
+      }
+    }
   }
 
-  if (frameId < g_serumData.frameHasDynamicExtra.size() &&
-      g_serumData.frameHasDynamicExtra[frameId] > 0) {
-    featureFlags |= SERUM_RUNTIME_FEATURE_DYNAMIC_EXTRA;
+  if (g_serumData.isextraframe[frameId][0] > 0) {
+    const uint8_t* dynamicMaskExtra = g_serumData.dynamasks_extra[frameId];
+    if (dynamicMaskExtra != nullptr) {
+      const size_t dynamicExtraPixelCount =
+          static_cast<size_t>(g_serumData.fwidth_extra) *
+          g_serumData.fheight_extra;
+      for (size_t pixelIndex = 0; pixelIndex < dynamicExtraPixelCount;
+           ++pixelIndex) {
+        if (dynamicMaskExtra[pixelIndex] != 255) {
+          featureFlags |= SERUM_RUNTIME_FEATURE_DYNAMIC_EXTRA;
+          break;
+        }
+      }
+    }
   }
 
   for (uint8_t spriteIndex = 0; spriteIndex < MAX_SPRITES_PER_FRAME;
        ++spriteIndex) {
-    if (g_serumData.framesprites[frameId][spriteIndex] < 255) {
+    const uint8_t spriteId = g_serumData.framesprites[frameId][spriteIndex];
+    if (spriteId < 255) {
       featureFlags |= SERUM_RUNTIME_FEATURE_SPRITES;
-      break;
+      if (spriteId < g_serumData.nsprites &&
+          g_serumData.sprshapemode[spriteId][0] != 0) {
+        featureFlags |= SERUM_RUNTIME_FEATURE_SHAPE_SPRITES;
+      }
+      if ((featureFlags & SERUM_RUNTIME_FEATURE_SHAPE_SPRITES) != 0) {
+        break;
+      }
     }
-  }
-
-  if (frameId < g_serumData.frameHasShapeSprite.size() &&
-      g_serumData.frameHasShapeSprite[frameId] > 0) {
-    featureFlags |= SERUM_RUNTIME_FEATURE_SHAPE_SPRITES;
   }
 
   const uint16_t* rotations = g_serumData.colorrotations_v2[frameId];
@@ -1705,29 +1650,6 @@ static uint32_t BuildRuntimeFeatureFlags(uint32_t frameId) {
   }
 
   return featureFlags;
-}
-
-static void PrefetchNextNormalFrameAssets(uint32_t currentFrameId) {
-  if (g_frameLookaheadDepth == 0 || g_serumData.nframes == 0) {
-    return;
-  }
-  uint32_t cursor = currentFrameId;
-  for (uint32_t level = 0; level < g_frameLookaheadDepth; ++level) {
-    bool found = false;
-    for (uint32_t hop = 0; hop < g_serumData.nframes; ++hop) {
-      cursor = (cursor + 1 >= g_serumData.nframes) ? 0 : (cursor + 1);
-      if (g_serumData.frameIsScene.size() == g_serumData.nframes &&
-          g_serumData.frameIsScene[cursor] > 0) {
-        continue;
-      }
-      WarmFrameAssetsForId(cursor);
-      found = true;
-      break;
-    }
-    if (!found) {
-      break;
-    }
-  }
 }
 
 void GetSpriteSize(uint8_t nospr, int* pswid, int* pshei, uint8_t* spriteData,
