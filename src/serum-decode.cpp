@@ -110,6 +110,8 @@ static uint32_t g_debugTargetInputCrc = 0;
 static uint32_t g_debugTargetFrameId = 0xffffffffu;
 static bool g_debugStageHashes = false;
 static uint32_t g_debugCurrentInputCrc = 0;
+static bool g_debugTraceAllInputs = false;
+static uint32_t g_debugFrameMetaLoggedFor = 0xffffffffu;
 
 static SerumData g_serumData;
 uint16_t sceneFrameCount = 0;
@@ -265,11 +267,14 @@ static void InitDebugFrameTracingFromEnv(void) {
   g_debugTargetFrameId =
       GetEnvUint32Auto("SERUM_DEBUG_FRAME_ID", 0xffffffffu);
   g_debugStageHashes = IsEnvFlagEnabled("SERUM_DEBUG_STAGE_HASHES");
+  g_debugTraceAllInputs = IsEnvFlagEnabled("SERUM_DEBUG_TRACE_INPUTS");
   if (g_debugTargetInputCrc != 0 || g_debugTargetFrameId != 0xffffffffu ||
-      g_debugStageHashes) {
-    Log("Serum debug tracing enabled: inputCrc=%u frameId=%u stageHashes=%s",
+      g_debugStageHashes || g_debugTraceAllInputs) {
+    Log("Serum debug tracing enabled: inputCrc=%u frameId=%u stageHashes=%s "
+        "traceAllInputs=%s",
         g_debugTargetInputCrc, g_debugTargetFrameId,
-        g_debugStageHashes ? "on" : "off");
+        g_debugStageHashes ? "on" : "off",
+        g_debugTraceAllInputs ? "on" : "off");
   }
 }
 
@@ -285,6 +290,71 @@ static bool DebugTraceMatches(uint32_t inputCrc, uint32_t frameId) {
 static bool DebugTraceMatchesInputCrc(uint32_t inputCrc) {
   InitDebugFrameTracingFromEnv();
   return (g_debugTargetInputCrc == 0) || (inputCrc == g_debugTargetInputCrc);
+}
+
+static bool DebugTraceAllInputsEnabled() {
+  InitDebugFrameTracingFromEnv();
+  return g_debugTraceAllInputs;
+}
+
+static void DebugLogFrameMetadataIfRequested(uint32_t frameId) {
+  InitDebugFrameTracingFromEnv();
+  if (g_debugTargetFrameId == 0xffffffffu || frameId != g_debugTargetFrameId ||
+      frameId >= g_serumData.nframes || g_debugFrameMetaLoggedFor == frameId) {
+    return;
+  }
+  g_debugFrameMetaLoggedFor = frameId;
+
+  const uint8_t mask = g_serumData.compmaskID[frameId][0];
+  const uint8_t shape = g_serumData.shapecompmode[frameId][0];
+  const uint32_t hash = g_serumData.hashcodes[frameId][0];
+  const uint8_t active = g_serumData.activeframes[frameId][0];
+  const uint32_t triggerId = g_serumData.triggerIDs[frameId][0];
+  const uint16_t backgroundId = g_serumData.backgroundIDs[frameId][0];
+  const uint8_t isExtra = g_serumData.isextraframe[frameId][0];
+  const uint8_t hasDynamic =
+      (frameId < g_serumData.frameHasDynamic.size())
+          ? g_serumData.frameHasDynamic[frameId]
+          : 0;
+  const uint8_t hasDynamicExtra =
+      (frameId < g_serumData.frameHasDynamicExtra.size())
+          ? g_serumData.frameHasDynamicExtra[frameId]
+          : 0;
+  const uint8_t isScene =
+      (frameId < g_serumData.frameIsScene.size()) ? g_serumData.frameIsScene[frameId]
+                                                  : 0;
+
+  Log("Serum debug frame meta: frameId=%u mask=%u shape=%u hash=%u active=%u "
+      "triggerId=%u backgroundId=%u isExtra=%u hasDynamic=%u "
+      "hasDynamicExtra=%u isScene=%u",
+      frameId, mask, shape, hash, active, triggerId, backgroundId, isExtra,
+      hasDynamic, hasDynamicExtra, isScene);
+
+  const uint8_t* spriteSlots = g_serumData.framesprites[frameId];
+  const uint16_t* spriteBB = g_serumData.framespriteBB[frameId];
+  uint32_t spriteCount = 0;
+  for (uint32_t i = 0; i < MAX_SPRITES_PER_FRAME; ++i) {
+    if (spriteSlots[i] >= 255) {
+      break;
+    }
+    ++spriteCount;
+  }
+  if (spriteCount == 0) {
+    Log("Serum debug frame sprites: frameId=%u count=0", frameId);
+    return;
+  }
+
+  for (uint32_t i = 0; i < spriteCount; ++i) {
+    const uint8_t spriteId = spriteSlots[i];
+    const uint8_t usesShape =
+        (spriteId < g_serumData.spriteUsesShape.size())
+            ? g_serumData.spriteUsesShape[spriteId]
+            : g_serumData.sprshapemode[spriteId][0];
+    Log("Serum debug frame sprite-slot: frameId=%u slot=%u spriteId=%u "
+        "bbox=[%u,%u..%u,%u] usesShape=%u",
+        frameId, i, spriteId, spriteBB[i * 4], spriteBB[i * 4 + 1],
+        spriteBB[i * 4 + 2], spriteBB[i * 4 + 3], usesShape);
+  }
 }
 
 static uint64_t DebugHashBytesFNV1a64(const void* data, size_t size) {
@@ -407,6 +477,74 @@ static void DebugLogColorizeFrameV2Assets(
       static_cast<unsigned long long>(dynaActiveHash),
       static_cast<unsigned long long>(dynaColorsHash), dynamicActivePixels,
       dynamicNonZeroPixels, static_cast<unsigned long long>(rotationHash));
+}
+
+static bool DebugTraceSpritesForCurrentInput() {
+  return DebugTraceMatchesInputCrc(g_debugCurrentInputCrc);
+}
+
+static void DebugLogSpriteCheckStart(uint32_t frameId, uint32_t candidateCount,
+                                     bool hasCandidateSidecars,
+                                     bool frameHasShapeCandidates) {
+  if (!DebugTraceSpritesForCurrentInput()) {
+    return;
+  }
+  Log("Serum debug sprites start: frameId=%u inputCrc=%u candidates=%u "
+      "sidecars=%s shapeCandidates=%s",
+      frameId, g_debugCurrentInputCrc, candidateCount,
+      hasCandidateSidecars ? "true" : "false",
+      frameHasShapeCandidates ? "true" : "false");
+}
+
+static void DebugLogSpriteCandidate(uint32_t frameId, uint8_t spriteId,
+                                    uint8_t spriteSlot, bool usesShape,
+                                    uint32_t detectCount, short minxBB,
+                                    short minyBB, short maxxBB, short maxyBB,
+                                    int spriteWidth, int spriteHeight) {
+  if (!DebugTraceSpritesForCurrentInput()) {
+    return;
+  }
+  Log("Serum debug sprite candidate: frameId=%u inputCrc=%u spriteId=%u "
+      "slot=%u shape=%s detectCount=%u bbox=[%d,%d..%d,%d] size=%dx%d",
+      frameId, g_debugCurrentInputCrc, spriteId, spriteSlot,
+      usesShape ? "true" : "false", detectCount, minxBB, minyBB, maxxBB, maxyBB,
+      spriteWidth, spriteHeight);
+}
+
+static void DebugLogSpriteDetectionWord(uint32_t frameId, uint8_t spriteId,
+                                        uint32_t detectionIndex,
+                                        uint32_t detectionWord, short frax,
+                                        short fray, short offsx, short offsy,
+                                        short detw, short deth) {
+  if (!DebugTraceSpritesForCurrentInput()) {
+    return;
+  }
+  Log("Serum debug sprite detection: frameId=%u inputCrc=%u spriteId=%u "
+      "detectIndex=%u word=%u framePos=(%d,%d) area=(%d,%d %dx%d)",
+      frameId, g_debugCurrentInputCrc, spriteId, detectionIndex, detectionWord,
+      frax, fray, offsx, offsy, detw, deth);
+}
+
+static void DebugLogSpriteAccepted(uint32_t frameId, uint8_t spriteId,
+                                   uint8_t spriteSlot, uint16_t frameX,
+                                   uint16_t frameY, uint16_t spriteX,
+                                   uint16_t spriteY, uint16_t width,
+                                   uint16_t height, bool duplicate) {
+  if (!DebugTraceSpritesForCurrentInput()) {
+    return;
+  }
+  Log("Serum debug sprite accepted: frameId=%u inputCrc=%u spriteId=%u "
+      "slot=%u frame=(%u,%u) sprite=(%u,%u) size=%ux%u duplicate=%s",
+      frameId, g_debugCurrentInputCrc, spriteId, spriteSlot, frameX, frameY,
+      spriteX, spriteY, width, height, duplicate ? "true" : "false");
+}
+
+static void DebugLogSpriteCheckResult(uint32_t frameId, uint8_t nspr) {
+  if (!DebugTraceSpritesForCurrentInput()) {
+    return;
+  }
+  Log("Serum debug sprites result: frameId=%u inputCrc=%u matches=%u", frameId,
+      g_debugCurrentInputCrc, nspr);
 }
 
 SERUM_API void Serum_SetLogCallback(Serum_LogCallback callback,
@@ -1757,6 +1895,7 @@ static void InitFrameLookupRuntimeStateFromStoredData(void) {
 
 uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   if (!cromloaded) return IDENTIFY_NO_FRAME;
+  DebugLogFrameMetadataIfRequested(g_debugTargetFrameId);
   uint32_t tj = sceneFrameRequested
                     ? lastfound_scene
                     : lastfound_normal;  // stream-local search start
@@ -2246,6 +2385,8 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
   const uint32_t candidateCount =
       hasCandidateSidecars ? (candidateEnd - candidateStart)
                            : MAX_SPRITES_PER_FRAME;
+  DebugLogSpriteCheckStart(quelleframe, candidateCount, hasCandidateSidecars,
+                           frameHasShapeCandidates);
   for (uint32_t candidateIndex = 0; candidateIndex < candidateCount;
        ++candidateIndex) {
     uint8_t qspr = 255;
@@ -2324,6 +2465,9 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
         (qspr + 1) < g_serumData.spriteDetectOffsets.size()
             ? g_serumData.spriteDetectOffsets[qspr + 1]
             : detectStart;
+    DebugLogSpriteCandidate(quelleframe, qspr, spriteSlot, isshapecheck,
+                            detectEnd - detectStart, minxBB, minyBB, maxxBB,
+                            maxyBB, spw, sph);
     for (uint32_t tm = detectStart; tm < detectEnd; tm++) {
       const auto& detMeta = g_serumData.spriteDetectMeta[tm];
       const bool hasDetectionWord =
@@ -2370,6 +2514,10 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
             if ((offsx + detw > (int)maxxBB + 1) ||
                 (offsy + deth > (int)maxyBB + 1))
               continue;
+            DebugLogSpriteDetectionWord(quelleframe, qspr, tm - detectStart,
+                                        detMeta.detectionWord, frax, fray,
+                                        static_cast<short>(offsx),
+                                        static_cast<short>(offsy), detw, deth);
             // we can now check if the full detection area is around the found
             // detection dword
             bool notthere = false;
@@ -2458,6 +2606,10 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                     (pwid[*nspr] == pwid[tk]) && (phei[*nspr] == phei[tk]))
                   identicalfound = true;
               }
+              DebugLogSpriteAccepted(quelleframe, qspr, spriteSlot,
+                                     pfrx[*nspr], pfry[*nspr], pspx[*nspr],
+                                     pspy[*nspr], pwid[*nspr], phei[*nspr],
+                                     identicalfound);
               if (!identicalfound) {
                 (*nspr)++;
                 if (*nspr == MAX_SPRITES_PER_FRAME) return true;
@@ -2468,6 +2620,7 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
       }
     }
   }
+  DebugLogSpriteCheckResult(quelleframe, *nspr);
   if (*nspr > 0) return true;
   return false;
 }
@@ -3000,6 +3153,14 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
   }
 
   // Let's first identify the incoming frame among the ones we have in the crom
+  const uint32_t inputCrc =
+      (frame && g_serumData.fwidth > 0 && g_serumData.fheight > 0)
+          ? crc32_fast(frame, g_serumData.fwidth * g_serumData.fheight)
+          : 0;
+  g_debugCurrentInputCrc = inputCrc;
+  if (DebugTraceAllInputsEnabled()) {
+    Log("Serum debug input: api=v1 inputCrc=%u", inputCrc);
+  }
   uint32_t frameID = Identify_Frame(frame, false);
   mySerum.frameID = IDENTIFY_NO_FRAME;
   uint32_t now = GetMonotonicTimeMs();
@@ -3026,6 +3187,17 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
       }
 
       if (frameID == IDENTIFY_SAME_FRAME) {
+        if (DebugTraceMatchesInputCrc(g_debugCurrentInputCrc)) {
+          Log("Serum debug identify same-frame: inputCrc=%u lastfound=%u "
+              "sceneRequested=%s triggerId=%u",
+              g_debugCurrentInputCrc, lastfound, "false",
+              g_serumData.triggerIDs[lastfound][0]);
+        }
+        if (DebugTraceAllInputsEnabled()) {
+          Log("Serum debug input result: api=v1 inputCrc=%u result=same-frame "
+              "lastfound=%u",
+              g_debugCurrentInputCrc, lastfound);
+        }
         if (keepTriggersInternal ||
             mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
           mySerum.triggerID = 0xffffffff;
@@ -3034,6 +3206,11 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
 
       mySerum.frameID = frameID;
       mySerum.rotationtimer = 0;
+      if (DebugTraceAllInputsEnabled()) {
+        Log("Serum debug input result: api=v1 inputCrc=%u result=frame "
+            "frameId=%u",
+            g_debugCurrentInputCrc, frameID);
+      }
 
       uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
       uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
@@ -3234,6 +3411,11 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(
     g_debugCurrentInputCrc =
         crc32_fast(frame, g_serumData.fwidth * g_serumData.fheight);
   }
+  if (DebugTraceAllInputsEnabled()) {
+    Log("Serum debug input: api=v2 inputCrc=%u sceneRequested=%s knownFrameId=%u",
+        g_debugCurrentInputCrc, sceneFrameRequested ? "true" : "false",
+        knownFrameId);
+  }
   uint32_t now = GetMonotonicTimeMs();
   bool rotationIsScene = false;
   if (is_real_machine() && !showStatusMessages) {
@@ -3275,6 +3457,19 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(
       }
 
       if (frameID == IDENTIFY_SAME_FRAME) {
+        if (DebugTraceMatchesInputCrc(g_debugCurrentInputCrc)) {
+          Log("Serum debug identify same-frame: inputCrc=%u lastfound=%u "
+              "sceneRequested=%s triggerId=%u",
+              g_debugCurrentInputCrc, lastfound,
+              sceneFrameRequested ? "true" : "false",
+              g_serumData.triggerIDs[lastfound][0]);
+        }
+        if (DebugTraceAllInputsEnabled()) {
+          Log("Serum debug input result: api=v2 inputCrc=%u result=same-frame "
+              "lastfound=%u sceneRequested=%s",
+              g_debugCurrentInputCrc, lastfound,
+              sceneFrameRequested ? "true" : "false");
+        }
         if (keepTriggersInternal ||
             mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
           mySerum.triggerID = 0xffffffff;
@@ -3282,6 +3477,12 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(
       }
 
       mySerum.frameID = frameID;
+      if (DebugTraceAllInputsEnabled()) {
+        Log("Serum debug input result: api=v2 inputCrc=%u result=frame "
+            "frameId=%u sceneRequested=%s",
+            g_debugCurrentInputCrc, frameID,
+            sceneFrameRequested ? "true" : "false");
+      }
       if (DebugTraceMatches(g_debugCurrentInputCrc, frameID)) {
         Log("Serum debug identify result: inputCrc=%u frameId=%u "
             "sceneRequested=%s triggerId=%u",
@@ -3602,6 +3803,12 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(
     }
   }
 
+  if (DebugTraceAllInputsEnabled()) {
+    Log("Serum debug input result: api=v2 inputCrc=%u result=no-frame "
+        "sceneRequested=%s",
+        g_debugCurrentInputCrc, sceneFrameRequested ? "true" : "false");
+  }
+
   mySerum.triggerID = 0xffffffff;
 
   if (monochromeMode || monochromePaletteMode ||
@@ -3629,6 +3836,10 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(
     mySerum.width32 = g_serumData.fwidth;
     mySerum.width64 = 0;
     mySerum.frameID = 0xfffffffd;  // monochrome frame ID
+    if (DebugTraceAllInputsEnabled()) {
+      Log("Serum debug input result: api=v2 inputCrc=%u result=monochrome",
+          g_debugCurrentInputCrc);
+    }
 
     // disable render features like rotations
     for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
