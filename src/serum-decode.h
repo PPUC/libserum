@@ -107,6 +107,17 @@ SERUM_API void Serum_DisablePupTriggers(void);
  */
 SERUM_API void Serum_EnablePupTrigers(void);
 
+/** @brief Get runtime metadata for the last Serum colorize/rotate result
+ *
+ * Provides frame-level metadata for the most recently processed Serum frame.
+ * This is intended for diagnostics/profiling tools.
+ *
+ * @param metadata: Output structure. metadata->size should be set to
+ * sizeof(Serum_Runtime_Metadata); zero is also accepted for current versions.
+ * @return true if metadata was filled, false on invalid arguments
+ */
+SERUM_API bool Serum_GetRuntimeMetadata(Serum_Runtime_Metadata* metadata);
+
 /** @brief Get the full version of this library
  *
  * @return A string formatted "major.minor.patch"
