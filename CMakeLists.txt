@@ -118,16 +118,25 @@ if(BUILD_SHARED)
 
    target_include_directories(serum_shared PUBLIC ${SERUM_INCLUDE_DIRS})
 
-   if(PLATFORM STREQUAL "win" AND ARCH STREQUAL "x64")
+   if((PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "win-mingw") AND ARCH STREQUAL "x64")
       set(SERUM_OUTPUT_NAME "serum64")
    else()
       set(SERUM_OUTPUT_NAME "serum")
    endif()
 
-   set_target_properties(serum_shared PROPERTIES
-      OUTPUT_NAME ${SERUM_OUTPUT_NAME}
-      VERSION ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}
-   )
+   if(PLATFORM STREQUAL "win-mingw")
+      set_target_properties(serum_shared PROPERTIES
+         PREFIX ""
+         IMPORT_PREFIX ""
+         OUTPUT_NAME ${SERUM_OUTPUT_NAME}
+         VERSION ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}
+      )
+   else()
+      set_target_properties(serum_shared PROPERTIES
+         OUTPUT_NAME ${SERUM_OUTPUT_NAME}
+         VERSION ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}
+      )
+   endif()
 
    if(PLATFORM STREQUAL "win")
       set(SERUM_VERSION_STR "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}")
@@ -150,7 +159,7 @@ if(BUILD_SHARED)
       src/TimeUtils.h
       DESTINATION ${CMAKE_INSTALL_PREFIX}/include)
 
-   if(PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "macos" OR PLATFORM STREQUAL "linux")
+   if(PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "win-mingw" OR PLATFORM STREQUAL "macos" OR PLATFORM STREQUAL "linux")
       add_executable(serum_test
          src/test.cpp
       )
@@ -164,8 +173,9 @@ if(BUILD_STATIC)
 
    target_include_directories(serum_static PUBLIC ${SERUM_INCLUDE_DIRS})
 
-   if(PLATFORM STREQUAL "win")
+   if(PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "win-mingw")
       set_target_properties(serum_static PROPERTIES
+         PREFIX ""
          OUTPUT_NAME "serum_static"
       )
    else()
@@ -183,7 +193,7 @@ if(BUILD_STATIC)
       src/TimeUtils.h
       DESTINATION ${CMAKE_INSTALL_PREFIX}/include)
 
-   if(PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "macos" OR PLATFORM STREQUAL "linux")
+   if(PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "win-mingw" OR PLATFORM STREQUAL "macos" OR PLATFORM STREQUAL "linux")
       add_executable(serum_test_s
          src/test.cpp
       )
