@@ -8,6 +8,19 @@
 
 bool is_real_machine();
 
+static uint32_t GetDebugSpriteIdFromEnv() {
+  const char *value = std::getenv("SERUM_DEBUG_SPRITE_ID");
+  if (!value || value[0] == '\0') {
+    return 0xffffffffu;
+  }
+  char *endPtr = nullptr;
+  unsigned long parsed = std::strtoul(value, &endPtr, 0);
+  if (endPtr == value || *endPtr != '\0') {
+    return 0xffffffffu;
+  }
+  return static_cast<uint32_t>(parsed);
+}
+
 SerumData::SerumData()
     : SerumVersion(0),
       concentrateFileVersion(SERUM_CONCENTRATE_VERSION),
@@ -165,6 +178,58 @@ void SerumData::Clear() {
   colorRotationLookupByFrameAndColor.clear();
 }
 
+void SerumData::DebugLogSpriteDynamicSidecarState(const char *stage,
+                                                  uint32_t spriteId) {
+  const uint32_t debugSpriteId = GetDebugSpriteIdFromEnv();
+  if (spriteId != debugSpriteId || spriteId >= nsprites) {
+    return;
+  }
+
+  const bool hasDyna = dynaspritemasks.hasData(spriteId);
+  const bool hasActive = dynaspritemasks_active.hasData(spriteId);
+  uint32_t dyna255 = 0;
+  uint32_t dyna0 = 0;
+  uint32_t dynaOther = 0;
+  uint32_t active0 = 0;
+  uint32_t active1 = 0;
+  uint32_t activeOther = 0;
+
+  if (hasDyna) {
+    const uint8_t *source = dynaspritemasks[spriteId];
+    for (size_t i = 0; i < MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT; ++i) {
+      const uint8_t value = source[i];
+      if (value == 255) {
+        ++dyna255;
+      } else if (value == 0) {
+        ++dyna0;
+      } else {
+        ++dynaOther;
+      }
+    }
+  }
+
+  if (hasActive) {
+    const uint8_t *active = dynaspritemasks_active[spriteId];
+    for (size_t i = 0; i < MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT; ++i) {
+      const uint8_t value = active[i];
+      if (value == 0) {
+        ++active0;
+      } else if (value == 1) {
+        ++active1;
+      } else {
+        ++activeOther;
+      }
+    }
+  }
+
+  Log("Serum debug sprite sidecar: stage=%s spriteId=%u hasDyna=%s "
+      "hasActive=%s dyna255=%u dyna0=%u dynaOther=%u active0=%u active1=%u "
+      "activeOther=%u",
+      stage ? stage : "unknown", spriteId, hasDyna ? "true" : "false",
+      hasActive ? "true" : "false", dyna255, dyna0, dynaOther, active0,
+      active1, activeOther);
+}
+
 void SerumData::BuildPackingSidecarsAndNormalize() {
   if (m_packingSidecarsNormalized) {
     return;
@@ -307,6 +372,7 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
   normalized.resize(spritePixels);
   flags.resize(spritePixels);
   for (uint32_t spriteId = 0; spriteId < nsprites; ++spriteId) {
+    DebugLogSpriteDynamicSidecarState("normalize-before", spriteId);
     const bool hasSourceVector = dynaspritemasks.hasData(spriteId);
     const bool hasActiveVector = dynaspritemasks_active.hasData(spriteId);
     if (!hasSourceVector && !hasActiveVector) {
@@ -323,6 +389,7 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
     }
     dynaspritemasks_active.set(spriteId, flags.data(), spritePixels);
     dynaspritemasks.set(spriteId, normalized.data(), spritePixels);
+    DebugLogSpriteDynamicSidecarState("normalize-after", spriteId);
   }
 
   for (uint32_t spriteId = 0; spriteId < nsprites; ++spriteId) {

@@ -112,6 +112,7 @@ static bool g_debugStageHashes = false;
 static uint32_t g_debugCurrentInputCrc = 0;
 static bool g_debugTraceAllInputs = false;
 static uint32_t g_debugFrameMetaLoggedFor = 0xffffffffu;
+static bool g_debugBypassSceneGate = false;
 
 static SerumData g_serumData;
 uint16_t sceneFrameCount = 0;
@@ -268,13 +269,16 @@ static void InitDebugFrameTracingFromEnv(void) {
       GetEnvUint32Auto("SERUM_DEBUG_FRAME_ID", 0xffffffffu);
   g_debugStageHashes = IsEnvFlagEnabled("SERUM_DEBUG_STAGE_HASHES");
   g_debugTraceAllInputs = IsEnvFlagEnabled("SERUM_DEBUG_TRACE_INPUTS");
+  g_debugBypassSceneGate = IsEnvFlagEnabled("SERUM_DEBUG_BYPASS_SCENE_GATE");
   if (g_debugTargetInputCrc != 0 || g_debugTargetFrameId != 0xffffffffu ||
-      g_debugStageHashes || g_debugTraceAllInputs) {
+      g_debugStageHashes || g_debugTraceAllInputs ||
+      g_debugBypassSceneGate) {
     Log("Serum debug tracing enabled: inputCrc=%u frameId=%u stageHashes=%s "
-        "traceAllInputs=%s",
+        "traceAllInputs=%s bypassSceneGate=%s",
         g_debugTargetInputCrc, g_debugTargetFrameId,
         g_debugStageHashes ? "on" : "off",
-        g_debugTraceAllInputs ? "on" : "off");
+        g_debugTraceAllInputs ? "on" : "off",
+        g_debugBypassSceneGate ? "on" : "off");
   }
 }
 
@@ -363,6 +367,28 @@ static uint64_t DebugHashBytesFNV1a64(const void* data, size_t size) {
   for (size_t i = 0; i < size; ++i) {
     hash ^= bytes[i];
     hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+static uint64_t DebugHashFrameRegionFNV1a64(const uint16_t* frame,
+                                           uint32_t stride, uint16_t x,
+                                           uint16_t y, uint16_t width,
+                                           uint16_t height) {
+  if (!frame || width == 0 || height == 0) {
+    return 1469598103934665603ull;
+  }
+  uint64_t hash = 1469598103934665603ull;
+  for (uint16_t row = 0; row < height; ++row) {
+    const uint16_t* src = frame + static_cast<size_t>(y + row) * stride + x;
+    for (uint16_t col = 0; col < width; ++col) {
+      const uint16_t value = src[col];
+      const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&value);
+      hash ^= bytes[0];
+      hash *= 1099511628211ull;
+      hash ^= bytes[1];
+      hash *= 1099511628211ull;
+    }
   }
   return hash;
 }
@@ -523,6 +549,25 @@ static void DebugLogSpriteDetectionWord(uint32_t frameId, uint8_t spriteId,
       "detectIndex=%u word=%u framePos=(%d,%d) area=(%d,%d %dx%d)",
       frameId, g_debugCurrentInputCrc, spriteId, detectionIndex, detectionWord,
       frax, fray, offsx, offsy, detw, deth);
+}
+
+static void DebugLogSpriteRejected(uint32_t frameId, uint8_t spriteId,
+                                   uint8_t spriteSlot, const char* reason,
+                                   uint32_t detectionIndex, short frax,
+                                   short fray, short offsx, short offsy,
+                                   uint32_t detailA = 0,
+                                   uint32_t detailB = 0,
+                                   uint32_t detailC = 0,
+                                   uint32_t detailD = 0) {
+  if (!DebugTraceSpritesForCurrentInput()) {
+    return;
+  }
+  Log("Serum debug sprite rejected: frameId=%u inputCrc=%u spriteId=%u "
+      "slot=%u reason=%s detectIndex=%u framePos=(%d,%d) area=(%d,%d) "
+      "detailA=%u detailB=%u detailC=%u detailD=%u",
+      frameId, g_debugCurrentInputCrc, spriteId, spriteSlot, reason,
+      detectionIndex, frax, fray, offsx, offsy, detailA, detailB, detailC,
+      detailD);
 }
 
 static void DebugLogSpriteAccepted(uint32_t frameId, uint8_t spriteId,
@@ -890,6 +935,17 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(const uint8_t flags) {
   }
 
   g_serumData.BuildPackingSidecarsAndNormalize();
+  {
+    const char *debugSpriteId = std::getenv("SERUM_DEBUG_SPRITE_ID");
+    if (debugSpriteId && debugSpriteId[0] != '\0') {
+      char *endPtr = nullptr;
+      unsigned long parsed = std::strtoul(debugSpriteId, &endPtr, 0);
+      if (endPtr != debugSpriteId && *endPtr == '\0') {
+        g_serumData.DebugLogSpriteDynamicSidecarState(
+            "post-load-prepared", static_cast<uint32_t>(parsed));
+      }
+    }
+  }
 
   // Set requested frame types
   isoriginalrequested = false;
@@ -2554,16 +2610,34 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
             const short deth = static_cast<short>(detMeta.detectHeight);
             // if the detection area starts before the frame (left or top),
             // continue:
-            if ((frax - minxBB < sprx - detx) || (fray - minyBB < spry - dety))
+            if ((frax - minxBB < sprx - detx) ||
+                (fray - minyBB < spry - dety)) {
+              DebugLogSpriteRejected(
+                  quelleframe, qspr, spriteSlot, "bbox-start",
+                  tm - detectStart, frax, fray, 0, 0,
+                  static_cast<uint32_t>(frax - minxBB),
+                  static_cast<uint32_t>(sprx - detx),
+                  static_cast<uint32_t>(fray - minyBB),
+                  static_cast<uint32_t>(spry - dety));
               continue;
+            }
             // position of the detection area in the frame
             int offsx = frax - sprx + detx;
             int offsy = fray - spry + dety;
             // if the detection area extends beyond the bounding box (right or
             // bottom), continue:
             if ((offsx + detw > (int)maxxBB + 1) ||
-                (offsy + deth > (int)maxyBB + 1))
+                (offsy + deth > (int)maxyBB + 1)) {
+              DebugLogSpriteRejected(
+                  quelleframe, qspr, spriteSlot, "bbox-end",
+                  tm - detectStart, frax, fray, static_cast<short>(offsx),
+                  static_cast<short>(offsy),
+                  static_cast<uint32_t>(offsx + detw),
+                  static_cast<uint32_t>((int)maxxBB + 1),
+                  static_cast<uint32_t>(offsy + deth),
+                  static_cast<uint32_t>((int)maxyBB + 1));
               continue;
+            }
             DebugLogSpriteDetectionWord(quelleframe, qspr, tm - detectStart,
                                         detMeta.detectionWord, frax, fray,
                                         static_cast<short>(offsx),
@@ -2577,6 +2651,13 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                                             MAX_SPRITE_HEIGHT +
                                         spriteRow;
               if (rowIndex >= g_serumData.spriteOpaqueRowSegmentStart.size()) {
+                DebugLogSpriteRejected(
+                    quelleframe, qspr, spriteSlot, "row-sidecar-oob",
+                    tm - detectStart, frax, fray, static_cast<short>(offsx),
+                    static_cast<short>(offsy), rowIndex,
+                    static_cast<uint32_t>(
+                        g_serumData.spriteOpaqueRowSegmentStart.size()),
+                    spriteRow, static_cast<uint32_t>(tk));
                 notthere = true;
                 break;
               }
@@ -2587,6 +2668,13 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
               for (uint16_t seg = 0; seg < segCount && !notthere; ++seg) {
                 const uint32_t segIndex = segStartIndex + seg * 2;
                 if (segIndex + 1 >= g_serumData.spriteOpaqueSegments.size()) {
+                  DebugLogSpriteRejected(
+                      quelleframe, qspr, spriteSlot, "segment-sidecar-oob",
+                      tm - detectStart, frax, fray, static_cast<short>(offsx),
+                      static_cast<short>(offsy), segIndex,
+                      static_cast<uint32_t>(
+                          g_serumData.spriteOpaqueSegments.size()),
+                      segStartIndex, segCount);
                   notthere = true;
                   break;
                 }
@@ -2614,7 +2702,16 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                   if (spriteOpaque[spriteOffset] == 0) {
                     continue;
                   }
-                  if (spriteOriginal[spriteOffset] != Frame[frameOffset]) {
+                  const uint8_t expectedValue =
+                      isshapecheck ? static_cast<uint8_t>(spriteOriginal[spriteOffset] > 0)
+                                   : spriteOriginal[spriteOffset];
+                  if (expectedValue != Frame[frameOffset]) {
+                    DebugLogSpriteRejected(
+                        quelleframe, qspr, spriteSlot, "opaque-run-mismatch",
+                        tm - detectStart, frax, fray,
+                        static_cast<short>(offsx), static_cast<short>(offsy),
+                        spriteOffset, frameOffset, expectedValue,
+                        Frame[frameOffset]);
                     notthere = true;
                     break;
                   }
@@ -2660,6 +2757,12 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                                      pfrx[*nspr], pfry[*nspr], pspx[*nspr],
                                      pspy[*nspr], pwid[*nspr], phei[*nspr],
                                      identicalfound);
+              if (identicalfound) {
+                DebugLogSpriteRejected(
+                    quelleframe, qspr, spriteSlot, "duplicate",
+                    tm - detectStart, frax, fray, pfrx[*nspr], pfry[*nspr],
+                    pspx[*nspr], pspy[*nspr], pwid[*nspr], phei[*nspr]);
+              }
               if (!identicalfound) {
                 (*nspr)++;
                 if (*nspr == MAX_SPRITES_PER_FRAME) return true;
@@ -3024,15 +3127,36 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
   uint16_t *pfr, *prot;
   uint16_t* prt;
   uint32_t* cshft;
-  if (!g_serumData.spriteoriginal_opaque.hasData(nosprite) ||
-      !g_serumData.dynaspritemasks_active.hasData(nosprite) ||
-      !g_serumData.dynaspritemasks.hasData(nosprite)) {
+  const bool traceSprite = DebugTraceMatches(g_debugCurrentInputCrc, IDfound);
+  const bool hasOpaque = g_serumData.spriteoriginal_opaque.hasData(nosprite);
+  const bool hasDynaActive =
+      g_serumData.dynaspritemasks_active.hasData(nosprite);
+  const bool hasDyna = g_serumData.dynaspritemasks.hasData(nosprite);
+  const bool hasColor = g_serumData.spritecolored.hasData(nosprite);
+  const bool hasColorExtra = g_serumData.spritecolored_extra.hasData(nosprite);
+  if (!hasOpaque) {
+    if (traceSprite) {
+      Log("Serum debug sprite render skip: frameId=%u inputCrc=%u spriteId=%u "
+          "reason=missing-base-opaque-sidecar",
+          IDfound, g_debugCurrentInputCrc, nosprite);
+    }
     return;
   }
   const uint8_t* spriteOpaque = g_serumData.spriteoriginal_opaque[nosprite];
-  const uint8_t* spriteDyna = g_serumData.dynaspritemasks[nosprite];
+  const uint8_t* spriteDyna = hasDyna ? g_serumData.dynaspritemasks[nosprite]
+                                      : nullptr;
   const uint8_t* spriteDynaActive =
-      g_serumData.dynaspritemasks_active[nosprite];
+      hasDynaActive ? g_serumData.dynaspritemasks_active[nosprite] : nullptr;
+  const bool hasUsableBaseDyna = spriteDyna != nullptr && spriteDynaActive != nullptr;
+  if (traceSprite) {
+    Log("Serum debug sprite render source: frameId=%u inputCrc=%u spriteId=%u "
+        "frame=(%u,%u) sprite=(%u,%u) size=%ux%u hasOpaque=%s hasColor=%s "
+        "hasDyna=%s hasDynaActive=%s hasExtraColor=%s",
+        IDfound, g_debugCurrentInputCrc, nosprite, frx, fry, spx, spy, wid,
+        hei, hasOpaque ? "true" : "false", hasColor ? "true" : "false",
+        hasDyna ? "true" : "false", hasDynaActive ? "true" : "false",
+        hasColorExtra ? "true" : "false");
+  }
   if (((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) &&
        g_serumData.fheight == 32) ||
       ((mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) &&
@@ -3053,7 +3177,15 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
         uint16_t tk = (fry + tj) * g_serumData.fwidth + frx + ti;
         uint32_t tl = (tj + spy) * MAX_SPRITE_WIDTH + ti + spx;
         if (spriteOpaque[tl] > 0) {
-          if (spriteDynaActive[tl] == 0) {
+          if (!hasColor) {
+            if (traceSprite) {
+              Log("Serum debug sprite render skip: frameId=%u inputCrc=%u "
+                  "spriteId=%u reason=missing-base-color",
+                  IDfound, g_debugCurrentInputCrc, nosprite);
+            }
+            return;
+          }
+          if (!hasUsableBaseDyna || spriteDynaActive[tl] == 0) {
             pfr[tk] = g_serumData.spritecolored[nosprite][tl];
             if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
                                 &prot[tk * 2 + 1], false))
@@ -3075,22 +3207,39 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
         }
       }
     }
+    if (traceSprite) {
+      Log("Serum debug sprite render result: frameId=%u inputCrc=%u "
+          "spriteId=%u plane=base rendered=true",
+          IDfound, g_debugCurrentInputCrc, nosprite);
+    }
   }
   if (((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) &&
        g_serumData.fheight_extra == 32) ||
       ((mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) &&
        g_serumData.fheight_extra == 64)) {
-    if (!g_serumData.spritemask_extra_opaque.hasData(nosprite) ||
-        !g_serumData.dynaspritemasks_extra_active.hasData(nosprite) ||
-        !g_serumData.dynaspritemasks_extra.hasData(nosprite)) {
+    const bool hasExtraOpaque =
+        g_serumData.spritemask_extra_opaque.hasData(nosprite);
+    const bool hasExtraDynaActive =
+        g_serumData.dynaspritemasks_extra_active.hasData(nosprite);
+    const bool hasExtraDyna =
+        g_serumData.dynaspritemasks_extra.hasData(nosprite);
+    if (!hasExtraOpaque) {
+      if (traceSprite) {
+        Log("Serum debug sprite render skip: frameId=%u inputCrc=%u "
+            "spriteId=%u reason=missing-extra-opaque-sidecar",
+            IDfound, g_debugCurrentInputCrc, nosprite);
+      }
       return;
     }
     const uint8_t* spriteExtraOpaque =
         g_serumData.spritemask_extra_opaque[nosprite];
     const uint8_t* spriteExtraDyna =
-        g_serumData.dynaspritemasks_extra[nosprite];
+        hasExtraDyna ? g_serumData.dynaspritemasks_extra[nosprite] : nullptr;
     const uint8_t* spriteExtraDynaActive =
-        g_serumData.dynaspritemasks_extra_active[nosprite];
+        hasExtraDynaActive ? g_serumData.dynaspritemasks_extra_active[nosprite]
+                           : nullptr;
+    const bool hasUsableExtraDyna =
+        spriteExtraDyna != nullptr && spriteExtraDynaActive != nullptr;
     uint16_t thei, twid, tfrx, tfry, tspy, tspx;
     if (g_serumData.fheight_extra == 32) {
       pfr = mySerum.frame32;
@@ -3120,7 +3269,16 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
         uint16_t tk = (tfry + tj) * g_serumData.fwidth_extra + tfrx + ti;
         const uint32_t spritePixel = (tj + tspy) * MAX_SPRITE_WIDTH + ti + tspx;
         if (spriteExtraOpaque[spritePixel] > 0) {
-          if (spriteExtraDynaActive[spritePixel] == 0) {
+          if (!hasColorExtra) {
+            if (traceSprite) {
+              Log("Serum debug sprite render skip: frameId=%u inputCrc=%u "
+                  "spriteId=%u reason=missing-extra-color",
+                  IDfound, g_debugCurrentInputCrc, nosprite);
+            }
+            return;
+          }
+          if (!hasUsableExtraDyna ||
+              spriteExtraDynaActive[spritePixel] == 0) {
             pfr[tk] =
                 g_serumData.spritecolored_extra[nosprite]
                                                [(tj + tspy) * MAX_SPRITE_WIDTH +
@@ -3148,6 +3306,11 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
           }
         }
       }
+    }
+    if (traceSprite) {
+      Log("Serum debug sprite render result: frameId=%u inputCrc=%u "
+          "spriteId=%u plane=extra rendered=true",
+          IDfound, g_debugCurrentInputCrc, nosprite);
     }
   }
 }
@@ -3493,11 +3656,21 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(
           !sceneFrameRequested &&
           (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
           !sceneInterruptable) {
-        if (keepTriggersInternal ||
-            mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
-          mySerum.triggerID = 0xffffffff;
-        // Scene is active and not interruptable
-        return IDENTIFY_NO_FRAME;
+        if (DebugTraceMatches(g_debugCurrentInputCrc, lastfound)) {
+          Log("Serum debug v2 gate: inputCrc=%u frameId=%u "
+              "gate=scene-noninterruptable currentFrame=%u sceneFrameCount=%u "
+              "endHoldUntil=%u bypass=%s",
+              g_debugCurrentInputCrc, lastfound, sceneCurrentFrame,
+              sceneFrameCount, sceneEndHoldUntilMs,
+              g_debugBypassSceneGate ? "true" : "false");
+        }
+        if (!g_debugBypassSceneGate) {
+          if (keepTriggersInternal ||
+              mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
+            mySerum.triggerID = 0xffffffff;
+          // Scene is active and not interruptable
+          return IDENTIFY_NO_FRAME;
+        }
       }
 
       // frame identified

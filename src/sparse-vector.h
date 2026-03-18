@@ -728,6 +728,10 @@ class SparseVector {
     }
 
     if (parent == nullptr || parent->hasData(elementId)) {
+      if (memcmp(values, noData.data(), elementSize * sizeof(T)) == 0) {
+        data.erase(elementId);
+        return;
+      }
       if (memcmp(values, noData.data(), elementSize * sizeof(T)) != 0) {
         std::vector<uint8_t> valuePacked;
         const uint8_t *storeBytes = reinterpret_cast<const uint8_t *>(values);

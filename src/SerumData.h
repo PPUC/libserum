@@ -78,6 +78,7 @@ class SerumData {
   void BuildPackingSidecarsAndNormalize();
   void PrepareRuntimeDynamicHotCache();
   void BuildSpriteRuntimeSidecars();
+  void DebugLogSpriteDynamicSidecarState(const char *stage, uint32_t spriteId);
   bool HasSpriteRuntimeSidecars() const;
   void BuildColorRotationLookup();
   bool TryGetColorRotation(uint32_t frameId, uint16_t color, bool isextra,
