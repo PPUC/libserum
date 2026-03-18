@@ -1944,6 +1944,17 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
                 g_serumData.hashcodes[ti][0], lastfound_stream);
           }
           if (first_match || ti != lastfound_stream || mask < 255) {
+            if (DebugTraceMatches(inputCrc, ti)) {
+              Log("Serum debug identify decision: inputCrc=%u frameId=%u "
+                  "reason=%s firstMatch=%s lastfoundStream=%u mask=%u "
+                  "fullCrcBefore=%u",
+                  inputCrc, ti,
+                  first_match ? "first-match"
+                              : (ti != lastfound_stream ? "new-frame-id"
+                                                        : "mask-lt-255"),
+                  first_match ? "true" : "false", lastfound_stream, mask,
+                  lastframe_full_crc);
+            }
             lastfound_stream = ti;
             lastfound = ti;
             lastframe_full_crc = crc32_fast(frame, pixels);
@@ -1953,9 +1964,23 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
 
           uint32_t full_crc = crc32_fast(frame, pixels);
           if (full_crc != lastframe_full_crc) {
+            if (DebugTraceMatches(inputCrc, ti)) {
+              Log("Serum debug identify decision: inputCrc=%u frameId=%u "
+                  "reason=full-crc-diff firstMatch=%s lastfoundStream=%u "
+                  "mask=%u fullCrcBefore=%u fullCrcNow=%u",
+                  inputCrc, ti, first_match ? "true" : "false",
+                  lastfound_stream, mask, lastframe_full_crc, full_crc);
+            }
             lastframe_full_crc = full_crc;
             lastfound = ti;
             return ti;
+          }
+          if (DebugTraceMatches(inputCrc, ti)) {
+            Log("Serum debug identify decision: inputCrc=%u frameId=%u "
+                "reason=same-frame firstMatch=%s lastfoundStream=%u mask=%u "
+                "fullCrc=%u",
+                inputCrc, ti, first_match ? "true" : "false",
+                lastfound_stream, mask, full_crc);
           }
           lastfound = ti;
           return IDENTIFY_SAME_FRAME;
@@ -1983,6 +2008,17 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
             }
             if (Hashc == g_serumData.hashcodes[ti][0]) {
               if (first_match || ti != lastfound_stream || mask < 255) {
+                if (DebugTraceMatches(inputCrc, ti)) {
+                  Log("Serum debug identify decision: inputCrc=%u frameId=%u "
+                      "reason=%s firstMatch=%s lastfoundStream=%u mask=%u "
+                      "fullCrcBefore=%u",
+                      inputCrc, ti,
+                      first_match ? "first-match"
+                                  : (ti != lastfound_stream ? "new-frame-id"
+                                                            : "mask-lt-255"),
+                      first_match ? "true" : "false", lastfound_stream, mask,
+                      lastframe_full_crc);
+                }
                 // Reset_ColorRotations();
                 lastfound_stream = ti;
                 lastfound = ti;
@@ -1993,10 +2029,24 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
 
               uint32_t full_crc = crc32_fast(frame, pixels);
               if (full_crc != lastframe_full_crc) {
+                if (DebugTraceMatches(inputCrc, ti)) {
+                  Log("Serum debug identify decision: inputCrc=%u frameId=%u "
+                      "reason=full-crc-diff firstMatch=%s lastfoundStream=%u "
+                      "mask=%u fullCrcBefore=%u fullCrcNow=%u",
+                      inputCrc, ti, first_match ? "true" : "false",
+                      lastfound_stream, mask, lastframe_full_crc, full_crc);
+                }
                 lastframe_full_crc = full_crc;
                 lastfound = ti;
                 return ti;  // we found the same frame with shape as before, but
                             // the full frame is different
+              }
+              if (DebugTraceMatches(inputCrc, ti)) {
+                Log("Serum debug identify decision: inputCrc=%u frameId=%u "
+                    "reason=same-frame firstMatch=%s lastfoundStream=%u "
+                    "mask=%u fullCrc=%u",
+                    inputCrc, ti, first_match ? "true" : "false",
+                    lastfound_stream, mask, full_crc);
               }
               lastfound = ti;
               return IDENTIFY_SAME_FRAME;  // we found the frame, but it is the
