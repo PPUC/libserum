@@ -301,6 +301,23 @@ static bool DebugTraceAllInputsEnabled() {
   return g_debugTraceAllInputs;
 }
 
+static void DebugLogSceneEvent(const char* event, uint16_t sceneId,
+                               uint16_t frameIndex, uint16_t frameCount,
+                               uint16_t durationPerFrame, uint8_t options,
+                               bool interruptable, bool startImmediately,
+                               uint8_t repeatCount, uint8_t group = 0,
+                               int result = -1) {
+  if (!DebugTraceAllInputsEnabled()) {
+    return;
+  }
+  Log("Serum debug scene event: event=%s sceneId=%u frameIndex=%u "
+      "frameCount=%u duration=%u options=%u interruptable=%s "
+      "startImmediately=%s repeat=%u group=%u result=%d",
+      event ? event : "unknown", sceneId, frameIndex, frameCount,
+      durationPerFrame, options, interruptable ? "true" : "false",
+      startImmediately ? "true" : "false", repeatCount, group, result);
+}
+
 static void DebugLogFrameMetadataIfRequested(uint32_t frameId) {
   InitDebugFrameTracingFromEnv();
   if (g_debugTargetFrameId == 0xffffffffu || frameId != g_debugTargetFrameId ||
@@ -2141,10 +2158,10 @@ static void WarmFrameAssetsForId(uint32_t frameId) {
 
   const uint16_t backgroundId = g_serumData.backgroundIDs[frameId][0];
   if (backgroundId < g_serumData.nbackgrounds) {
-    (void)g_serumData.backgroundmask[backgroundId];
+    (void)g_serumData.backgroundmask[frameId];
     (void)g_serumData.backgroundframes_v2[backgroundId];
     if (g_serumData.isextrabackground[backgroundId][0] > 0) {
-      (void)g_serumData.backgroundmask_extra[backgroundId];
+      (void)g_serumData.backgroundmask_extra[frameId];
       (void)g_serumData.backgroundframes_v2_extra[backgroundId];
     }
   }
@@ -3147,7 +3164,18 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
                                       : nullptr;
   const uint8_t* spriteDynaActive =
       hasDynaActive ? g_serumData.dynaspritemasks_active[nosprite] : nullptr;
-  const bool hasUsableBaseDyna = spriteDyna != nullptr && spriteDynaActive != nullptr;
+  if (hasDyna != hasDynaActive || (hasDyna && spriteDyna == nullptr) ||
+      (hasDynaActive && spriteDynaActive == nullptr)) {
+    if (traceSprite) {
+      Log("Serum debug sprite render skip: frameId=%u inputCrc=%u spriteId=%u "
+          "reason=inconsistent-base-dynamic-sidecars hasDyna=%s "
+          "hasDynaActive=%s ptrDyna=%s ptrDynaActive=%s",
+          IDfound, g_debugCurrentInputCrc, nosprite, hasDyna ? "true" : "false",
+          hasDynaActive ? "true" : "false", spriteDyna ? "true" : "false",
+          spriteDynaActive ? "true" : "false");
+    }
+    return;
+  }
   if (traceSprite) {
     Log("Serum debug sprite render source: frameId=%u inputCrc=%u spriteId=%u "
         "frame=(%u,%u) sprite=(%u,%u) size=%ux%u hasOpaque=%s hasColor=%s "
@@ -3185,7 +3213,7 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
             }
             return;
           }
-          if (!hasUsableBaseDyna || spriteDynaActive[tl] == 0) {
+          if (!hasDynaActive || spriteDynaActive[tl] == 0) {
             pfr[tk] = g_serumData.spritecolored[nosprite][tl];
             if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
                                 &prot[tk * 2 + 1], false))
@@ -3238,8 +3266,21 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
     const uint8_t* spriteExtraDynaActive =
         hasExtraDynaActive ? g_serumData.dynaspritemasks_extra_active[nosprite]
                            : nullptr;
-    const bool hasUsableExtraDyna =
-        spriteExtraDyna != nullptr && spriteExtraDynaActive != nullptr;
+    if (hasExtraDyna != hasExtraDynaActive ||
+        (hasExtraDyna && spriteExtraDyna == nullptr) ||
+        (hasExtraDynaActive && spriteExtraDynaActive == nullptr)) {
+      if (traceSprite) {
+        Log("Serum debug sprite render skip: frameId=%u inputCrc=%u "
+            "spriteId=%u reason=inconsistent-extra-dynamic-sidecars "
+            "hasDyna=%s hasDynaActive=%s ptrDyna=%s ptrDynaActive=%s",
+            IDfound, g_debugCurrentInputCrc, nosprite,
+            hasExtraDyna ? "true" : "false",
+            hasExtraDynaActive ? "true" : "false",
+            spriteExtraDyna ? "true" : "false",
+            spriteExtraDynaActive ? "true" : "false");
+      }
+      return;
+    }
     uint16_t thei, twid, tfrx, tfry, tspy, tspx;
     if (g_serumData.fheight_extra == 32) {
       pfr = mySerum.frame32;
@@ -3277,8 +3318,7 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
             }
             return;
           }
-          if (!hasUsableExtraDyna ||
-              spriteExtraDynaActive[spritePixel] == 0) {
+          if (!hasExtraDynaActive || spriteExtraDynaActive[spritePixel] == 0) {
             pfr[tk] =
                 g_serumData.spritecolored_extra[nosprite]
                                                [(tj + tspy) * MAX_SPRITE_WIDTH +
@@ -3712,6 +3752,11 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(
             g_debugCurrentInputCrc, frameID,
             sceneFrameRequested ? "true" : "false",
             g_serumData.triggerIDs[lastfound][0]);
+      } else if (DebugTraceAllInputsEnabled() && !sceneFrameRequested) {
+        Log("Serum debug trigger candidate: inputCrc=%u frameId=%u triggerId=%u "
+            "lastTriggerId=%u",
+            g_debugCurrentInputCrc, frameID, g_serumData.triggerIDs[lastfound][0],
+            lastTriggerID);
       }
       if (!sceneFrameRequested) {
         PrefetchNextNormalFrameAssets(frameID);
@@ -3745,6 +3790,13 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(
           }
 
           // stop any scene
+          if (sceneFrameCount > 0 || sceneEndHoldUntilMs > 0) {
+            DebugLogSceneEvent("stop-normal-frame", static_cast<uint16_t>(lastTriggerID),
+                               sceneCurrentFrame, sceneFrameCount,
+                               sceneDurationPerFrame, sceneOptionFlags,
+                               sceneInterruptable, sceneStartImmediately,
+                               sceneRepeatCount);
+          }
           sceneFrameCount = 0;
           sceneIsLastBackgroundFrame = false;
           sceneEndHoldUntilMs = 0;
@@ -3759,13 +3811,43 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(
             lastTriggerID = mySerum.triggerID =
                 g_serumData.triggerIDs[lastfound][0];
             lasttriggerTimestamp = now;
+            if (DebugTraceAllInputsEnabled()) {
+              Log("Serum debug trigger commit: inputCrc=%u frameId=%u triggerId=%u",
+                  g_debugCurrentInputCrc, lastfound, lastTriggerID);
+            }
+
+            if (DebugTraceAllInputsEnabled()) {
+              Log("Serum debug trigger scene-gate: triggerId=%u "
+                  "sceneGeneratorActive=%s triggerValid=%s",
+                  lastTriggerID,
+                  (g_serumData.sceneGenerator &&
+                   g_serumData.sceneGenerator->isActive())
+                      ? "true"
+                      : "false",
+                  lastTriggerID < 0xffffffff ? "true" : "false");
+            }
 
             if (g_serumData.sceneGenerator->isActive() &&
                 lastTriggerID < 0xffffffff) {
-              if (g_serumData.sceneGenerator->getSceneInfo(
-                      lastTriggerID, sceneFrameCount, sceneDurationPerFrame,
-                      sceneInterruptable, sceneStartImmediately,
-                      sceneRepeatCount, sceneOptionFlags)) {
+              const bool hasSceneInfo = g_serumData.sceneGenerator->getSceneInfo(
+                  lastTriggerID, sceneFrameCount, sceneDurationPerFrame,
+                  sceneInterruptable, sceneStartImmediately, sceneRepeatCount,
+                  sceneOptionFlags);
+              if (DebugTraceAllInputsEnabled()) {
+                Log("Serum debug trigger scene-info: triggerId=%u found=%s "
+                    "frameCount=%u duration=%u interruptable=%s "
+                    "startImmediately=%s repeat=%u options=%u",
+                    lastTriggerID, hasSceneInfo ? "true" : "false",
+                    sceneFrameCount, sceneDurationPerFrame,
+                    sceneInterruptable ? "true" : "false",
+                    sceneStartImmediately ? "true" : "false",
+                    sceneRepeatCount, sceneOptionFlags);
+              }
+              if (hasSceneInfo) {
+                DebugLogSceneEvent("trigger", static_cast<uint16_t>(lastTriggerID),
+                                   0, sceneFrameCount, sceneDurationPerFrame,
+                                   sceneOptionFlags, sceneInterruptable,
+                                   sceneStartImmediately, sceneRepeatCount);
                 const bool sceneIsBackground =
                     (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
                     FLAG_SCENE_AS_BACKGROUND;
@@ -3799,6 +3881,11 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(
                   g_sceneResumeState.erase(lastTriggerID);
                 }
                 if (sceneStartImmediately) {
+                  DebugLogSceneEvent("start-immediate",
+                                     static_cast<uint16_t>(lastTriggerID), 0,
+                                     sceneFrameCount, sceneDurationPerFrame,
+                                     sceneOptionFlags, sceneInterruptable,
+                                     sceneStartImmediately, sceneRepeatCount);
                   uint32_t sceneRotationResult = Serum_RenderScene();
                   if (sceneRotationResult & FLAG_RETURNED_V2_SCENE)
                     return sceneRotationResult;
@@ -4136,12 +4223,22 @@ uint32_t Serum_RenderScene(void) {
     const uint32_t now = GetMonotonicTimeMs();
     if (sceneEndHoldUntilMs > 0) {
       if (now < sceneEndHoldUntilMs) {
+        DebugLogSceneEvent("end-hold", static_cast<uint16_t>(lastTriggerID),
+                           sceneCurrentFrame, sceneFrameCount,
+                           sceneDurationPerFrame, sceneOptionFlags,
+                           sceneInterruptable, sceneStartImmediately,
+                           sceneRepeatCount);
         mySerum.rotationtimer = sceneEndHoldUntilMs - now;
         return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_SCENE;
       }
 
       // End hold elapsed: finish scene now.
       sceneEndHoldUntilMs = 0;
+      DebugLogSceneEvent("end-hold-finished",
+                         static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame,
+                         sceneFrameCount, sceneDurationPerFrame,
+                         sceneOptionFlags, sceneInterruptable,
+                         sceneStartImmediately, sceneRepeatCount);
       sceneFrameCount = 0;
       mySerum.rotationtimer = 0;
       ForceNormalFrameRefreshAfterSceneEnd();
@@ -4179,12 +4276,15 @@ uint32_t Serum_RenderScene(void) {
       return FLAG_RETURNED_V2_SCENE;
     }
 
+    const bool debugDisableSceneTriplets =
+        IsEnvFlagEnabled("SERUM_DEBUG_DISABLE_SCENE_TRIPLETS");
     bool renderedFromDirectTriplet = false;
     uint8_t currentGroup = 1;
     bool hasGroup = g_serumData.sceneGenerator->updateAndGetCurrentGroup(
         static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame, -1,
         currentGroup);
-    if (hasGroup && !g_serumData.sceneFrameIdByTriplet.empty()) {
+    if (!debugDisableSceneTriplets && hasGroup &&
+        !g_serumData.sceneFrameIdByTriplet.empty()) {
       auto it = g_serumData.sceneFrameIdByTriplet.find(
           MakeSceneTripletKey(static_cast<uint16_t>(lastTriggerID),
                               currentGroup, sceneCurrentFrame));
@@ -4196,17 +4296,36 @@ uint32_t Serum_RenderScene(void) {
         renderedFromDirectTriplet = true;
       }
     }
+    if (DebugTraceAllInputsEnabled()) {
+      Log("Serum debug scene path: sceneId=%u frameIndex=%u group=%u "
+          "disableTriplets=%s usedTriplet=%s tripletCount=%u",
+          static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame, currentGroup,
+          debugDisableSceneTriplets ? "true" : "false",
+          renderedFromDirectTriplet ? "true" : "false",
+          static_cast<uint32_t>(g_serumData.sceneFrameIdByTriplet.size()));
+    }
 
     if (!renderedFromDirectTriplet) {
       uint16_t result = g_serumData.sceneGenerator->generateFrame(
           lastTriggerID, sceneCurrentFrame, sceneFrame,
           hasGroup ? currentGroup : -1);
+      DebugLogSceneEvent("generate", static_cast<uint16_t>(lastTriggerID),
+                         sceneCurrentFrame, sceneFrameCount,
+                         sceneDurationPerFrame, sceneOptionFlags,
+                         sceneInterruptable, sceneStartImmediately,
+                         sceneRepeatCount, currentGroup, result);
       if (result > 0 && result < 0xffff) {
         // frame not ready yet, return the time to wait
         mySerum.rotationtimer = result;
         return mySerum.rotationtimer | FLAG_RETURNED_V2_SCENE;
       }
       if (result != 0xffff) {
+        DebugLogSceneEvent("generate-error",
+                           static_cast<uint16_t>(lastTriggerID),
+                           sceneCurrentFrame, sceneFrameCount,
+                           sceneDurationPerFrame, sceneOptionFlags,
+                           sceneInterruptable, sceneStartImmediately,
+                           sceneRepeatCount, currentGroup, result);
         sceneFrameCount = 0;  // error generating scene frame, stop the scene
         mySerum.rotationtimer = 0;
         ForceNormalFrameRefreshAfterSceneEnd();
@@ -4215,6 +4334,13 @@ uint32_t Serum_RenderScene(void) {
       }
       mySerum.rotationtimer = sceneDurationPerFrame;
       Serum_ColorizeWithMetadatav2(sceneFrame, true);
+    } else {
+      DebugLogSceneEvent("triplet-render",
+                         static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame,
+                         sceneFrameCount, sceneDurationPerFrame,
+                         sceneOptionFlags, sceneInterruptable,
+                         sceneStartImmediately, sceneRepeatCount, currentGroup,
+                         0xffff);
     }
 
     sceneCurrentFrame++;
@@ -4230,6 +4356,11 @@ uint32_t Serum_RenderScene(void) {
     }
 
     if (sceneCurrentFrame >= sceneFrameCount) {
+      DebugLogSceneEvent("scene-finished",
+                         static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame,
+                         sceneFrameCount, sceneDurationPerFrame,
+                         sceneOptionFlags, sceneInterruptable,
+                         sceneStartImmediately, sceneRepeatCount);
       if (sceneEndHoldDurationMs > 0) {
         sceneEndHoldUntilMs = now + sceneEndHoldDurationMs;
         mySerum.rotationtimer = sceneEndHoldDurationMs;
