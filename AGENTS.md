@@ -108,12 +108,15 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
    - If loaded from cROMc v6 and no CSV update in this run: use stored lookup via `InitFrameLookupRuntimeStateFromStoredData()`.
    - Otherwise: rebuild via `BuildFrameLookupVectors()`.
 8. Build/normalize packing sidecars via `BuildPackingSidecarsAndNormalize()`.
-   - The normalization step is idempotent and guarded; repeated calls in the
-     same load/save cycle are no-ops once completed.
+   - This normalization/repair path is for source-data build flows and `v5`
+     compatibility handling.
+   - Direct `v6` cROMc runtime load is expected to consume already-normalized
+     runtime-ready data instead of mutating or repairing it on device.
 9. Build or restore sprite runtime sidecars via `BuildSpriteRuntimeSidecars()`.
-   - For v6 cROMc loads, sidecars are restored from file when present.
-   - For v5 loads (and any missing/corrupt sidecar case), sidecars are rebuilt
-     from loaded sprite vectors at startup.
+   - For direct `v6` cROMc loads, runtime sidecars are expected to be restored
+     from file as final runtime data.
+   - Rebuild-on-load behavior belongs to `v5` compatibility handling and
+     authoring-time rebuild flows, not to the final-device direct `v6` path.
 10. Optional runtime A/B switch for dynamic packed-read overhead:
    - If env `SERUM_DISABLE_DYNAMIC_PACKED_READS` is enabled (`1/true/on/yes`),
      `PrepareRuntimeDynamicHotCache()` predecodes dynamic vectors
@@ -129,6 +132,19 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
 Important:
 - `BuildFrameLookupVectors()` must run after final scene data is known for this load cycle.
 - CSV parsing after loading can invalidate stored scene lookup data and requires rebuild.
+- Design policy:
+  - `v5` backward-compatibility logic must remain scoped to `v5` loads.
+  - `pup.csv`-driven rebuild/update logic is an authoring-time path and is not
+    the target for memory-sensitive final-device runtime behavior.
+  - Direct `v6` runtime load is expected to trust the stored runtime-ready data;
+    do not add safety nets, compatibility shims, or repair logic for unreleased
+    `v6` snapshot-to-snapshot compatibility on that path.
+  - If a direct `v6` runtime load still needs mutation/repair to work, that is
+    a generation/save contract bug and should be fixed at `cROMc` creation time
+    rather than masked in the final-device load path.
+  - The final-device direct `v6` load path must not run
+    `BuildPackingSidecarsAndNormalize()` or rebuild missing sprite runtime
+    sidecars on load.
 
 ## Frame identification
 Main function: `Identify_Frame(uint8_t* frame, bool sceneFrameRequested)`.
@@ -261,8 +277,9 @@ Stored in v6:
 Backward compatibility:
 - v5 files are loadable.
 - v5 sparse vectors are deserialized with legacy sparse-vector layout and converted to packed representation after load.
-- For v5 loads, scene lookup vectors are rebuilt at startup.
-- For v6 loads, stored lookup vectors are reused unless scene data changed in this load cycle (for example CSV update), in which case lookup vectors are rebuilt.
+- For v5 loads, scene lookup vectors and other derived runtime sidecars may be rebuilt at startup.
+- For direct `v6` loads, stored lookup vectors and runtime sidecars are expected to be consumed as persisted runtime-ready data.
+- A `pup.csv` update in the same authoring-time load cycle may invalidate persisted scene lookup data and requires rebuild before re-save.
 - Direct scene-triplet preprocessing is only executed for v6.
 - v6 scene-data deserialization validates block magic and count before
   allocation.
@@ -270,6 +287,13 @@ Backward compatibility:
 v6 snapshot policy:
 - Compatibility between unreleased v6 development snapshots is not required.
 - Compatibility to released v5 remains required.
+- Therefore:
+  - if `v6` data needs new runtime-ready fields or stricter invariants, update
+    the `v6` generation/load contract directly rather than adding fallback logic
+    for older `v6` development snapshots.
+  - do not introduce final-device runtime safety nets, repair paths, or
+    compatibility shims merely to keep older `v6` development snapshots
+    loading.
 
 ## Logging
 - Central callback configured by `Serum_SetLogCallback`.

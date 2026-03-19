@@ -1023,7 +1023,6 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(const uint8_t flags) {
     return NULL;
   }
 
-  g_serumData.BuildPackingSidecarsAndNormalize();
   {
     const char *debugSpriteId = std::getenv("SERUM_DEBUG_SPRITE_ID");
     if (debugSpriteId && debugSpriteId[0] != '\0') {
@@ -1843,7 +1842,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     if (g_serumData.colorRotationLookupByFrameAndColor.empty()) {
       g_serumData.BuildColorRotationLookup();
     }
-    if (!g_serumData.HasSpriteRuntimeSidecars()) {
+    if (!g_serumData.HasSpriteRuntimeSidecars() &&
+        (!loadedFromConcentrate || g_serumData.concentrateFileVersion < 6)) {
       g_serumData.BuildSpriteRuntimeSidecars();
     }
     if (g_disableDynamicPackedReads) {
