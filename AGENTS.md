@@ -174,11 +174,12 @@ Behavior:
 - Scene requests use signature lookup in `sceneFramesBySignature` for the current `(mask,shape,hash)`.
 - Scene rendering can bypass generic scene identification when a direct triplet
   entry exists in `sceneFrameIdByTriplet`.
-- During scene playback, direct-triplet mode still uses
-  `SceneGenerator::generateFrame(...)` for normal timing/group progression and
-  to produce the current scene marker buffer, but it bypasses
-  `Identify_Frame()` by supplying the precomputed `sceneFrameIdByTriplet`
-  frame ID directly to the internal colorizer.
+- During scene playback, direct-triplet mode uses libserum-owned timing
+  (`sceneDurationPerFrame` plus a runtime next-frame timestamp) together with
+  `SceneGenerator::updateAndGetCurrentGroup(...)`, and bypasses both
+  `SceneGenerator::generateFrame(...)` and `Identify_Frame()` by supplying the
+  precomputed `sceneFrameIdByTriplet` frame ID directly to the internal
+  colorizer.
 - Legacy same-frame behavior (`IDENTIFY_SAME_FRAME`) is preserved with full-frame CRC check.
 
 Return values:
@@ -208,6 +209,9 @@ How it works:
    - generate each `(sceneId,group,frameIndex)` scene marker frame
    - identify it once
    - persist mapping in `sceneFrameIdByTriplet`.
+   - Runtime playback then combines this triplet lookup with trigger-provided
+     `sceneDurationPerFrame`; it does not regenerate marker frames on each
+     scene tick.
 6. Initialize `lastfound_scene` / `lastfound_normal` from first available IDs.
 
 Log line:

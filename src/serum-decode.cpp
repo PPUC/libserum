@@ -136,6 +136,7 @@ uint8_t sceneRepeatCount = 0;
 uint8_t sceneOptionFlags = 0;
 uint32_t sceneEndHoldUntilMs = 0;
 uint32_t sceneEndHoldDurationMs = 0;
+uint32_t sceneNextFrameAtMs = 0;
 uint8_t sceneFrame[256 * 64] = {0};
 uint8_t lastFrame[256 * 64] = {0};
 uint32_t lastFrameId = 0;  // last frame ID identified
@@ -871,6 +872,7 @@ void Serum_free(void) {
   first_match_scene = true;
   sceneEndHoldUntilMs = 0;
   sceneEndHoldDurationMs = 0;
+  sceneNextFrameAtMs = 0;
   monochromeMode = false;
   monochromePaletteMode = false;
   monochromePaletteV2Length = 0;
@@ -3826,6 +3828,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
           sceneIsLastBackgroundFrame = false;
           sceneEndHoldUntilMs = 0;
           sceneEndHoldDurationMs = 0;
+          sceneNextFrameAtMs = 0;
           mySerum.rotationtimer = 0;
 
           // lastfound is set by Identify_Frame, check if we have a new PUP
@@ -4273,6 +4276,7 @@ uint32_t Serum_RenderScene(void) {
 
       // End hold elapsed: finish scene now.
       sceneEndHoldUntilMs = 0;
+      sceneNextFrameAtMs = 0;
       DebugLogSceneEvent(
           "end-hold-finished", static_cast<uint16_t>(lastTriggerID),
           sceneCurrentFrame, sceneFrameCount, sceneDurationPerFrame,
@@ -4326,30 +4330,20 @@ uint32_t Serum_RenderScene(void) {
                               currentGroup, sceneCurrentFrame));
       if (it != g_serumData.sceneFrameIdByTriplet.end() &&
           it->second < g_serumData.nframes) {
-        uint16_t result = g_serumData.sceneGenerator->generateFrame(
-            lastTriggerID, sceneCurrentFrame, sceneFrame, currentGroup);
-        DebugLogSceneEvent("generate", static_cast<uint16_t>(lastTriggerID),
-                           sceneCurrentFrame, sceneFrameCount,
-                           sceneDurationPerFrame, sceneOptionFlags,
-                           sceneInterruptable, sceneStartImmediately,
-                           sceneRepeatCount, currentGroup, result);
-        if (result > 0 && result < 0xffff) {
-          mySerum.rotationtimer = result;
+        if (sceneNextFrameAtMs > now) {
+          const uint16_t waitMs =
+              static_cast<uint16_t>(sceneNextFrameAtMs - now);
+          DebugLogSceneEvent("triplet-wait",
+                             static_cast<uint16_t>(lastTriggerID),
+                             sceneCurrentFrame, sceneFrameCount,
+                             sceneDurationPerFrame, sceneOptionFlags,
+                             sceneInterruptable, sceneStartImmediately,
+                             sceneRepeatCount, currentGroup, waitMs);
+          mySerum.rotationtimer = waitMs;
           return mySerum.rotationtimer | FLAG_RETURNED_V2_SCENE;
         }
-        if (result != 0xffff) {
-          DebugLogSceneEvent(
-              "generate-error", static_cast<uint16_t>(lastTriggerID),
-              sceneCurrentFrame, sceneFrameCount, sceneDurationPerFrame,
-              sceneOptionFlags, sceneInterruptable, sceneStartImmediately,
-              sceneRepeatCount, currentGroup, result);
-          sceneFrameCount = 0;  // error generating scene frame, stop the scene
-          mySerum.rotationtimer = 0;
-          ForceNormalFrameRefreshAfterSceneEnd();
-          return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_ROTATED32 |
-                 FLAG_RETURNED_V2_ROTATED64 | FLAG_RETURNED_V2_SCENE;
-        }
         mySerum.rotationtimer = sceneDurationPerFrame;
+        sceneNextFrameAtMs = now + sceneDurationPerFrame;
         Serum_ColorizeWithMetadatav2Internal(sceneFrame, true, it->second);
         renderedFromDirectTriplet = true;
       }
@@ -4383,11 +4377,13 @@ uint32_t Serum_RenderScene(void) {
             sceneRepeatCount, currentGroup, result);
         sceneFrameCount = 0;  // error generating scene frame, stop the scene
         mySerum.rotationtimer = 0;
+        sceneNextFrameAtMs = 0;
         ForceNormalFrameRefreshAfterSceneEnd();
         return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_ROTATED32 |
                FLAG_RETURNED_V2_ROTATED64 | FLAG_RETURNED_V2_SCENE;
       }
       mySerum.rotationtimer = sceneDurationPerFrame;
+      sceneNextFrameAtMs = now + sceneDurationPerFrame;
       Serum_ColorizeWithMetadatav2(sceneFrame, true);
     } else {
       DebugLogSceneEvent("triplet-render", static_cast<uint16_t>(lastTriggerID),
@@ -4423,6 +4419,7 @@ uint32_t Serum_RenderScene(void) {
 
       sceneFrameCount = 0;  // scene ended
       mySerum.rotationtimer = 0;
+      sceneNextFrameAtMs = 0;
       ForceNormalFrameRefreshAfterSceneEnd();
 
       switch (sceneOptionFlags) {
@@ -4686,6 +4683,7 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
   ConfigureSceneEndHold(sceneId, sceneInterruptable, sceneOptionFlags);
   sceneIsLastBackgroundFrame = false;
   sceneCurrentFrame = 0;
+  sceneNextFrameAtMs = 0;
 
   if ((sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
       FLAG_SCENE_RESUME_IF_RETRIGGERED) {
