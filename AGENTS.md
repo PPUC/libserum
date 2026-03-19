@@ -174,9 +174,9 @@ Behavior:
 - Scene requests use signature lookup in `sceneFramesBySignature` for the current `(mask,shape,hash)`.
 - Scene rendering can bypass generic scene identification when a direct triplet
   entry exists in `sceneFrameIdByTriplet`.
-- During scene playback, direct-triplet mode uses lightweight group progression
-  (`SceneGenerator::updateAndGetCurrentGroup`) and does not call
-  `generateFrame(...)` per tick unless fallback is needed.
+- Direct scene-triplet preprocessing remains persisted in `sceneFrameIdByTriplet`,
+  but runtime playback currently uses the legacy `generateFrame(...)` path for
+  each scene tick.
 - Legacy same-frame behavior (`IDENTIFY_SAME_FRAME`) is preserved with full-frame CRC check.
 
 Return values:
