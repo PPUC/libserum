@@ -3,6 +3,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: write
+
 defaults:
   run:
     shell: bash
@@ -10,7 +13,7 @@ defaults:
 jobs:
   version:
     name: Detect version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       serumversion: ${{ steps.version.outputs.serumversion }}
@@ -47,170 +50,252 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            platform: win
-            arch: x64
-          - os: windows-latest
-            platform: win
-            arch: x86
-          - os: macos-latest
-            platform: macos
-            arch: arm64
-          - os: macos-latest
-            platform: macos
-            arch: x64
-          - os: ubuntu-latest
-            platform: linux
-            arch: x64
-          - os: ubuntu-latest
-            platform: linux
-            arch: aarch64
-          - os: ubuntu-latest
-            platform: android
-            arch: arm64-v8a
-          - os: macos-latest
-            platform: ios
-            arch: arm64
-          - os: macos-latest
-            platform: ios-simulator
-            arch: arm64
-          - os: macos-latest
-            platform: tvos
-            arch: arm64
+          - { os: windows-2025, platform: win, arch: x64 }
+          - { os: windows-2025, platform: win, arch: x86 }
+          - { os: windows-2025, platform: win-mingw, arch: x64 }
+          - { os: macos-15, platform: macos, arch: arm64 }
+          - { os: macos-15, platform: macos, arch: x64 }
+          - { os: ubuntu-24.04, platform: linux, arch: x64 }
+          - { os: ubuntu-24.04-arm, platform: linux, arch: aarch64 }
+          - { os: ubuntu-24.04, platform: android, arch: arm64-v8a }
+          - { os: macos-15, platform: ios, arch: arm64 }
+          - { os: macos-15, platform: ios-simulator, arch: arm64 }
+          - { os: macos-15, platform: tvos, arch: arm64 }
     steps:
       - uses: actions/checkout@v6
-      - if: (!(matrix.platform == 'linux' && matrix.arch == 'aarch64'))
-        name: Build libserum-${{ matrix.platform }}-${{ matrix.arch }}
+      #
+      # install dependencies
+      #
+      - if: (matrix.platform == 'win')
+        uses: microsoft/setup-msbuild@v2
+      - if: (matrix.platform == 'win-mingw')
         run: |
-          if [[ "${{ matrix.platform }}" == "win" ]]; then
-             if [[ "${{ matrix.arch }}" == "x86" ]]; then
-                cmake -G "Visual Studio 17 2022" -A Win32 -DPLATFORM=${{ matrix.platform }} -DARCH=${{ matrix.arch }} -B build
-             else
-                cmake -G "Visual Studio 17 2022" -DPLATFORM=${{ matrix.platform }} -DARCH=${{ matrix.arch }} -B build
-             fi
-             cmake --build build --config Release
+          /c/msys64/usr/bin/bash.exe -l -c "pacman -S --noconfirm \
+            mingw-w64-ucrt-x86_64-gcc \
+            mingw-w64-ucrt-x86_64-libwinpthread \
+            mingw-w64-ucrt-x86_64-cmake"
+      #
+      # build (win)
+      #
+      - if: (matrix.platform == 'win')
+        name: Build (win)
+        run: |
+          if [[ "${{ matrix.arch }}" == "x64" ]]; then
+            cmake \
+              -G "Visual Studio 17 2022" \
+              -DPLATFORM=${{ matrix.platform }} \
+              -DARCH=${{ matrix.arch }} \
+              -B build
           else
-             if [[ "$(uname)" == "Darwin" ]]; then
-                NUM_PROCS=$(sysctl -n hw.ncpu)
-             else
-                NUM_PROCS=$(nproc)
-             fi
-             cmake -DCMAKE_BUILD_TYPE=Release -DPLATFORM=${{ matrix.platform }} -DARCH=${{ matrix.arch }} -B build
-             cmake --build build -- -j${NUM_PROCS}
+            cmake \
+              -G "Visual Studio 17 2022" \
+              -A Win32 \
+              -DPLATFORM=${{ matrix.platform }} \
+              -DARCH=${{ matrix.arch }} \
+              -B build
           fi
-      - if: (matrix.platform == 'linux' && matrix.arch == 'aarch64')
-        name: Build libserum-${{ matrix.platform }}-${{ matrix.arch }} (arm runner)
-        uses: pguyot/arm-runner-action@v2
-        with:
-          base_image: raspios_lite_arm64:latest
-          image_additional_mb: 4096
-          cpu: cortex-a53
-          cpu_info: cpuinfo/raspberrypi_zero2_w_arm64
-          bind_mount_repository: true
-          commands: |
-            apt-get update -y --allow-releaseinfo-change
-            apt-get install --no-install-recommends -y pkg-config cmake
-            NUM_PROCS=$(nproc)
-            cmake -DCMAKE_BUILD_TYPE=Release -DPLATFORM=${{ matrix.platform }} -DARCH=${{ matrix.arch }} -B build
-            cmake --build build -- -j${NUM_PROCS}
-      - name: Prepare artifacts
-        id: artifacts
+          cmake --build build --config Release
+      #
+      # build (win-mingw)
+      #
+      - if: (matrix.platform == 'win-mingw')
+        name: Build (win-mingw)
+        run: |
+          CURRENT_DIR="$(pwd)"
+          MSYSTEM=UCRT64 /c/msys64/usr/bin/bash.exe -l -c "
+            cd \"${CURRENT_DIR}\" &&
+            cmake \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DPLATFORM=${{ matrix.platform }} \
+              -DARCH=${{ matrix.arch }} \
+              -B build &&
+            cmake --build build -- -j\$(nproc)
+          "
+      #
+      # build (macos)
+      #
+      - if: (matrix.platform == 'macos')
+        name: Build (macos)
+        run: |
+          cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPLATFORM=${{ matrix.platform }} \
+            -DARCH=${{ matrix.arch }} \
+            -B build
+          cmake --build build -- -j$(sysctl -n hw.ncpu)
+      #
+      # build (linux)
+      #
+      - if: (matrix.platform == 'linux')
+        name: Build (linux)
+        run: |
+          cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPLATFORM=${{ matrix.platform }} \
+            -DARCH=${{ matrix.arch }} \
+            -B build
+          cmake --build build -- -j$(nproc)
+      #
+      # build (ios/tvos)
+      #
+      - if: (matrix.platform == 'ios' || matrix.platform == 'ios-simulator' || matrix.platform == 'tvos')
+        name: Build (ios/tvos)
+        run: |
+          if [[ "${{ matrix.platform }}" == "tvos" ]]; then
+            cmake \
+              -DPLATFORM=${{ matrix.platform }} \
+              -DARCH=${{ matrix.arch }} \
+              -DBUILD_SHARED=OFF \
+              -DCMAKE_BUILD_TYPE=Release \
+              -B build
+          else
+            cmake \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DPLATFORM=${{ matrix.platform }} \
+              -DARCH=${{ matrix.arch }} \
+              -B build
+          fi
+          cmake --build build -- -j$(sysctl -n hw.ncpu)
+      #
+      # build (android)
+      #
+      - if: (matrix.platform == 'android')
+        name: Build (android)
+        run: |
+          cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPLATFORM=${{ matrix.platform }} \
+            -DARCH=${{ matrix.arch }} \
+            -B build
+          cmake --build build -- -j$(nproc)
+      #
+      # prepare artifacts
+      #
+      - if: (matrix.platform == 'win')
+        name: Prepare artifacts (win)
         run: |
           mkdir tmp
-          if [[ "${{ matrix.platform }}" == "win" ]]; then
-             ARTIFACT_PATH="tmp"
-             if [[ "${{ matrix.arch }}" == "x86" ]]; then
-                cp build/Release/serum.lib tmp
-                cp build/Release/serum.dll tmp
-             else
-                cp build/Release/serum64.lib tmp
-                cp build/Release/serum64.dll tmp
-             fi
-             cp build/Release/serum_static.lib tmp
-             cp build/Release/serum_test_s.exe tmp
-             cp build/Release/serum_test.exe tmp
-          else
-            ARTIFACT_PATH="libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz"
-            if [[ "${{ matrix.platform }}" == "macos" ]]; then
-               cp build/libserum.a tmp
-               cp build/libserum.*.dylib tmp
-               cp build/serum_test_s tmp
-               cp build/serum_test tmp
-            elif [[ "${{ matrix.platform }}" == "linux" ]]; then
-               cp build/libserum.a tmp
-               cp build/libserum.so.* tmp
-               cp build/serum_test_s tmp
-               cp build/serum_test tmp
-            elif [[ "${{ matrix.platform }}" == "ios" || "${{ matrix.platform }}" == "ios-simulator" || "${{ matrix.platform }}" == "tvos" ]]; then
-               cp build/libserum.a tmp
-               cp build/libserum.*.dylib tmp
-            elif [[ "${{ matrix.platform }}" == "android" ]]; then
-               cp build/libserum.a tmp
-               cp build/libserum.so tmp
-            fi
-            cd tmp
-            tar -czvf ../${ARTIFACT_PATH} *
-          fi
-          echo "artifact_path=${ARTIFACT_PATH}" >> $GITHUB_OUTPUT
-      - name: Upload artifacts
+          cp build/Release/*.lib tmp/
+          cp build/Release/*.dll tmp/
+          cp build/Release/*.exe tmp/
+          cd tmp && 7z a -r ../libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}.zip *
+      - if: (matrix.platform == 'win-mingw')
+        name: Prepare artifacts (win-mingw)
+        run: |
+          mkdir tmp
+          cp build/*.dll tmp/
+          cp build/*.dll.a tmp/
+          cp build/serum_static.a tmp/
+          cp build/*.exe tmp/
+          UCRT64_BIN="/c/msys64/ucrt64/bin"
+          cp "${UCRT64_BIN}/libgcc_s_seh-1.dll" tmp/
+          cp "${UCRT64_BIN}/libstdc++-6.dll" tmp/
+          cd tmp && 7z a -r ../libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}.zip *
+      - if: (matrix.platform == 'macos')
+        name: Prepare artifacts (macos)
+        run: |
+          mkdir tmp
+          cp build/libserum.a tmp/
+          cp -a build/*.dylib tmp/
+          cp build/serum_test_s tmp/
+          cp build/serum_test tmp/
+          cd tmp && tar -czvf ../libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz *
+      - if: (matrix.platform == 'linux')
+        name: Prepare artifacts (linux)
+        run: |
+          mkdir tmp
+          cp build/libserum.a tmp/
+          cp -a build/*.so tmp/
+          cp -a build/*.so.* tmp/
+          cp build/serum_test_s tmp/
+          cp build/serum_test tmp/
+          cd tmp && tar -czvf ../libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz *
+      - if: (matrix.platform == 'ios' || matrix.platform == 'ios-simulator')
+        name: Prepare artifacts (ios)
+        run: |
+          mkdir tmp
+          cp build/libserum.a tmp/
+          cp -a build/*.dylib tmp/
+          cd tmp && tar -czvf ../libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz *
+      - if: (matrix.platform == 'tvos')
+        name: Prepare artifacts (tvos)
+        run: |
+          mkdir tmp
+          cp build/libserum.a tmp/
+          cd tmp && tar -czvf ../libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz *
+      - if: (matrix.platform == 'android')
+        name: Prepare artifacts (android)
+        run: |
+          mkdir tmp
+          cp build/libserum.a tmp/
+          cp build/libserum.so tmp/
+          cd tmp && tar -czvf ../libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz *
+      #
+      # upload artifacts
+      #
+      - if: (matrix.platform == 'win' || matrix.platform == 'win-mingw')
         uses: actions/upload-artifact@v7
         with:
-          name: libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}
-          path: ${{ steps.artifacts.outputs.artifact_path }}
+          name: libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}.zip
+          path: libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}.zip
+          archive: false
+      - if: (matrix.platform != 'win' && matrix.platform != 'win-mingw')
+        uses: actions/upload-artifact@v7
+        with:
+          name: libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz
+          path: libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz
+          archive: false
 
   post-build:
-    runs-on: macos-latest
+    runs-on: macos-15
     needs: [ version, build ]
     name: Build libserum-macos
     steps:
       - uses: actions/download-artifact@v8
-      - name: Unpack artifacts
-        run: |
-          cd libserum-${{ needs.version.outputs.tag }}-macos-x64
-          tar -xzvf libserum-${{ needs.version.outputs.tag }}-macos-x64.tar.gz
-          cd ..
-          cd libserum-${{ needs.version.outputs.tag }}-macos-arm64
-          tar -xzvf libserum-${{ needs.version.outputs.tag }}-macos-arm64.tar.gz
+        with:
+          name: libserum-${{ needs.version.outputs.tag }}-macos-x64.tar.gz
+          skip-decompress: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: libserum-${{ needs.version.outputs.tag }}-macos-arm64.tar.gz
+          skip-decompress: true
       - name: Combine macos architectures
         run: |
+          mkdir macos-x64 macos-arm64
+          tar -xzvf libserum-${{ needs.version.outputs.tag }}-macos-x64.tar.gz -C macos-x64
+          tar -xzvf libserum-${{ needs.version.outputs.tag }}-macos-arm64.tar.gz -C macos-arm64
           mkdir tmp
-          lipo -create -output tmp/libserum-${{ needs.version.outputs.tag }}.dylib \
-             libserum-${{ needs.version.outputs.tag }}-macos-arm64/libserum.${{ needs.version.outputs.serumversion }}.dylib \
-             libserum-${{ needs.version.outputs.tag }}-macos-x64/libserum.${{ needs.version.outputs.serumversion }}.dylib
+          find macos-arm64 -name "*.dylib" | while read -r file; do
+            if [ -L "$file" ]; then
+              cp -a "$file" "tmp/"
+            elif [ -f "$file" ]; then
+              filename=$(basename "$file")
+              lipo -create -output "tmp/$filename" \
+                "macos-arm64/$filename" \
+                "macos-x64/$filename"
+            fi
+          done
           lipo -create -output tmp/serum_test \
-             libserum-${{ needs.version.outputs.tag }}-macos-arm64/serum_test \
-             libserum-${{ needs.version.outputs.tag }}-macos-x64/serum_test
+            macos-arm64/serum_test \
+            macos-x64/serum_test
           lipo -create -output tmp/serum_test_s \
-             libserum-${{ needs.version.outputs.tag }}-macos-arm64/serum_test_s \
-             libserum-${{ needs.version.outputs.tag }}-macos-x64/serum_test_s
-      - name: Prepare artifacts
-        run: |
-          cd tmp
-          tar -czvf ../libserum-${{ needs.version.outputs.tag }}-macos.tar.gz *
+            macos-arm64/serum_test_s \
+            macos-x64/serum_test_s
+          cd tmp && tar -czvf ../libserum-${{ needs.version.outputs.tag }}-macos.tar.gz * && cd ..
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: libserum-${{ needs.version.outputs.tag }}-macos
+          name: libserum-${{ needs.version.outputs.tag }}-macos.tar.gz
           path: libserum-${{ needs.version.outputs.tag }}-macos.tar.gz
-      - name: Package
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          zip -r libserum-${{ needs.version.outputs.tag }}-win-x64.zip libserum-${{ needs.version.outputs.tag }}-win-x64
-          zip -r libserum-${{ needs.version.outputs.tag }}-win-x86.zip libserum-${{ needs.version.outputs.tag }}-win-x86
+          archive: false
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/download-artifact@v8
+        with:
+          path: release
+          skip-decompress: true
       - name: Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           draft: true
-          files: |
-            libserum-${{ needs.version.outputs.tag }}-win-x64.zip
-            libserum-${{ needs.version.outputs.tag }}-win-x86.zip
-            libserum-${{ needs.version.outputs.tag }}-macos-arm64/libserum-${{ needs.version.outputs.tag }}-macos-arm64.tar.gz
-            libserum-${{ needs.version.outputs.tag }}-macos-x64/libserum-${{ needs.version.outputs.tag }}-macos-x64.tar.gz
-            libserum-${{ needs.version.outputs.tag }}-macos.tar.gz
-            libserum-${{ needs.version.outputs.tag }}-linux-x64/libserum-${{ needs.version.outputs.tag }}-linux-x64.tar.gz
-            libserum-${{ needs.version.outputs.tag }}-linux-aarch64/libserum-${{ needs.version.outputs.tag }}-linux-aarch64.tar.gz
-            libserum-${{ needs.version.outputs.tag }}-ios-arm64/libserum-${{ needs.version.outputs.tag }}-ios-arm64.tar.gz
-            libserum-${{ needs.version.outputs.tag }}-ios-simulator-arm64/libserum-${{ needs.version.outputs.tag }}-ios-simulator-arm64.tar.gz
-            libserum-${{ needs.version.outputs.tag }}-tvos-arm64/libserum-${{ needs.version.outputs.tag }}-tvos-arm64.tar.gz
-            libserum-${{ needs.version.outputs.tag }}-android-arm64-v8a/libserum-${{ needs.version.outputs.tag }}-android-arm64-v8a.tar.gz
+          files: release/**/*
