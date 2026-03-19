@@ -4327,17 +4327,17 @@ uint32_t Serum_RenderScene(void) {
       if (it != g_serumData.sceneFrameIdByTriplet.end() &&
           it->second < g_serumData.nframes) {
         uint16_t result = g_serumData.sceneGenerator->generateFrame(
-            lastTriggerID, sceneCurrentFrame, sceneFrame, currentGroup, true);
+            lastTriggerID, sceneCurrentFrame, sceneFrame, currentGroup);
         DebugLogSceneEvent("generate", static_cast<uint16_t>(lastTriggerID),
                            sceneCurrentFrame, sceneFrameCount,
                            sceneDurationPerFrame, sceneOptionFlags,
                            sceneInterruptable, sceneStartImmediately,
                            sceneRepeatCount, currentGroup, result);
-        if (result == 0xffff) {
-          mySerum.rotationtimer = sceneDurationPerFrame;
-          Serum_ColorizeWithMetadatav2Internal(sceneFrame, true, it->second);
-          renderedFromDirectTriplet = true;
-        } else {
+        if (result > 0 && result < 0xffff) {
+          mySerum.rotationtimer = result;
+          return mySerum.rotationtimer | FLAG_RETURNED_V2_SCENE;
+        }
+        if (result != 0xffff) {
           DebugLogSceneEvent(
               "generate-error", static_cast<uint16_t>(lastTriggerID),
               sceneCurrentFrame, sceneFrameCount, sceneDurationPerFrame,
@@ -4349,6 +4349,9 @@ uint32_t Serum_RenderScene(void) {
           return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_ROTATED32 |
                  FLAG_RETURNED_V2_ROTATED64 | FLAG_RETURNED_V2_SCENE;
         }
+        mySerum.rotationtimer = sceneDurationPerFrame;
+        Serum_ColorizeWithMetadatav2Internal(sceneFrame, true, it->second);
+        renderedFromDirectTriplet = true;
       }
     }
     if (DebugSceneVerboseEnabled()) {
@@ -4358,7 +4361,6 @@ uint32_t Serum_RenderScene(void) {
           renderedFromDirectTriplet ? "true" : "false",
           static_cast<uint32_t>(g_serumData.sceneFrameIdByTriplet.size()));
     }
-
     if (!renderedFromDirectTriplet) {
       uint16_t result = g_serumData.sceneGenerator->generateFrame(
           lastTriggerID, sceneCurrentFrame, sceneFrame,

@@ -174,10 +174,11 @@ Behavior:
 - Scene requests use signature lookup in `sceneFramesBySignature` for the current `(mask,shape,hash)`.
 - Scene rendering can bypass generic scene identification when a direct triplet
   entry exists in `sceneFrameIdByTriplet`.
-- During scene playback, direct-triplet mode still generates the scene marker
-  frame via `generateFrame(..., disableTimer=true)` so the runtime sees the same
-  scene marker buffer as the legacy path, but it bypasses `Identify_Frame()`
-  by supplying the precomputed `sceneFrameIdByTriplet` frame ID directly.
+- During scene playback, direct-triplet mode still uses
+  `SceneGenerator::generateFrame(...)` for normal timing/group progression and
+  to produce the current scene marker buffer, but it bypasses
+  `Identify_Frame()` by supplying the precomputed `sceneFrameIdByTriplet`
+  frame ID directly to the internal colorizer.
 - Legacy same-frame behavior (`IDENTIFY_SAME_FRAME`) is preserved with full-frame CRC check.
 
 Return values:
