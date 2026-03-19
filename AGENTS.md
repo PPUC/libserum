@@ -275,10 +275,21 @@ v6 snapshot policy:
 - Central callback configured by `Serum_SetLogCallback`.
 - `serum-decode.cpp` and `SceneGenerator.cpp` both use callback-based `Log(...)`.
 - Missing-file logs from `find_case_insensitive_file(...)` use normalized path joining.
+- Optional runtime debug tracing is env-gated and split by verbosity:
+  - `SERUM_DEBUG_TRACE_INPUTS=1` enables high-level lifecycle logs (input,
+    trigger, scene-info).
+  - `SERUM_DEBUG_IDENTIFY_VERBOSE=1` enables per-candidate identification logs.
+  - `SERUM_DEBUG_SPRITE_VERBOSE=1` enables sprite candidate/detection/rejection
+    logs.
+  - `SERUM_DEBUG_SCENE_VERBOSE=1` enables scene-path and scene-event logs.
+  - `SERUM_DEBUG_INPUT_CRC`, `SERUM_DEBUG_FRAME_ID`, and
+    `SERUM_DEBUG_STAGE_HASHES=1` remain available as output filters and
+    expensive hash tracing controls.
 - Optional runtime profiling:
   - If env `SERUM_PROFILE_DYNAMIC_HOTPATHS` is enabled (`1/true/on/yes`),
     periodic average timings for `Colorize_Framev2` and `Colorize_Spritev2`
-    hot paths are logged.
+    hot paths are logged, along with total average frame render time and
+    current process RSS memory usage.
   - If env `SERUM_PROFILE_SPARSE_VECTORS=1`, sparse-vector access snapshots are
     logged at the same cadence (accesses, decode count, cache hits, direct hits)
     for key runtime vectors (`cframes_v2*`, `backgroundmask*`, `dynamasks*`,

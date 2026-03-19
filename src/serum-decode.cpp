@@ -24,6 +24,12 @@
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
+#include <mach/mach.h>
+#endif
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/resource.h>
+#include <unistd.h>
 #endif
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -113,6 +119,9 @@ static uint32_t g_debugCurrentInputCrc = 0;
 static bool g_debugTraceAllInputs = false;
 static uint32_t g_debugFrameMetaLoggedFor = 0xffffffffu;
 static bool g_debugBypassSceneGate = false;
+static bool g_debugVerboseIdentify = false;
+static bool g_debugVerboseSprites = false;
+static bool g_debugVerboseScenes = false;
 
 static SerumData g_serumData;
 uint16_t sceneFrameCount = 0;
@@ -259,6 +268,46 @@ static uint32_t GetEnvUint32Auto(const char* name, uint32_t defaultValue) {
   return static_cast<uint32_t>(parsed);
 }
 
+static uint64_t GetProcessResidentMemoryBytes() {
+#if defined(__APPLE__)
+  mach_task_basic_info info;
+  mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                reinterpret_cast<task_info_t>(&info),
+                &count) == KERN_SUCCESS) {
+    return static_cast<uint64_t>(info.resident_size);
+  }
+#elif defined(__unix__)
+  long rssPages = 0;
+  FILE* statm = std::fopen("/proc/self/statm", "r");
+  if (statm != nullptr) {
+    if (std::fscanf(statm, "%*s %ld", &rssPages) == 1 && rssPages > 0) {
+      std::fclose(statm);
+      const long pageSize = sysconf(_SC_PAGESIZE);
+      if (pageSize > 0) {
+        return static_cast<uint64_t>(rssPages) *
+               static_cast<uint64_t>(pageSize);
+      }
+    } else {
+      std::fclose(statm);
+    }
+  }
+#endif
+
+#if defined(__unix__) || defined(__APPLE__)
+  struct rusage usage;
+  if (getrusage(RUSAGE_SELF, &usage) == 0) {
+#if defined(__APPLE__)
+    return static_cast<uint64_t>(usage.ru_maxrss);
+#else
+    return static_cast<uint64_t>(usage.ru_maxrss) * 1024ull;
+#endif
+  }
+#endif
+
+  return 0;
+}
+
 static void InitDebugFrameTracingFromEnv(void) {
   if (g_debugFrameTracingInitialized) {
     return;
@@ -270,15 +319,23 @@ static void InitDebugFrameTracingFromEnv(void) {
   g_debugStageHashes = IsEnvFlagEnabled("SERUM_DEBUG_STAGE_HASHES");
   g_debugTraceAllInputs = IsEnvFlagEnabled("SERUM_DEBUG_TRACE_INPUTS");
   g_debugBypassSceneGate = IsEnvFlagEnabled("SERUM_DEBUG_BYPASS_SCENE_GATE");
+  g_debugVerboseIdentify = IsEnvFlagEnabled("SERUM_DEBUG_IDENTIFY_VERBOSE");
+  g_debugVerboseSprites = IsEnvFlagEnabled("SERUM_DEBUG_SPRITE_VERBOSE");
+  g_debugVerboseScenes = IsEnvFlagEnabled("SERUM_DEBUG_SCENE_VERBOSE");
   if (g_debugTargetInputCrc != 0 || g_debugTargetFrameId != 0xffffffffu ||
       g_debugStageHashes || g_debugTraceAllInputs ||
-      g_debugBypassSceneGate) {
+      g_debugBypassSceneGate || g_debugVerboseIdentify ||
+      g_debugVerboseSprites || g_debugVerboseScenes) {
     Log("Serum debug tracing enabled: inputCrc=%u frameId=%u stageHashes=%s "
-        "traceAllInputs=%s bypassSceneGate=%s",
+        "traceAllInputs=%s bypassSceneGate=%s identifyVerbose=%s "
+        "spriteVerbose=%s sceneVerbose=%s",
         g_debugTargetInputCrc, g_debugTargetFrameId,
         g_debugStageHashes ? "on" : "off",
         g_debugTraceAllInputs ? "on" : "off",
-        g_debugBypassSceneGate ? "on" : "off");
+        g_debugBypassSceneGate ? "on" : "off",
+        g_debugVerboseIdentify ? "on" : "off",
+        g_debugVerboseSprites ? "on" : "off",
+        g_debugVerboseScenes ? "on" : "off");
   }
 }
 
@@ -301,13 +358,28 @@ static bool DebugTraceAllInputsEnabled() {
   return g_debugTraceAllInputs;
 }
 
+static bool DebugIdentifyVerboseEnabled() {
+  InitDebugFrameTracingFromEnv();
+  return g_debugVerboseIdentify;
+}
+
+static bool DebugSpriteVerboseEnabled() {
+  InitDebugFrameTracingFromEnv();
+  return g_debugVerboseSprites;
+}
+
+static bool DebugSceneVerboseEnabled() {
+  InitDebugFrameTracingFromEnv();
+  return g_debugVerboseScenes;
+}
+
 static void DebugLogSceneEvent(const char* event, uint16_t sceneId,
                                uint16_t frameIndex, uint16_t frameCount,
                                uint16_t durationPerFrame, uint8_t options,
                                bool interruptable, bool startImmediately,
                                uint8_t repeatCount, uint8_t group = 0,
                                int result = -1) {
-  if (!DebugTraceAllInputsEnabled()) {
+  if (!DebugSceneVerboseEnabled()) {
     return;
   }
   Log("Serum debug scene event: event=%s sceneId=%u frameIndex=%u "
@@ -529,7 +601,7 @@ static bool DebugTraceSpritesForCurrentInput() {
 static void DebugLogSpriteCheckStart(uint32_t frameId, uint32_t candidateCount,
                                      bool hasCandidateSidecars,
                                      bool frameHasShapeCandidates) {
-  if (!DebugTraceSpritesForCurrentInput()) {
+  if (!DebugSpriteVerboseEnabled() || !DebugTraceSpritesForCurrentInput()) {
     return;
   }
   Log("Serum debug sprites start: frameId=%u inputCrc=%u candidates=%u "
@@ -544,7 +616,7 @@ static void DebugLogSpriteCandidate(uint32_t frameId, uint8_t spriteId,
                                     uint32_t detectCount, short minxBB,
                                     short minyBB, short maxxBB, short maxyBB,
                                     int spriteWidth, int spriteHeight) {
-  if (!DebugTraceSpritesForCurrentInput()) {
+  if (!DebugSpriteVerboseEnabled() || !DebugTraceSpritesForCurrentInput()) {
     return;
   }
   Log("Serum debug sprite candidate: frameId=%u inputCrc=%u spriteId=%u "
@@ -559,7 +631,7 @@ static void DebugLogSpriteDetectionWord(uint32_t frameId, uint8_t spriteId,
                                         uint32_t detectionWord, short frax,
                                         short fray, short offsx, short offsy,
                                         short detw, short deth) {
-  if (!DebugTraceSpritesForCurrentInput()) {
+  if (!DebugSpriteVerboseEnabled() || !DebugTraceSpritesForCurrentInput()) {
     return;
   }
   Log("Serum debug sprite detection: frameId=%u inputCrc=%u spriteId=%u "
@@ -576,7 +648,7 @@ static void DebugLogSpriteRejected(uint32_t frameId, uint8_t spriteId,
                                    uint32_t detailB = 0,
                                    uint32_t detailC = 0,
                                    uint32_t detailD = 0) {
-  if (!DebugTraceSpritesForCurrentInput()) {
+  if (!DebugSpriteVerboseEnabled() || !DebugTraceSpritesForCurrentInput()) {
     return;
   }
   Log("Serum debug sprite rejected: frameId=%u inputCrc=%u spriteId=%u "
@@ -1995,7 +2067,7 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
       uint8_t mask = g_serumData.compmaskID[tj][0];
       uint8_t Shape = g_serumData.shapecompmode[tj][0];
       uint32_t Hashc = calc_crc32(frame, mask, pixels, Shape);
-      if (DebugTraceMatches(inputCrc, tj)) {
+      if (DebugIdentifyVerboseEnabled() && DebugTraceMatches(inputCrc, tj)) {
         Log("Serum debug identify seed: inputCrc=%u startFrame=%u "
             "sceneRequested=%s mask=%u shape=%u hash=%u",
             inputCrc, tj, sceneFrameRequested ? "true" : "false", mask,
@@ -2010,14 +2082,15 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
           continue;
         }
         for (uint32_t ti : sigIt->second) {
-          if (DebugTraceMatches(inputCrc, ti)) {
+          if (DebugIdentifyVerboseEnabled() && DebugTraceMatches(inputCrc, ti)) {
             Log("Serum debug identify scene candidate: inputCrc=%u frameId=%u "
                 "mask=%u shape=%u hash=%u storedHash=%u lastfound=%u",
                 inputCrc, ti, mask, Shape, Hashc,
                 g_serumData.hashcodes[ti][0], lastfound_stream);
           }
           if (first_match || ti != lastfound_stream || mask < 255) {
-            if (DebugTraceMatches(inputCrc, ti)) {
+            if (DebugIdentifyVerboseEnabled() &&
+                DebugTraceMatches(inputCrc, ti)) {
               Log("Serum debug identify decision: inputCrc=%u frameId=%u "
                   "reason=%s firstMatch=%s lastfoundStream=%u mask=%u "
                   "fullCrcBefore=%u",
@@ -2037,7 +2110,8 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
 
           uint32_t full_crc = crc32_fast(frame, pixels);
           if (full_crc != lastframe_full_crc) {
-            if (DebugTraceMatches(inputCrc, ti)) {
+            if (DebugIdentifyVerboseEnabled() &&
+                DebugTraceMatches(inputCrc, ti)) {
               Log("Serum debug identify decision: inputCrc=%u frameId=%u "
                   "reason=full-crc-diff firstMatch=%s lastfoundStream=%u "
                   "mask=%u fullCrcBefore=%u fullCrcNow=%u",
@@ -2048,7 +2122,7 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
             lastfound = ti;
             return ti;
           }
-          if (DebugTraceMatches(inputCrc, ti)) {
+          if (DebugIdentifyVerboseEnabled() && DebugTraceMatches(inputCrc, ti)) {
             Log("Serum debug identify decision: inputCrc=%u frameId=%u "
                 "reason=same-frame firstMatch=%s lastfoundStream=%u mask=%u "
                 "fullCrc=%u",
@@ -2073,7 +2147,8 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
         if (!framechecked[ti]) {
           if ((g_serumData.compmaskID[ti][0] == mask) &&
               (g_serumData.shapecompmode[ti][0] == Shape)) {
-            if (DebugTraceMatches(inputCrc, ti)) {
+            if (DebugIdentifyVerboseEnabled() &&
+                DebugTraceMatches(inputCrc, ti)) {
               Log("Serum debug identify candidate: inputCrc=%u frameId=%u "
                   "mask=%u shape=%u hash=%u storedHash=%u lastfound=%u",
                   inputCrc, ti, mask, Shape, Hashc,
@@ -2081,7 +2156,8 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
             }
             if (Hashc == g_serumData.hashcodes[ti][0]) {
               if (first_match || ti != lastfound_stream || mask < 255) {
-                if (DebugTraceMatches(inputCrc, ti)) {
+                if (DebugIdentifyVerboseEnabled() &&
+                    DebugTraceMatches(inputCrc, ti)) {
                   Log("Serum debug identify decision: inputCrc=%u frameId=%u "
                       "reason=%s firstMatch=%s lastfoundStream=%u mask=%u "
                       "fullCrcBefore=%u",
@@ -2102,7 +2178,8 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
 
               uint32_t full_crc = crc32_fast(frame, pixels);
               if (full_crc != lastframe_full_crc) {
-                if (DebugTraceMatches(inputCrc, ti)) {
+                if (DebugIdentifyVerboseEnabled() &&
+                    DebugTraceMatches(inputCrc, ti)) {
                   Log("Serum debug identify decision: inputCrc=%u frameId=%u "
                       "reason=full-crc-diff firstMatch=%s lastfoundStream=%u "
                       "mask=%u fullCrcBefore=%u fullCrcNow=%u",
@@ -2114,7 +2191,8 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
                 return ti;  // we found the same frame with shape as before, but
                             // the full frame is different
               }
-              if (DebugTraceMatches(inputCrc, ti)) {
+              if (DebugIdentifyVerboseEnabled() &&
+                  DebugTraceMatches(inputCrc, ti)) {
                 Log("Serum debug identify decision: inputCrc=%u frameId=%u "
                     "reason=same-frame firstMatch=%s lastfoundStream=%u "
                     "mask=%u fullCrc=%u",
@@ -2135,7 +2213,7 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
     if (++tj >= g_serumData.nframes) tj = 0;
   } while (tj != lastfound_stream);
 
-  if (DebugTraceMatchesInputCrc(inputCrc)) {
+  if (DebugIdentifyVerboseEnabled() && DebugTraceMatchesInputCrc(inputCrc)) {
     Log("Serum debug identify miss: inputCrc=%u sceneRequested=%s",
         inputCrc, sceneFrameRequested ? "true" : "false");
   }
@@ -3988,9 +4066,13 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(
                                    (double)g_profileColorizeCalls / 1000000.0;
             const double spriteMs = (double)g_profileColorizeSpriteV2Ns /
                                     (double)g_profileColorizeCalls / 1000000.0;
-            Log("Perf dynamic avg: Colorize_Framev2=%.3fms "
-                "Colorize_Spritev2=%.3fms over %u frames",
-                frameMs, spriteMs, (uint32_t)g_profileColorizeCalls);
+            const double totalMs = frameMs + spriteMs;
+            const uint64_t rssBytes = GetProcessResidentMemoryBytes();
+            const double rssMiB = (double)rssBytes / (1024.0 * 1024.0);
+            Log("Perf dynamic avg: frame=%.3fms Colorize_Framev2=%.3fms "
+                "Colorize_Spritev2=%.3fms rss=%.1fMiB over %u frames",
+                totalMs, frameMs, spriteMs, rssMiB,
+                (uint32_t)g_profileColorizeCalls);
             if (g_profileSparseVectors) {
               g_serumData.LogSparseVectorProfileSnapshot();
             }
@@ -4296,7 +4378,7 @@ uint32_t Serum_RenderScene(void) {
         renderedFromDirectTriplet = true;
       }
     }
-    if (DebugTraceAllInputsEnabled()) {
+    if (DebugSceneVerboseEnabled()) {
       Log("Serum debug scene path: sceneId=%u frameIndex=%u group=%u "
           "disableTriplets=%s usedTriplet=%s tripletCount=%u",
           static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame, currentGroup,
