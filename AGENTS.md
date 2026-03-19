@@ -307,7 +307,11 @@ v6 snapshot policy:
   - If env `SERUM_PROFILE_DYNAMIC_HOTPATHS` is enabled (`1/true/on/yes`),
     periodic average timings for `Colorize_Framev2` and `Colorize_Spritev2`
     hot paths are logged, along with total average frame render time and
-    current process RSS memory usage.
+    current process RSS memory usage and process-local peak RSS seen so far.
+  - The same profiler also logs a one-time startup summary before normal frame
+    processing begins:
+    `Perf startup peak: start=...MiB current=...MiB peak=...MiB stage=...`
+    where `peak` is the highest sampled RSS observed during the load pipeline.
   - If env `SERUM_PROFILE_SPARSE_VECTORS=1`, sparse-vector access snapshots are
     logged at the same cadence (accesses, decode count, cache hits, direct hits)
     for key runtime vectors (`cframes_v2*`, `backgroundmask*`, `dynamasks*`,

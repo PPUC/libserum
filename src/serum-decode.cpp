@@ -110,6 +110,10 @@ static bool g_disableDynamicPackedReads = false;
 static uint64_t g_profileColorizeFrameV2Ns = 0;
 static uint64_t g_profileColorizeSpriteV2Ns = 0;
 static uint64_t g_profileColorizeCalls = 0;
+static uint64_t g_profilePeakRssBytes = 0;
+static uint64_t g_profileStartupStartRssBytes = 0;
+static uint64_t g_profileStartupPeakRssBytes = 0;
+static const char* g_profileStartupPeakStage = "startup-begin";
 static bool g_debugFrameTracingInitialized = false;
 static uint32_t g_debugTargetInputCrc = 0;
 static uint32_t g_debugTargetFrameId = 0xffffffffu;
@@ -305,6 +309,42 @@ static uint64_t GetProcessResidentMemoryBytes() {
 #endif
 
   return 0;
+}
+
+static void ResetStartupRssProfile() {
+  if (!g_profileDynamicHotPaths) {
+    g_profileStartupStartRssBytes = 0;
+    g_profileStartupPeakRssBytes = 0;
+    g_profileStartupPeakStage = "startup-begin";
+    return;
+  }
+  g_profileStartupStartRssBytes = GetProcessResidentMemoryBytes();
+  g_profileStartupPeakRssBytes = g_profileStartupStartRssBytes;
+  g_profileStartupPeakStage = "startup-begin";
+}
+
+static void NoteStartupRssSample(const char* stage) {
+  if (!g_profileDynamicHotPaths) {
+    return;
+  }
+  const uint64_t rssBytes = GetProcessResidentMemoryBytes();
+  if (rssBytes >= g_profileStartupPeakRssBytes) {
+    g_profileStartupPeakRssBytes = rssBytes;
+    g_profileStartupPeakStage = stage;
+  }
+}
+
+static void LogStartupRssSummary() {
+  if (!g_profileDynamicHotPaths) {
+    return;
+  }
+  const uint64_t currentBytes = GetProcessResidentMemoryBytes();
+  const double startMiB =
+      (double)g_profileStartupStartRssBytes / (1024.0 * 1024.0);
+  const double currentMiB = (double)currentBytes / (1024.0 * 1024.0);
+  const double peakMiB = (double)g_profileStartupPeakRssBytes / (1024.0 * 1024.0);
+  Log("Perf startup peak: start=%.1fMiB current=%.1fMiB peak=%.1fMiB stage=%s",
+      startMiB, currentMiB, peakMiB, g_profileStartupPeakStage);
 }
 
 static void InitDebugFrameTracingFromEnv(void) {
@@ -1726,6 +1766,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   g_profileColorizeFrameV2Ns = 0;
   g_profileColorizeSpriteV2Ns = 0;
   g_profileColorizeCalls = 0;
+  g_profilePeakRssBytes = 0;
+  ResetStartupRssProfile();
 
   mySerum.SerumVersion = g_serumData.SerumVersion = 0;
   mySerum.flags = 0;
@@ -1756,6 +1798,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
 
   std::optional<std::string> csvFoundFile =
       find_case_insensitive_file(pathbuf, std::string(romname) + ".pup.csv");
+  NoteStartupRssSample("after-file-scan");
   if (csvFoundFile) {
     Log("Found %s", csvFoundFile->c_str());
 #ifdef WRITE_CROMC
@@ -1777,13 +1820,16 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
 
     if (pFoundFile) {
       Log("Found %s", pFoundFile->c_str());
+      NoteStartupRssSample("before-cromc-load");
       result = Serum_LoadConcentrate(pFoundFile->c_str(), flags);
       loadedFromConcentrate = (result != NULL);
       if (result) {
+        NoteStartupRssSample("after-cromc-load");
         Log("Loaded %s", pFoundFile->c_str());
         if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
             g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str())) {
           sceneDataUpdatedFromCsv = true;
+          NoteStartupRssSample("after-csv-update");
 #ifdef WRITE_CROMC
           // Update the concentrate file with new PUP data
           if (generateCRomC) Serum_SaveConcentrate(pFoundFile->c_str());
@@ -1810,12 +1856,17 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
       return NULL;
     }
     Log("Found %s", pFoundFile->c_str());
+    NoteStartupRssSample("before-crom-load");
     result = Serum_LoadFilev1(pFoundFile->c_str(), flags);
     if (result) {
+      NoteStartupRssSample("after-crom-load");
       Log("Loaded %s", pFoundFile->c_str());
       if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2) {
         sceneDataUpdatedFromCsv =
             g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str());
+        if (sceneDataUpdatedFromCsv) {
+          NoteStartupRssSample("after-csv-update");
+        }
       }
 #ifdef WRITE_CROMC
       if (generateCRomC) Serum_SaveConcentrate(pFoundFile->c_str());
@@ -1830,21 +1881,28 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     if (!loadedFromConcentrate || g_serumData.concentrateFileVersion < 6 ||
         sceneDataUpdatedFromCsv) {
       BuildFrameLookupVectors();
+      NoteStartupRssSample("after-frame-lookup-build");
     } else {
       InitFrameLookupRuntimeStateFromStoredData();
+      NoteStartupRssSample("after-frame-lookup-restore");
     }
     if (g_serumData.colorRotationLookupByFrameAndColor.empty()) {
       g_serumData.BuildColorRotationLookup();
+      NoteStartupRssSample("after-color-rotation-build");
     }
     if (!g_serumData.HasSpriteRuntimeSidecars() &&
         (!loadedFromConcentrate || g_serumData.concentrateFileVersion < 6)) {
       g_serumData.BuildSpriteRuntimeSidecars();
+      NoteStartupRssSample("after-sprite-sidecar-build");
     }
     if (g_disableDynamicPackedReads) {
       g_serumData.PrepareRuntimeDynamicHotCache();
+      NoteStartupRssSample("after-dynamic-hot-cache");
       Log("Dynamic packed reads disabled for runtime via "
           "SERUM_DISABLE_DYNAMIC_PACKED_READS");
     }
+    NoteStartupRssSample("before-runtime");
+    LogStartupRssSummary();
   }
   if (is_real_machine()) {
     monochromeMode = true;
@@ -3961,10 +4019,15 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(
                                     (double)g_profileColorizeCalls / 1000000.0;
             const double totalMs = frameMs + spriteMs;
             const uint64_t rssBytes = GetProcessResidentMemoryBytes();
+            if (rssBytes > g_profilePeakRssBytes) {
+              g_profilePeakRssBytes = rssBytes;
+            }
             const double rssMiB = (double)rssBytes / (1024.0 * 1024.0);
+            const double peakRssMiB =
+                (double)g_profilePeakRssBytes / (1024.0 * 1024.0);
             Log("Perf dynamic avg: frame=%.3fms Colorize_Framev2=%.3fms "
-                "Colorize_Spritev2=%.3fms rss=%.1fMiB over %u frames",
-                totalMs, frameMs, spriteMs, rssMiB,
+                "Colorize_Spritev2=%.3fms rss=%.1fMiB peak=%.1fMiB over %u frames",
+                totalMs, frameMs, spriteMs, rssMiB, peakRssMiB,
                 (uint32_t)g_profileColorizeCalls);
             if (g_profileSparseVectors) {
               g_serumData.LogSparseVectorProfileSnapshot();
