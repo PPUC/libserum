@@ -95,8 +95,9 @@ SerumData::SerumData()
   dynaspritemasks_extra.setProfileLabel("dynaspritemasks_extra");
   dynaspritemasks_extra_active.setProfileLabel("dynaspritemasks_extra_active");
   sceneGenerator = new SceneGenerator();
-  if (is_real_machine())
-    m_packingSidecarsStorage.assign(256u * 1024u * 1024u, 0xA5);
+  if (is_real_machine()) {
+    m_packingSidecarsStorage.emplace_back(256u * 1024u * 1024u, 0xA5);
+  }
 }
 
 SerumData::~SerumData() {}
@@ -230,6 +231,13 @@ void SerumData::DebugLogSpriteDynamicSidecarState(const char *stage,
       activeOther);
 }
 
+void SerumData::DebugLogPackingSidecarsStorageSizes() {
+  for (size_t i = 0; i < m_packingSidecarsStorage.size(); ++i) {
+    Log("Serum debug packing sidecar storage: index=%zu size=%zu", i,
+        m_packingSidecarsStorage[i].size());
+  }
+}
+
 void SerumData::BuildPackingSidecarsAndNormalize() {
   if (m_packingSidecarsNormalized) {
     return;
@@ -243,6 +251,16 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
 
   std::vector<uint8_t> normalized;
   std::vector<uint8_t> flags;
+  if (!m_packingSidecarsStorage.empty()) {
+    m_packingSidecarsStorage.reserve(static_cast<size_t>(nsprites) * 5 +
+                                     static_cast<size_t>(nframes) * 2);
+  }
+  auto storeSidecarCopy = [this](const uint8_t *data, size_t size) {
+    if (!data || size == 0 || m_packingSidecarsStorage.empty()) {
+      return;
+    }
+    m_packingSidecarsStorage.emplace_back(data, data + size);
+  };
 
   normalized.resize(spritePixels);
   flags.resize(spritePixels);
@@ -262,6 +280,7 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
       normalized[i] = opaque ? value : 0;
     }
     spriteoriginal_opaque.set(spriteId, flags.data(), spritePixels);
+    storeSidecarCopy(flags.data(), spritePixels);
     spriteoriginal.set(spriteId, normalized.data(), spritePixels);
   }
 
@@ -285,6 +304,7 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
     }
     spritemask_extra_opaque.set(spriteId, flags.data(), spritePixels,
                                 &isextrasprite);
+    storeSidecarCopy(flags.data(), spritePixels);
     spritemask_extra.set(spriteId, normalized.data(), spritePixels,
                          &isextrasprite);
   }
@@ -307,6 +327,7 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
       normalized[i] = opaque ? value : 0;
     }
     spritedescriptionso_opaque.set(spriteId, flags.data(), spritePixelsV1);
+    storeSidecarCopy(flags.data(), spritePixelsV1);
     spritedescriptionso.set(spriteId, normalized.data(), spritePixelsV1);
   }
 
@@ -331,6 +352,7 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
       anyActive = anyActive || active;
     }
     dynamasks_active.set(frameId, flags.data(), framePixels);
+    storeSidecarCopy(flags.data(), framePixels);
     dynamasks.set(frameId, normalized.data(), framePixels,
                   static_cast<SparseVector<uint8_t> *>(nullptr), anyActive);
     frameHasDynamic[frameId] = anyActive ? 1 : 0;
@@ -362,6 +384,7 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
       }
       dynamasks_extra_active.set(frameId, flags.data(), extraFramePixels,
                                  &isextraframe);
+      storeSidecarCopy(flags.data(), extraFramePixels);
       dynamasks_extra.set(frameId, normalized.data(), extraFramePixels,
                           &isextraframe, anyActive);
       frameHasDynamicExtra[frameId] = anyActive ? 1 : 0;
@@ -391,6 +414,7 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
       anyActive = anyActive || active;
     }
     dynaspritemasks_active.set(spriteId, flags.data(), spritePixels);
+    storeSidecarCopy(flags.data(), spritePixels);
     dynaspritemasks.set(spriteId, normalized.data(), spritePixels,
                         static_cast<SparseVector<uint8_t> *>(nullptr),
                         anyActive);
@@ -419,6 +443,7 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
     }
     dynaspritemasks_extra_active.set(spriteId, flags.data(), spritePixels,
                                      &isextrasprite);
+    storeSidecarCopy(flags.data(), spritePixels);
     dynaspritemasks_extra.set(spriteId, normalized.data(), spritePixels,
                               &isextrasprite, anyActive);
   }
@@ -456,6 +481,14 @@ bool SerumData::HasSpriteRuntimeSidecars() const {
 }
 
 void SerumData::BuildSpriteRuntimeSidecars() {
+  auto storeRuntimeSidecarCopy = [this](const void *data, size_t size) {
+    if (!data || size == 0 || m_packingSidecarsStorage.empty()) {
+      return;
+    }
+    const auto *bytes = static_cast<const uint8_t *>(data);
+    m_packingSidecarsStorage.emplace_back(bytes, bytes + size);
+  };
+
   spriteCandidateOffsets.assign(static_cast<size_t>(nframes) + 1, 0);
   spriteCandidateIds.clear();
   spriteCandidateSlots.clear();
@@ -607,6 +640,40 @@ void SerumData::BuildSpriteRuntimeSidecars() {
   }
   spriteCandidateOffsets[nframes] =
       static_cast<uint32_t>(spriteCandidateIds.size());
+
+  storeRuntimeSidecarCopy(
+      spriteCandidateOffsets.data(),
+      spriteCandidateOffsets.size() * sizeof(spriteCandidateOffsets[0]));
+  storeRuntimeSidecarCopy(
+      spriteCandidateIds.data(),
+      spriteCandidateIds.size() * sizeof(spriteCandidateIds[0]));
+  storeRuntimeSidecarCopy(
+      spriteCandidateSlots.data(),
+      spriteCandidateSlots.size() * sizeof(spriteCandidateSlots[0]));
+  storeRuntimeSidecarCopy(
+      frameHasShapeSprite.data(),
+      frameHasShapeSprite.size() * sizeof(frameHasShapeSprite[0]));
+  storeRuntimeSidecarCopy(spriteWidth.data(),
+                          spriteWidth.size() * sizeof(spriteWidth[0]));
+  storeRuntimeSidecarCopy(spriteHeight.data(),
+                          spriteHeight.size() * sizeof(spriteHeight[0]));
+  storeRuntimeSidecarCopy(spriteUsesShape.data(),
+                          spriteUsesShape.size() * sizeof(spriteUsesShape[0]));
+  storeRuntimeSidecarCopy(
+      spriteDetectOffsets.data(),
+      spriteDetectOffsets.size() * sizeof(spriteDetectOffsets[0]));
+  storeRuntimeSidecarCopy(
+      spriteDetectMeta.data(),
+      spriteDetectMeta.size() * sizeof(spriteDetectMeta[0]));
+  storeRuntimeSidecarCopy(spriteOpaqueRowSegmentStart.data(),
+                          spriteOpaqueRowSegmentStart.size() *
+                              sizeof(spriteOpaqueRowSegmentStart[0]));
+  storeRuntimeSidecarCopy(spriteOpaqueRowSegmentCount.data(),
+                          spriteOpaqueRowSegmentCount.size() *
+                              sizeof(spriteOpaqueRowSegmentCount[0]));
+  storeRuntimeSidecarCopy(
+      spriteOpaqueSegments.data(),
+      spriteOpaqueSegments.size() * sizeof(spriteOpaqueSegments[0]));
 }
 
 void SerumData::LogSparseVectorProfileSnapshot() {

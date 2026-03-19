@@ -78,6 +78,7 @@ class SerumData {
   void BuildPackingSidecarsAndNormalize();
   void BuildSpriteRuntimeSidecars();
   void DebugLogSpriteDynamicSidecarState(const char *stage, uint32_t spriteId);
+  void DebugLogPackingSidecarsStorageSizes();
   bool HasSpriteRuntimeSidecars() const;
   void BuildColorRotationLookup();
   bool TryGetColorRotation(uint32_t frameId, uint16_t color, bool isextra,
@@ -185,7 +186,7 @@ class SerumData {
 
   uint8_t m_loadFlags = 0;
   bool m_packingSidecarsNormalized = false;
-  std::vector<uint8_t> m_packingSidecarsStorage;
+  std::vector<std::vector<uint8_t>> m_packingSidecarsStorage;
 
   friend class cereal::access;
 

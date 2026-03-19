@@ -64,6 +64,9 @@ Vector policy currently used in `SerumData`:
     all-zero payload only when the paired active sidecar still marks active
     pixels; this is required because dynamic layer `0` is a valid value and is
     not equivalent to "no payload".
+  - `BuildPackingSidecarsAndNormalize()` also snapshots each generated sidecar
+    payload into `m_packingSidecarsStorage` as a transient two-dimensional byte
+    store (`std::vector<std::vector<uint8_t>>`).
 - Precomputed frame-level dynamic fast flags are persisted:
   - `frameHasDynamic`
   - `frameHasDynamicExtra`
@@ -83,6 +86,8 @@ Vector policy currently used in `SerumData`:
   - flattened detection metadata (`spriteDetectOffsets`, `spriteDetectMeta`)
   - per-sprite opaque row-segment runs (`spriteOpaqueRowSegmentStart`,
     `spriteOpaqueRowSegmentCount`, `spriteOpaqueSegments`)
+  - `BuildSpriteRuntimeSidecars()` also snapshots the generated runtime sidecar
+    vectors into `m_packingSidecarsStorage` as raw byte copies.
 - Runtime uses sidecar flags instead of `255` sentinels for transparency / dynamic-zone activity.
 - Runtime does not include sentinel-based fallback in sprite/dynamic helpers;
   missing/incorrect sidecars are treated as a conversion/load bug and are not
