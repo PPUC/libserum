@@ -232,7 +232,7 @@ void SerumData::DebugLogSpriteDynamicSidecarState(const char *stage,
 }
 
 void SerumData::DebugLogPackingSidecarsStorageSizes() {
-  for (size_t i = 0; i < m_packingSidecarsStorage.size(); ++i) {
+  for (size_t i = 1; i < m_packingSidecarsStorage.size(); ++i) {
     Log("Serum debug packing sidecar storage: index=%zu size=%zu", i,
         m_packingSidecarsStorage[i].size());
   }

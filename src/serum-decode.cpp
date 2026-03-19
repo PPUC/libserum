@@ -481,6 +481,8 @@ static void DebugLogFrameMetadataIfRequested(uint32_t frameId) {
         frameId, i, spriteId, spriteBB[i * 4], spriteBB[i * 4 + 1],
         spriteBB[i * 4 + 2], spriteBB[i * 4 + 3], usesShape);
   }
+
+  g_serumData.DebugLogPackingSidecarsStorageSizes();
 }
 
 static uint64_t DebugHashBytesFNV1a64(const void* data, size_t size) {
@@ -1867,21 +1869,22 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   if (result && g_serumData.sceneGenerator->isActive())
     g_serumData.sceneGenerator->setDepth(result->nocolors == 16 ? 4 : 2);
   if (result) {
+    const bool rebuildDerivedLookups = !loadedFromConcentrate ||
+                                       g_serumData.concentrateFileVersion < 6 ||
+                                       sceneDataUpdatedFromCsv;
     if (loadedFromConcentrate && g_serumData.concentrateFileVersion < 6) {
       g_serumData.BuildPackingSidecarsAndNormalize();
       NoteStartupRssSample("after-packing-sidecar-normalize");
     }
-    if (!loadedFromConcentrate || g_serumData.concentrateFileVersion < 6 ||
-        sceneDataUpdatedFromCsv) {
+    if (rebuildDerivedLookups) {
       BuildFrameLookupVectors();
       NoteStartupRssSample("after-frame-lookup-build");
     } else {
       InitFrameLookupRuntimeStateFromStoredData();
       NoteStartupRssSample("after-frame-lookup-restore");
     }
-    if (g_serumData.colorRotationLookupByFrameAndColor.empty() &&
-        (!loadedFromConcentrate || g_serumData.concentrateFileVersion < 6 ||
-         sceneDataUpdatedFromCsv)) {
+    if (rebuildDerivedLookups ||
+        g_serumData.colorRotationLookupByFrameAndColor.empty()) {
       g_serumData.BuildColorRotationLookup();
       NoteStartupRssSample("after-color-rotation-build");
     }

@@ -4,6 +4,7 @@
 #include <cereal/types/string.hpp>
 #include <cereal/types/unordered_map.hpp>
 #include <cereal/types/vector.hpp>
+#include <algorithm>
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -56,6 +57,36 @@ class SerumData {
     void serialize(Archive &ar) {
       ar(detectionWord, detectionWordPos, detectX, detectY, detectWidth,
          detectHeight);
+    }
+  };
+
+  struct SceneSignatureLookupEntry {
+    uint64_t key = 0;
+    std::vector<uint32_t> frameIds;
+
+    template <class Archive>
+    void serialize(Archive &ar) {
+      ar(key, frameIds);
+    }
+  };
+
+  struct SceneTripletLookupEntry {
+    uint64_t key = 0;
+    uint32_t frameId = 0;
+
+    template <class Archive>
+    void serialize(Archive &ar) {
+      ar(key, frameId);
+    }
+  };
+
+  struct ColorRotationLookupEntry {
+    uint64_t key = 0;
+    uint16_t value = 0;
+
+    template <class Archive>
+    void serialize(Archive &ar) {
+      ar(key, value);
     }
   };
 
@@ -211,11 +242,48 @@ class SerumData {
 
     if constexpr (Archive::is_saving::value) {
       if (concentrateFileVersion >= 6) {
-        ar(frameIsScene, sceneFramesBySignature, spriteoriginal_opaque,
+        std::vector<SceneSignatureLookupEntry> sceneSignatureEntries;
+        sceneSignatureEntries.reserve(sceneFramesBySignature.size());
+        for (const auto &entry : sceneFramesBySignature) {
+          SceneSignatureLookupEntry serialized;
+          serialized.key = entry.first;
+          serialized.frameIds = entry.second;
+          std::sort(serialized.frameIds.begin(), serialized.frameIds.end());
+          sceneSignatureEntries.push_back(std::move(serialized));
+        }
+        std::sort(sceneSignatureEntries.begin(), sceneSignatureEntries.end(),
+                  [](const SceneSignatureLookupEntry &a,
+                     const SceneSignatureLookupEntry &b) {
+                    return a.key < b.key;
+                  });
+
+        std::vector<SceneTripletLookupEntry> sceneTripletEntries;
+        sceneTripletEntries.reserve(sceneFrameIdByTriplet.size());
+        for (const auto &entry : sceneFrameIdByTriplet) {
+          sceneTripletEntries.push_back({entry.first, entry.second});
+        }
+        std::sort(sceneTripletEntries.begin(), sceneTripletEntries.end(),
+                  [](const SceneTripletLookupEntry &a,
+                     const SceneTripletLookupEntry &b) {
+                    return a.key < b.key;
+                  });
+
+        std::vector<ColorRotationLookupEntry> colorRotationEntries;
+        colorRotationEntries.reserve(colorRotationLookupByFrameAndColor.size());
+        for (const auto &entry : colorRotationLookupByFrameAndColor) {
+          colorRotationEntries.push_back({entry.first, entry.second});
+        }
+        std::sort(colorRotationEntries.begin(), colorRotationEntries.end(),
+                  [](const ColorRotationLookupEntry &a,
+                     const ColorRotationLookupEntry &b) {
+                    return a.key < b.key;
+                  });
+
+        ar(frameIsScene, sceneSignatureEntries, spriteoriginal_opaque,
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
-           sceneFrameIdByTriplet, colorRotationLookupByFrameAndColor,
+           sceneTripletEntries, colorRotationEntries,
            spriteCandidateOffsets, spriteCandidateIds, spriteCandidateSlots,
            frameHasShapeSprite, spriteWidth, spriteHeight, spriteUsesShape,
            spriteDetectOffsets, spriteDetectMeta, spriteOpaqueRowSegmentStart,
@@ -223,15 +291,36 @@ class SerumData {
       }
     } else {
       if (concentrateFileVersion >= 6) {
-        ar(frameIsScene, sceneFramesBySignature, spriteoriginal_opaque,
+        std::vector<SceneSignatureLookupEntry> sceneSignatureEntries;
+        std::vector<SceneTripletLookupEntry> sceneTripletEntries;
+        std::vector<ColorRotationLookupEntry> colorRotationEntries;
+        ar(frameIsScene, sceneSignatureEntries, spriteoriginal_opaque,
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
-           sceneFrameIdByTriplet, colorRotationLookupByFrameAndColor,
+           sceneTripletEntries, colorRotationEntries,
            spriteCandidateOffsets, spriteCandidateIds, spriteCandidateSlots,
            frameHasShapeSprite, spriteWidth, spriteHeight, spriteUsesShape,
            spriteDetectOffsets, spriteDetectMeta, spriteOpaqueRowSegmentStart,
            spriteOpaqueRowSegmentCount, spriteOpaqueSegments);
+
+        sceneFramesBySignature.clear();
+        sceneFramesBySignature.reserve(sceneSignatureEntries.size());
+        for (const auto &entry : sceneSignatureEntries) {
+          sceneFramesBySignature[entry.key] = entry.frameIds;
+        }
+
+        sceneFrameIdByTriplet.clear();
+        sceneFrameIdByTriplet.reserve(sceneTripletEntries.size());
+        for (const auto &entry : sceneTripletEntries) {
+          sceneFrameIdByTriplet[entry.key] = entry.frameId;
+        }
+
+        colorRotationLookupByFrameAndColor.clear();
+        colorRotationLookupByFrameAndColor.reserve(colorRotationEntries.size());
+        for (const auto &entry : colorRotationEntries) {
+          colorRotationLookupByFrameAndColor[entry.key] = entry.value;
+        }
       } else {
         frameIsScene.clear();
         sceneFramesBySignature.clear();

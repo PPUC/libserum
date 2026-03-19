@@ -5,6 +5,13 @@ This document explains how `libserum` works end-to-end, with emphasis on runtime
 
 **Maintenance rule:** Any feature change, behavior change, data format change, or API/signature change in this repository **must** be reflected in this file in the same PR/commit.
 
+**Platform-independence rule:** `libserum` is intended to behave the same on
+all supported platforms. Runtime behavior, persisted `cROMc` semantics, and
+derived lookup data must not depend on whether the archive was generated on
+Windows, macOS, or Linux. If equal source data is loaded/generated, the
+resulting `v6` `cROMc` content and runtime behavior are expected to be
+platform-independent.
+
 ## High-level architecture
 Core files:
 - `src/serum-decode.cpp`: Main runtime engine (load, identify, colorize, rotate, scene orchestration).
@@ -76,6 +83,9 @@ Vector policy currently used in `SerumData`:
   `colorRotationLookupByFrameAndColor[(frameId,isExtra,color)] -> (rotation,position)`
   restored from v6 cROMc when present.
   - v5 / authoring-time rebuild flows may rebuild the lookup before re-save.
+  - v6 persistence stores this derived lookup in canonical sorted-entry form
+    rather than direct `unordered_map` archive order, so `cROMc` output stays
+    platform-independent and deterministic for identical source data.
   - `ColorInRotation` uses lookup-only runtime path (no linear scan fallback).
 - Sprite runtime sidecars are precomputed and used by `Check_Spritesv2`:
   - frame candidate list with sprite slot indices (`spriteCandidateOffsets`,
@@ -111,8 +121,12 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
 5. If CSV exists and format is v2, parse scenes via `SceneGenerator::parseCSV`.
 6. Set scene depth from color count when scenes are active.
 7. Build or restore frame lookup acceleration:
-   - If loaded from cROMc v6 and no CSV update in this run: use stored lookup via `InitFrameLookupRuntimeStateFromStoredData()`.
+   - If loaded from cROMc v6 and no CSV update in this run: use stored lookup
+     via `InitFrameLookupRuntimeStateFromStoredData()`.
    - Otherwise: rebuild via `BuildFrameLookupVectors()`.
+   - Stored `v6` lookup data is expected to be valid across supported
+     platforms; do not introduce platform-specific load branching for direct
+     `v6` runtime loads.
 8. Build/normalize packing sidecars via `BuildPackingSidecarsAndNormalize()`.
    - This normalization/repair path is for source-data build flows and `v5`
      compatibility handling.
@@ -258,6 +272,13 @@ Stored in v6:
   - `sceneFrameIdByTriplet`
 - Color-rotation lookup acceleration:
   - `colorRotationLookupByFrameAndColor`
+- Derived lookup tables are serialized in canonical sorted-entry form instead of
+  direct `unordered_map` archive order, so equal data yields equal `cROMc`
+  bytes across platforms.
+- `v6` `cROMc` archives are intended to be portable across supported
+  platforms. A `cROMc` generated on one platform must load with the same
+  semantics on another platform without archive-format forks or
+  platform-specific compatibility branches.
 - Sprite runtime sidecars:
   - `spriteCandidateOffsets`, `spriteCandidateIds`, `spriteCandidateSlots`
   - `frameHasShapeSprite`
@@ -275,7 +296,13 @@ Backward compatibility:
 - v5 files are loadable.
 - v5 sparse vectors are deserialized with legacy sparse-vector layout and converted to packed representation after load.
 - For v5 loads, scene lookup vectors and other derived runtime sidecars may be rebuilt at startup.
-- For direct `v6` loads, stored lookup vectors and runtime sidecars are expected to be consumed as persisted runtime-ready data.
+- For direct `v6` loads, stored runtime sidecars are expected to be consumed as
+  persisted runtime-ready data.
+- For direct `v6` loads, stored scene/color-rotation lookup tables are reused
+  directly; their persisted representation is platform-independent.
+- Cross-platform differences in `v6` behavior are treated as bugs in canonical
+  persistence or runtime reconstruction, not as an acceptable reason to add
+  platform-tagged `cROMc` variants.
 - A `pup.csv` update in the same authoring-time load cycle may invalidate persisted scene lookup data and requires rebuild before re-save.
 - Direct scene-triplet preprocessing is only executed for v6.
 - v6 scene-data deserialization validates block magic and count before
