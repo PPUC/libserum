@@ -76,7 +76,6 @@ class SerumData {
   bool LoadFromFile(const char *filename, const uint8_t flags);
   bool LoadFromBuffer(const uint8_t *data, size_t size, const uint8_t flags);
   void BuildPackingSidecarsAndNormalize();
-  void PrepareRuntimeDynamicHotCache();
   void BuildSpriteRuntimeSidecars();
   void DebugLogSpriteDynamicSidecarState(const char *stage, uint32_t spriteId);
   bool HasSpriteRuntimeSidecars() const;
@@ -217,9 +216,8 @@ class SerumData {
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
            sceneFrameIdByTriplet, colorRotationLookupByFrameAndColor,
            spriteCandidateOffsets, spriteCandidateIds, spriteCandidateSlots,
-           frameHasShapeSprite,
-           spriteWidth, spriteHeight, spriteUsesShape, spriteDetectOffsets,
-           spriteDetectMeta, spriteOpaqueRowSegmentStart,
+           frameHasShapeSprite, spriteWidth, spriteHeight, spriteUsesShape,
+           spriteDetectOffsets, spriteDetectMeta, spriteOpaqueRowSegmentStart,
            spriteOpaqueRowSegmentCount, spriteOpaqueSegments);
       }
     } else {
@@ -230,9 +228,8 @@ class SerumData {
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
            sceneFrameIdByTriplet, colorRotationLookupByFrameAndColor,
            spriteCandidateOffsets, spriteCandidateIds, spriteCandidateSlots,
-           frameHasShapeSprite,
-           spriteWidth, spriteHeight, spriteUsesShape, spriteDetectOffsets,
-           spriteDetectMeta, spriteOpaqueRowSegmentStart,
+           frameHasShapeSprite, spriteWidth, spriteHeight, spriteUsesShape,
+           spriteDetectOffsets, spriteDetectMeta, spriteOpaqueRowSegmentStart,
            spriteOpaqueRowSegmentCount, spriteOpaqueSegments);
       } else {
         frameIsScene.clear();
@@ -336,9 +333,6 @@ class SerumData {
       if (sceneGenerator) {
         sceneGenerator->setSceneData(std::move(loadedScenes));
         sceneGenerator->setDepth(nocolors == 16 ? 4 : 2);
-      }
-      if (!HasSpriteRuntimeSidecars()) {
-        BuildSpriteRuntimeSidecars();
       }
     }
   }

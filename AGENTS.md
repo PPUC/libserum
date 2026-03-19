@@ -71,7 +71,8 @@ Vector policy currently used in `SerumData`:
   entirely for frames without active dynamic pixels.
 - Color rotations use a precomputed lookup index:
   `colorRotationLookupByFrameAndColor[(frameId,isExtra,color)] -> (rotation,position)`
-  restored from v6 cROMc when present and rebuilt at load time otherwise.
+  restored from v6 cROMc when present.
+  - v5 / authoring-time rebuild flows may rebuild the lookup before re-save.
   - `ColorInRotation` uses lookup-only runtime path (no linear scan fallback).
 - Sprite runtime sidecars are precomputed and used by `Check_Spritesv2`:
   - frame candidate list with sprite slot indices (`spriteCandidateOffsets`,
@@ -117,12 +118,6 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
      from file as final runtime data.
    - Rebuild-on-load behavior belongs to `v5` compatibility handling and
      authoring-time rebuild flows, not to the final-device direct `v6` path.
-10. Optional runtime A/B switch for dynamic packed-read overhead:
-   - If env `SERUM_DISABLE_DYNAMIC_PACKED_READS` is enabled (`1/true/on/yes`),
-     `PrepareRuntimeDynamicHotCache()` predecodes dynamic vectors
-     (`dynamasks*`, `dynaspritemasks*`) into runtime hot caches.
-   - Default runtime behavior is unchanged when this env var is not set.
-
 Important:
 - `BuildFrameLookupVectors()` must run after final scene data is known for this load cycle.
 - CSV parsing after loading can invalidate stored scene lookup data and requires rebuild.
@@ -337,5 +332,6 @@ Minimum validation:
    - background scene
    - end-of-scene behavior flags
    - resume flag `16`
-10. Build color-rotation lookup index via `BuildColorRotationLookup()` for
-    O(1) `ColorInRotation` checks only when missing from loaded v6 data.
+10. Build color-rotation lookup index via `BuildColorRotationLookup()` during
+    v5 / authoring-time rebuild flows so persisted v6 data provides O(1)
+    `ColorInRotation` checks without direct-load fallback.

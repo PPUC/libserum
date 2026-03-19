@@ -1,10 +1,10 @@
 #include "SerumData.h"
 
+#include <unordered_set>
+
 #include "DecompressingIStream.h"
 #include "miniz/miniz.h"
 #include "serum-version.h"
-
-#include <unordered_set>
 
 bool is_real_machine();
 
@@ -96,7 +96,7 @@ SerumData::SerumData()
   dynaspritemasks_extra_active.setProfileLabel("dynaspritemasks_extra_active");
   sceneGenerator = new SceneGenerator();
   if (is_real_machine())
-    m_packingSidecarsStorage.assign(384u * 1024u * 1024u, 0xA5);
+    m_packingSidecarsStorage.assign(256u * 1024u * 1024u, 0xA5);
 }
 
 SerumData::~SerumData() {}
@@ -226,8 +226,8 @@ void SerumData::DebugLogSpriteDynamicSidecarState(const char *stage,
       "hasActive=%s dyna255=%u dyna0=%u dynaOther=%u active0=%u active1=%u "
       "activeOther=%u",
       stage ? stage : "unknown", spriteId, hasDyna ? "true" : "false",
-      hasActive ? "true" : "false", dyna255, dyna0, dynaOther, active0,
-      active1, activeOther);
+      hasActive ? "true" : "false", dyna255, dyna0, dynaOther, active0, active1,
+      activeOther);
 }
 
 void SerumData::BuildPackingSidecarsAndNormalize() {
@@ -426,50 +426,6 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
   m_packingSidecarsNormalized = true;
 }
 
-void SerumData::PrepareRuntimeDynamicHotCache() {
-  std::vector<uint32_t> frameIds;
-  frameIds.reserve(nframes);
-  for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
-    if (frameId < frameHasDynamic.size() && frameHasDynamic[frameId] > 0) {
-      frameIds.push_back(frameId);
-    }
-  }
-  dynamasks.enableForcedDecodedReadsForIds(frameIds);
-  dynamasks_active.enableForcedDecodedReadsForIds(frameIds);
-
-  std::vector<uint32_t> extraFrameIds;
-  extraFrameIds.reserve(nframes);
-  for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
-    if (frameId < frameHasDynamicExtra.size() &&
-        frameHasDynamicExtra[frameId] > 0) {
-      extraFrameIds.push_back(frameId);
-    }
-  }
-  dynamasks_extra.enableForcedDecodedReadsForIds(extraFrameIds);
-  dynamasks_extra_active.enableForcedDecodedReadsForIds(extraFrameIds);
-
-  std::vector<uint32_t> spriteIds;
-  spriteIds.reserve(nsprites);
-  for (uint32_t spriteId = 0; spriteId < nsprites; ++spriteId) {
-    if (dynaspritemasks.hasData(spriteId) ||
-        dynaspritemasks_active.hasData(spriteId) ||
-        dynaspritemasks_extra.hasData(spriteId) ||
-        dynaspritemasks_extra_active.hasData(spriteId)) {
-      spriteIds.push_back(spriteId);
-    }
-  }
-  dynaspritemasks.enableForcedDecodedReadsForIds(spriteIds);
-  dynaspritemasks_active.enableForcedDecodedReadsForIds(spriteIds);
-  dynaspritemasks_extra.enableForcedDecodedReadsForIds(spriteIds);
-  dynaspritemasks_extra_active.enableForcedDecodedReadsForIds(spriteIds);
-
-  Log("Prepared runtime dynamic hot cache: %u frame masks, %u extra frame "
-      "masks,"
-      " %u sprite masks",
-      (uint32_t)frameIds.size(), (uint32_t)extraFrameIds.size(),
-      (uint32_t)spriteIds.size());
-}
-
 bool SerumData::HasSpriteRuntimeSidecars() const {
   if (nframes == 0 || nsprites == 0) {
     return false;
@@ -510,12 +466,10 @@ void SerumData::BuildSpriteRuntimeSidecars() {
   spriteUsesShape.assign(nsprites, 0);
   spriteDetectOffsets.assign(static_cast<size_t>(nsprites) + 1, 0);
   spriteDetectMeta.clear();
-  spriteOpaqueRowSegmentStart.assign(static_cast<size_t>(nsprites) *
-                                         MAX_SPRITE_HEIGHT,
-                                     0);
-  spriteOpaqueRowSegmentCount.assign(static_cast<size_t>(nsprites) *
-                                         MAX_SPRITE_HEIGHT,
-                                     0);
+  spriteOpaqueRowSegmentStart.assign(
+      static_cast<size_t>(nsprites) * MAX_SPRITE_HEIGHT, 0);
+  spriteOpaqueRowSegmentCount.assign(
+      static_cast<size_t>(nsprites) * MAX_SPRITE_HEIGHT, 0);
   spriteOpaqueSegments.clear();
 
   const size_t spritePixels = MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
