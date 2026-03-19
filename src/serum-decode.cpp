@@ -4315,45 +4315,85 @@ uint32_t Serum_RenderScene(void) {
       return FLAG_RETURNED_V2_SCENE;
     }
 
+    bool renderedFromDirectTriplet = false;
     uint8_t currentGroup = 1;
     bool hasGroup = g_serumData.sceneGenerator->updateAndGetCurrentGroup(
         static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame, -1,
         currentGroup);
+    if (hasGroup && !g_serumData.sceneFrameIdByTriplet.empty()) {
+      auto it = g_serumData.sceneFrameIdByTriplet.find(
+          MakeSceneTripletKey(static_cast<uint16_t>(lastTriggerID),
+                              currentGroup, sceneCurrentFrame));
+      if (it != g_serumData.sceneFrameIdByTriplet.end() &&
+          it->second < g_serumData.nframes) {
+        uint16_t result = g_serumData.sceneGenerator->generateFrame(
+            lastTriggerID, sceneCurrentFrame, sceneFrame, currentGroup, true);
+        DebugLogSceneEvent("generate", static_cast<uint16_t>(lastTriggerID),
+                           sceneCurrentFrame, sceneFrameCount,
+                           sceneDurationPerFrame, sceneOptionFlags,
+                           sceneInterruptable, sceneStartImmediately,
+                           sceneRepeatCount, currentGroup, result);
+        if (result == 0xffff) {
+          mySerum.rotationtimer = sceneDurationPerFrame;
+          Serum_ColorizeWithMetadatav2Internal(sceneFrame, true, it->second);
+          renderedFromDirectTriplet = true;
+        } else {
+          DebugLogSceneEvent(
+              "generate-error", static_cast<uint16_t>(lastTriggerID),
+              sceneCurrentFrame, sceneFrameCount, sceneDurationPerFrame,
+              sceneOptionFlags, sceneInterruptable, sceneStartImmediately,
+              sceneRepeatCount, currentGroup, result);
+          sceneFrameCount = 0;  // error generating scene frame, stop the scene
+          mySerum.rotationtimer = 0;
+          ForceNormalFrameRefreshAfterSceneEnd();
+          return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_ROTATED32 |
+                 FLAG_RETURNED_V2_ROTATED64 | FLAG_RETURNED_V2_SCENE;
+        }
+      }
+    }
     if (DebugSceneVerboseEnabled()) {
       Log("Serum debug scene path: sceneId=%u frameIndex=%u group=%u "
           "usedTriplet=%s tripletCount=%u",
           static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame, currentGroup,
-          "false",
+          renderedFromDirectTriplet ? "true" : "false",
           static_cast<uint32_t>(g_serumData.sceneFrameIdByTriplet.size()));
     }
 
-    uint16_t result = g_serumData.sceneGenerator->generateFrame(
-        lastTriggerID, sceneCurrentFrame, sceneFrame,
-        hasGroup ? currentGroup : -1);
-    DebugLogSceneEvent("generate", static_cast<uint16_t>(lastTriggerID),
-                       sceneCurrentFrame, sceneFrameCount,
-                       sceneDurationPerFrame, sceneOptionFlags,
-                       sceneInterruptable, sceneStartImmediately,
-                       sceneRepeatCount, currentGroup, result);
-    if (result > 0 && result < 0xffff) {
-      // frame not ready yet, return the time to wait
-      mySerum.rotationtimer = result;
-      return mySerum.rotationtimer | FLAG_RETURNED_V2_SCENE;
+    if (!renderedFromDirectTriplet) {
+      uint16_t result = g_serumData.sceneGenerator->generateFrame(
+          lastTriggerID, sceneCurrentFrame, sceneFrame,
+          hasGroup ? currentGroup : -1);
+      DebugLogSceneEvent("generate", static_cast<uint16_t>(lastTriggerID),
+                         sceneCurrentFrame, sceneFrameCount,
+                         sceneDurationPerFrame, sceneOptionFlags,
+                         sceneInterruptable, sceneStartImmediately,
+                         sceneRepeatCount, currentGroup, result);
+      if (result > 0 && result < 0xffff) {
+        // frame not ready yet, return the time to wait
+        mySerum.rotationtimer = result;
+        return mySerum.rotationtimer | FLAG_RETURNED_V2_SCENE;
+      }
+      if (result != 0xffff) {
+        DebugLogSceneEvent(
+            "generate-error", static_cast<uint16_t>(lastTriggerID),
+            sceneCurrentFrame, sceneFrameCount, sceneDurationPerFrame,
+            sceneOptionFlags, sceneInterruptable, sceneStartImmediately,
+            sceneRepeatCount, currentGroup, result);
+        sceneFrameCount = 0;  // error generating scene frame, stop the scene
+        mySerum.rotationtimer = 0;
+        ForceNormalFrameRefreshAfterSceneEnd();
+        return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_ROTATED32 |
+               FLAG_RETURNED_V2_ROTATED64 | FLAG_RETURNED_V2_SCENE;
+      }
+      mySerum.rotationtimer = sceneDurationPerFrame;
+      Serum_ColorizeWithMetadatav2(sceneFrame, true);
+    } else {
+      DebugLogSceneEvent("triplet-render", static_cast<uint16_t>(lastTriggerID),
+                         sceneCurrentFrame, sceneFrameCount,
+                         sceneDurationPerFrame, sceneOptionFlags,
+                         sceneInterruptable, sceneStartImmediately,
+                         sceneRepeatCount, currentGroup, 0xffff);
     }
-    if (result != 0xffff) {
-      DebugLogSceneEvent(
-          "generate-error", static_cast<uint16_t>(lastTriggerID),
-          sceneCurrentFrame, sceneFrameCount, sceneDurationPerFrame,
-          sceneOptionFlags, sceneInterruptable, sceneStartImmediately,
-          sceneRepeatCount, currentGroup, result);
-      sceneFrameCount = 0;  // error generating scene frame, stop the scene
-      mySerum.rotationtimer = 0;
-      ForceNormalFrameRefreshAfterSceneEnd();
-      return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_ROTATED32 |
-             FLAG_RETURNED_V2_ROTATED64 | FLAG_RETURNED_V2_SCENE;
-    }
-    mySerum.rotationtimer = sceneDurationPerFrame;
-    Serum_ColorizeWithMetadatav2(sceneFrame, true);
 
     sceneCurrentFrame++;
     if (sceneCurrentFrame >= sceneFrameCount && sceneRepeatCount > 0) {
