@@ -118,6 +118,9 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
      compatibility handling.
    - Direct `v6` cROMc runtime load is expected to consume already-normalized
      runtime-ready data instead of mutating or repairing it on device.
+   - Direct `v5` cROMc load must rerun this step after deserialization because
+     the persisted v5 format does not contain the normalized opacity/dynamic
+     sidecars used by current runtime code.
 9. Build or restore sprite runtime sidecars via `BuildSpriteRuntimeSidecars()`.
    - For direct `v6` cROMc loads, runtime sidecars are expected to be restored
      from file as final runtime data.

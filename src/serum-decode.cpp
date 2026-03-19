@@ -1867,6 +1867,10 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   if (result && g_serumData.sceneGenerator->isActive())
     g_serumData.sceneGenerator->setDepth(result->nocolors == 16 ? 4 : 2);
   if (result) {
+    if (loadedFromConcentrate && g_serumData.concentrateFileVersion < 6) {
+      g_serumData.BuildPackingSidecarsAndNormalize();
+      NoteStartupRssSample("after-packing-sidecar-normalize");
+    }
     if (!loadedFromConcentrate || g_serumData.concentrateFileVersion < 6 ||
         sceneDataUpdatedFromCsv) {
       BuildFrameLookupVectors();
