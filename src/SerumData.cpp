@@ -331,7 +331,8 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
       anyActive = anyActive || active;
     }
     dynamasks_active.set(frameId, flags.data(), framePixels);
-    dynamasks.set(frameId, normalized.data(), framePixels);
+    dynamasks.set(frameId, normalized.data(), framePixels,
+                  static_cast<SparseVector<uint8_t> *>(nullptr), anyActive);
     frameHasDynamic[frameId] = anyActive ? 1 : 0;
   }
 
@@ -362,7 +363,7 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
       dynamasks_extra_active.set(frameId, flags.data(), extraFramePixels,
                                  &isextraframe);
       dynamasks_extra.set(frameId, normalized.data(), extraFramePixels,
-                          &isextraframe);
+                          &isextraframe, anyActive);
       frameHasDynamicExtra[frameId] = anyActive ? 1 : 0;
     }
   } else {
@@ -380,15 +381,19 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
     }
     const uint8_t *source = dynaspritemasks[spriteId];
     const uint8_t *activeSource = dynaspritemasks_active[spriteId];
+    bool anyActive = false;
     for (size_t i = 0; i < spritePixels; ++i) {
       const uint8_t value = hasSourceVector ? source[i] : 0;
       const bool active =
           hasActiveVector ? (activeSource[i] > 0) : (value != 255);
       flags[i] = active ? 1 : 0;
       normalized[i] = active ? value : 0;
+      anyActive = anyActive || active;
     }
     dynaspritemasks_active.set(spriteId, flags.data(), spritePixels);
-    dynaspritemasks.set(spriteId, normalized.data(), spritePixels);
+    dynaspritemasks.set(spriteId, normalized.data(), spritePixels,
+                        static_cast<SparseVector<uint8_t> *>(nullptr),
+                        anyActive);
     DebugLogSpriteDynamicSidecarState("normalize-after", spriteId);
   }
 
@@ -403,17 +408,19 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
     }
     const uint8_t *source = dynaspritemasks_extra[spriteId];
     const uint8_t *activeSource = dynaspritemasks_extra_active[spriteId];
+    bool anyActive = false;
     for (size_t i = 0; i < spritePixels; ++i) {
       const uint8_t value = hasSourceVector ? source[i] : 0;
       const bool active =
           hasActiveVector ? (activeSource[i] > 0) : (value != 255);
       flags[i] = active ? 1 : 0;
       normalized[i] = active ? value : 0;
+      anyActive = anyActive || active;
     }
     dynaspritemasks_extra_active.set(spriteId, flags.data(), spritePixels,
                                      &isextrasprite);
     dynaspritemasks_extra.set(spriteId, normalized.data(), spritePixels,
-                              &isextrasprite);
+                              &isextrasprite, anyActive);
   }
 
   m_packingSidecarsNormalized = true;

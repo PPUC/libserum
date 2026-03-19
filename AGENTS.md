@@ -60,6 +60,10 @@ Vector policy currently used in `SerumData`:
   - `dynamasks_extra` + `dynamasks_extra_active`
   - `dynaspritemasks` + `dynaspritemasks_active`
   - `dynaspritemasks_extra` + `dynaspritemasks_extra_active`
+  - During normalization, dynamic value vectors may preserve an explicit
+    all-zero payload only when the paired active sidecar still marks active
+    pixels; this is required because dynamic layer `0` is a valid value and is
+    not equivalent to "no payload".
 - Precomputed frame-level dynamic fast flags are persisted:
   - `frameHasDynamic`
   - `frameHasDynamicExtra`

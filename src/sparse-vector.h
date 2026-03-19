@@ -709,7 +709,8 @@ class SparseVector {
 
   template <typename U = T>
   void set(uint32_t elementId, const T *values, size_t size,
-           SparseVector<U> *parent = nullptr) {
+           SparseVector<U> *parent = nullptr,
+           bool preserveNoDataPayload = false) {
     if (useIndex) {
       throw std::runtime_error("set() must not be used for index");
     }
@@ -728,11 +729,13 @@ class SparseVector {
     }
 
     if (parent == nullptr || parent->hasData(elementId)) {
-      if (memcmp(values, noData.data(), elementSize * sizeof(T)) == 0) {
+      if (!preserveNoDataPayload &&
+          memcmp(values, noData.data(), elementSize * sizeof(T)) == 0) {
         data.erase(elementId);
         return;
       }
-      if (memcmp(values, noData.data(), elementSize * sizeof(T)) != 0) {
+      if (preserveNoDataPayload ||
+          memcmp(values, noData.data(), elementSize * sizeof(T)) != 0) {
         std::vector<uint8_t> valuePacked;
         const uint8_t *storeBytes = reinterpret_cast<const uint8_t *>(values);
         size_t storeByteSize = elementSize * sizeof(T);
