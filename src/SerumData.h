@@ -90,6 +90,16 @@ class SerumData {
     }
   };
 
+  struct CriticalTriggerLookupEntry {
+    uint64_t key = 0;
+    std::vector<uint32_t> frameIds;
+
+    template <class Archive>
+    void serialize(Archive &ar) {
+      ar(key, frameIds);
+    }
+  };
+
   SerumData();
   ~SerumData();
 
@@ -108,6 +118,7 @@ class SerumData {
   bool LoadFromBuffer(const uint8_t *data, size_t size, const uint8_t flags);
   void BuildPackingSidecarsAndNormalize();
   void BuildSpriteRuntimeSidecars();
+  void BuildCriticalTriggerLookup();
   void DebugLogSpriteDynamicSidecarState(const char *stage, uint32_t spriteId);
   void DebugLogPackingSidecarsStorageSizes();
   bool HasSpriteRuntimeSidecars() const;
@@ -206,6 +217,8 @@ class SerumData {
   std::unordered_map<uint64_t, std::vector<uint32_t>> sceneFramesBySignature;
   std::unordered_map<uint64_t, uint32_t> sceneFrameIdByTriplet;
   std::unordered_map<uint64_t, uint16_t> colorRotationLookupByFrameAndColor;
+  std::unordered_map<uint64_t, std::vector<uint32_t>>
+      criticalTriggerFramesBySignature;
 
   SceneGenerator *sceneGenerator;
 
@@ -279,11 +292,26 @@ class SerumData {
                     return a.key < b.key;
                   });
 
+        std::vector<CriticalTriggerLookupEntry> criticalTriggerEntries;
+        criticalTriggerEntries.reserve(criticalTriggerFramesBySignature.size());
+        for (const auto &entry : criticalTriggerFramesBySignature) {
+          CriticalTriggerLookupEntry serialized;
+          serialized.key = entry.first;
+          serialized.frameIds = entry.second;
+          std::sort(serialized.frameIds.begin(), serialized.frameIds.end());
+          criticalTriggerEntries.push_back(std::move(serialized));
+        }
+        std::sort(criticalTriggerEntries.begin(), criticalTriggerEntries.end(),
+                  [](const CriticalTriggerLookupEntry &a,
+                     const CriticalTriggerLookupEntry &b) {
+                    return a.key < b.key;
+                  });
+
         ar(frameIsScene, sceneSignatureEntries, spriteoriginal_opaque,
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
-           sceneTripletEntries, colorRotationEntries,
+           sceneTripletEntries, colorRotationEntries, criticalTriggerEntries,
            spriteCandidateOffsets, spriteCandidateIds, spriteCandidateSlots,
            frameHasShapeSprite, spriteWidth, spriteHeight, spriteUsesShape,
            spriteDetectOffsets, spriteDetectMeta, spriteOpaqueRowSegmentStart,
@@ -294,11 +322,12 @@ class SerumData {
         std::vector<SceneSignatureLookupEntry> sceneSignatureEntries;
         std::vector<SceneTripletLookupEntry> sceneTripletEntries;
         std::vector<ColorRotationLookupEntry> colorRotationEntries;
+        std::vector<CriticalTriggerLookupEntry> criticalTriggerEntries;
         ar(frameIsScene, sceneSignatureEntries, spriteoriginal_opaque,
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
-           sceneTripletEntries, colorRotationEntries,
+           sceneTripletEntries, colorRotationEntries, criticalTriggerEntries,
            spriteCandidateOffsets, spriteCandidateIds, spriteCandidateSlots,
            frameHasShapeSprite, spriteWidth, spriteHeight, spriteUsesShape,
            spriteDetectOffsets, spriteDetectMeta, spriteOpaqueRowSegmentStart,
@@ -321,11 +350,18 @@ class SerumData {
         for (const auto &entry : colorRotationEntries) {
           colorRotationLookupByFrameAndColor[entry.key] = entry.value;
         }
+
+        criticalTriggerFramesBySignature.clear();
+        criticalTriggerFramesBySignature.reserve(criticalTriggerEntries.size());
+        for (const auto &entry : criticalTriggerEntries) {
+          criticalTriggerFramesBySignature[entry.key] = entry.frameIds;
+        }
       } else {
         frameIsScene.clear();
         sceneFramesBySignature.clear();
         sceneFrameIdByTriplet.clear();
         colorRotationLookupByFrameAndColor.clear();
+        criticalTriggerFramesBySignature.clear();
         spriteoriginal_opaque.clear();
         spritemask_extra_opaque.clear();
         spritedescriptionso_opaque.clear();

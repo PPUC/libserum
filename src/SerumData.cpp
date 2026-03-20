@@ -8,6 +8,16 @@
 
 bool is_real_machine();
 
+namespace {
+constexpr uint32_t kMonochromeTriggerId = 65432u;
+constexpr uint32_t kMonochromePaletteTriggerId = 65431u;
+
+uint64_t MakeCriticalTriggerSignature(uint8_t mask, uint8_t shape,
+                                      uint32_t hash) {
+  return (uint64_t(mask) << 40) | (uint64_t(shape) << 32) | hash;
+}
+}  // namespace
+
 static uint32_t GetDebugSpriteIdFromEnv() {
   const char *value = std::getenv("SERUM_DEBUG_SPRITE_ID");
   if (!value || value[0] == '\0') {
@@ -177,6 +187,33 @@ void SerumData::Clear() {
   sceneFramesBySignature.clear();
   sceneFrameIdByTriplet.clear();
   colorRotationLookupByFrameAndColor.clear();
+  criticalTriggerFramesBySignature.clear();
+}
+
+void SerumData::BuildCriticalTriggerLookup() {
+  criticalTriggerFramesBySignature.clear();
+  if (nframes == 0) {
+    return;
+  }
+
+  for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+    if (frameId < frameIsScene.size() && frameIsScene[frameId] != 0) {
+      continue;
+    }
+
+    const uint32_t triggerId = triggerIDs[frameId][0];
+    if (triggerId != kMonochromeTriggerId &&
+        triggerId != kMonochromePaletteTriggerId) {
+      continue;
+    }
+
+    const uint8_t mask = compmaskID[frameId][0];
+    const uint8_t shape = shapecompmode[frameId][0];
+    const uint32_t hash = hashcodes[frameId][0];
+    criticalTriggerFramesBySignature[MakeCriticalTriggerSignature(mask, shape,
+                                                                  hash)]
+        .push_back(frameId);
+  }
 }
 
 void SerumData::DebugLogSpriteDynamicSidecarState(const char *stage,

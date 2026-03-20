@@ -87,6 +87,10 @@ Vector policy currently used in `SerumData`:
     rather than direct `unordered_map` archive order, so `cROMc` output stays
     platform-independent and deterministic for identical source data.
   - `ColorInRotation` uses lookup-only runtime path (no linear scan fallback).
+- Critical monochrome trigger frames use a precomputed lookup:
+  `criticalTriggerFramesBySignature[(mask,shape,hash)] -> frameId(s)`
+  restored from v6 cROMc when present and rebuilt during frame-lookup
+  preprocessing otherwise.
 - Sprite runtime sidecars are precomputed and used by `Check_Spritesv2`:
   - frame candidate list with sprite slot indices (`spriteCandidateOffsets`,
     `spriteCandidateIds`, `spriteCandidateSlots`)
@@ -212,7 +216,13 @@ How it works:
    - Runtime playback then combines this triplet lookup with trigger-provided
      `sceneDurationPerFrame`; it does not regenerate marker frames on each
      scene tick.
-6. Initialize `lastfound_scene` / `lastfound_normal` from first available IDs.
+6. During the same preprocessing pass, build critical monochrome-trigger
+   signatures for non-scene frames:
+   - include only frames with trigger IDs:
+     - `MONOCHROME_TRIGGER_ID`
+     - `MONOCHROME_PALETTE_TRIGGER_ID`
+   - persist mapping in `criticalTriggerFramesBySignature`.
+7. Initialize `lastfound_scene` / `lastfound_normal` from first available IDs.
 
 Log line:
 - `Loaded X frames and Y rotation scene frames`
@@ -252,6 +262,21 @@ Background placeholder policy:
 - When true, frame-level background images are treated as placeholders and existing output pixel is kept in masked background areas.
 - This is used when a background scene is active so the scene background can continue while foreground content changes.
 
+Critical-trigger fast rejection:
+- While a non-interruptable scene (or its end-hold) is active, normal incoming
+  frames are not always sent through full `Identify_Frame(...)`.
+- `Serum_ColorizeWithMetadatav2Internal(...)` first checks a tiny precomputed
+  subset containing only non-scene frames with trigger IDs:
+  - `MONOCHROME_TRIGGER_ID`
+  - `MONOCHROME_PALETTE_TRIGGER_ID`
+- If no such critical trigger frame matches, the incoming frame is rejected
+  immediately without full identification.
+- This preserves important monochrome/service-menu transitions while avoiding
+  most irrelevant input-frame work during non-interruptable scenes.
+- If such a critical monochrome trigger frame does match, it is allowed to
+  preempt the non-interruptable scene immediately; libserum stops the current
+  scene/end-hold and processes the monochrome-trigger frame normally.
+
 ## Scene playback and options
 Scene data comes from CSV (`SceneGenerator`).
 
@@ -276,6 +301,8 @@ Stored in v6:
   - `frameIsScene`
   - `sceneFramesBySignature`
   - `sceneFrameIdByTriplet`
+- Critical monochrome-trigger lookup:
+  - `criticalTriggerFramesBySignature`
 - Color-rotation lookup acceleration:
   - `colorRotationLookupByFrameAndColor`
 - Derived lookup tables are serialized in canonical sorted-entry form instead of

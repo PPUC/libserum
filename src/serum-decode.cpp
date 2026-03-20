@@ -124,6 +124,7 @@ static bool g_debugBypassSceneGate = false;
 static bool g_debugVerboseIdentify = false;
 static bool g_debugVerboseSprites = false;
 static bool g_debugVerboseScenes = false;
+static std::vector<std::pair<uint8_t, uint8_t>> g_criticalTriggerMaskShapes;
 
 static SerumData g_serumData;
 uint16_t sceneFrameCount = 0;
@@ -177,6 +178,60 @@ const uint16_t greyscale_16[16] = {
     0xE71C,  // 14/15
     0xFFFF   // White (31, 63, 31)
 };
+
+extern bool cromloaded;
+uint32_t calc_crc32(uint8_t* source, uint8_t mask, uint32_t n, uint8_t Shape);
+static uint64_t MakeFrameSignature(uint8_t mask, uint8_t shape, uint32_t hash);
+
+static void InitCriticalTriggerLookupRuntimeState(void) {
+  g_criticalTriggerMaskShapes.clear();
+  if (g_serumData.criticalTriggerFramesBySignature.empty()) {
+    return;
+  }
+
+  std::unordered_set<uint16_t> uniqueMaskShapeKeys;
+  uniqueMaskShapeKeys.reserve(g_serumData.criticalTriggerFramesBySignature.size());
+  for (const auto& entry : g_serumData.criticalTriggerFramesBySignature) {
+    const uint8_t mask = static_cast<uint8_t>((entry.first >> 40) & 0xffu);
+    const uint8_t shape = static_cast<uint8_t>((entry.first >> 32) & 0xffu);
+    const uint16_t key = (uint16_t(mask) << 8) | shape;
+    if (uniqueMaskShapeKeys.insert(key).second) {
+      g_criticalTriggerMaskShapes.emplace_back(mask, shape);
+    }
+  }
+}
+
+static uint32_t IdentifyCriticalTriggerFrame(uint8_t* frame) {
+  if (!cromloaded || g_criticalTriggerMaskShapes.empty() ||
+      g_serumData.criticalTriggerFramesBySignature.empty()) {
+    return IDENTIFY_NO_FRAME;
+  }
+
+  const uint32_t pixels = g_serumData.is256x64
+                              ? (256 * 64)
+                              : (g_serumData.fwidth * g_serumData.fheight);
+  for (const auto& maskShape : g_criticalTriggerMaskShapes) {
+    const uint32_t hash =
+        calc_crc32(frame, maskShape.first, pixels, maskShape.second);
+    auto it = g_serumData.criticalTriggerFramesBySignature.find(
+        MakeFrameSignature(maskShape.first, maskShape.second, hash));
+    if (it != g_serumData.criticalTriggerFramesBySignature.end() &&
+        !it->second.empty()) {
+      return it->second.front();
+    }
+  }
+
+  return IDENTIFY_NO_FRAME;
+}
+
+static bool IsCriticalMonochromeTriggerFrame(uint32_t frameId) {
+  if (frameId >= g_serumData.nframes) {
+    return false;
+  }
+  const uint32_t triggerId = g_serumData.triggerIDs[frameId][0];
+  return triggerId == MONOCHROME_TRIGGER_ID ||
+         triggerId == MONOCHROME_PALETTE_TRIGGER_ID;
+}
 uint16_t monochromePaletteV2[16] = {0};
 uint8_t monochromePaletteV2Length = 0;
 
@@ -877,6 +932,7 @@ void Serum_free(void) {
   monochromePaletteMode = false;
   monochromePaletteV2Length = 0;
   g_sceneResumeState.clear();
+  g_criticalTriggerMaskShapes.clear();
 
   g_serumData.sceneGenerator->Reset();
 }
@@ -1895,6 +1951,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
       g_serumData.BuildSpriteRuntimeSidecars();
       NoteStartupRssSample("after-sprite-sidecar-build");
     }
+    InitCriticalTriggerLookupRuntimeState();
     NoteStartupRssSample("before-runtime");
     LogStartupRssSummary();
   }
@@ -1974,7 +2031,10 @@ static void BuildFrameLookupVectors(void) {
             .push_back(frameId);
         numSceneFrames++;
       }
+
     }
+
+    g_serumData.BuildCriticalTriggerLookup();
 
     if (g_serumData.concentrateFileVersion >= 6) {
       // Build direct lookup table: (sceneId, group, frameIndex) -> frameId.
@@ -3673,6 +3733,17 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
 
   // Identify frame unless caller already resolved a concrete frame ID.
   uint32_t frameID = IDENTIFY_NO_FRAME;
+  const bool fastRejectNonInterruptableScene =
+      !sceneFrameRequested && knownFrameId >= g_serumData.nframes &&
+      !monochromeMode && g_serumData.sceneGenerator->isActive() &&
+      (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
+      !sceneInterruptable;
+  if (fastRejectNonInterruptableScene) {
+    frameID = IdentifyCriticalTriggerFrame(frame);
+    if (frameID == IDENTIFY_NO_FRAME) {
+      return IDENTIFY_NO_FRAME;
+    }
+  }
   if (knownFrameId < g_serumData.nframes) {
     frameID = knownFrameId;
     lastfound = knownFrameId;
@@ -3685,6 +3756,11 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       first_match_normal = false;
       lastframe_full_crc_normal = 0;
     }
+  } else if (frameID != IDENTIFY_NO_FRAME) {
+    lastfound = frameID;
+    lastfound_normal = frameID;
+    first_match_normal = false;
+    lastframe_full_crc_normal = 0;
   } else {
     frameID = Identify_Frame(frame, sceneFrameRequested);
   }
@@ -3733,12 +3809,27 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
               sceneFrameCount, sceneEndHoldUntilMs,
               g_debugBypassSceneGate ? "true" : "false");
         }
-        if (!g_debugBypassSceneGate) {
+        if (!g_debugBypassSceneGate &&
+            !IsCriticalMonochromeTriggerFrame(lastfound)) {
           if (keepTriggersInternal ||
               mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
             mySerum.triggerID = 0xffffffff;
           // Scene is active and not interruptable
           return IDENTIFY_NO_FRAME;
+        }
+        if (IsCriticalMonochromeTriggerFrame(lastfound)) {
+          DebugLogSceneEvent(
+              "stop-critical-monochrome-trigger",
+              static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame,
+              sceneFrameCount, sceneDurationPerFrame, sceneOptionFlags,
+              sceneInterruptable, sceneStartImmediately, sceneRepeatCount);
+          sceneFrameCount = 0;
+          sceneIsLastBackgroundFrame = false;
+          sceneEndHoldUntilMs = 0;
+          sceneEndHoldDurationMs = 0;
+          sceneNextFrameAtMs = 0;
+          mySerum.rotationtimer = 0;
+          ForceNormalFrameRefreshAfterSceneEnd();
         }
       }
 
