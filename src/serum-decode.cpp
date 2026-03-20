@@ -1012,7 +1012,7 @@ static void DebugLogSpriteAccepted(uint32_t frameId, uint8_t spriteId,
                                    uint16_t frameY, uint16_t spriteX,
                                    uint16_t spriteY, uint16_t width,
                                    uint16_t height, bool duplicate) {
-  if (!DebugTraceSpritesForCurrentInput()) {
+  if (!DebugSpriteVerboseEnabled() || !DebugTraceSpritesForCurrentInput()) {
     return;
   }
   Log("Serum debug sprite accepted: frameId=%u inputCrc=%u spriteId=%u "
@@ -1022,7 +1022,7 @@ static void DebugLogSpriteAccepted(uint32_t frameId, uint8_t spriteId,
 }
 
 static void DebugLogSpriteCheckResult(uint32_t frameId, uint8_t nspr) {
-  if (!DebugTraceSpritesForCurrentInput()) {
+  if (!DebugSpriteVerboseEnabled() || !DebugTraceSpritesForCurrentInput()) {
     return;
   }
   Log("Serum debug sprites result: frameId=%u inputCrc=%u matches=%u", frameId,
@@ -1490,6 +1490,16 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(const uint8_t flags) {
   enabled = true;
 
   return &mySerum;
+}
+
+static void LogLoadedColorizationSource(const std::string& path,
+                                        bool loadedFromConcentrate) {
+  if (loadedFromConcentrate) {
+    Log("Loaded %s (Serum v%d, concentrate v%d)", path.c_str(),
+        g_serumData.SerumVersion, g_serumData.concentrateFileVersion);
+  } else {
+    Log("Loaded %s (Serum v%d)", path.c_str(), g_serumData.SerumVersion);
+  }
 }
 
 Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
@@ -2146,7 +2156,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
       loadedFromConcentrate = (result != NULL);
       if (result) {
         NoteStartupRssSample("after-cromc-load");
-        Log("Loaded %s", pFoundFile->c_str());
+        LogLoadedColorizationSource(*pFoundFile, true);
         if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
             g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str())) {
           sceneDataUpdatedFromCsv = true;
@@ -2181,7 +2191,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     result = Serum_LoadFilev1(pFoundFile->c_str(), flags);
     if (result) {
       NoteStartupRssSample("after-crom-load");
-      Log("Loaded %s", pFoundFile->c_str());
+      LogLoadedColorizationSource(*pFoundFile, false);
       if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2) {
         sceneDataUpdatedFromCsv =
             g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str());
@@ -3541,7 +3551,8 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
   uint16_t *pfr, *prot;
   uint16_t* prt;
   uint32_t* cshft;
-  const bool traceSprite = DebugTraceMatches(g_debugCurrentInputCrc, IDfound);
+  const bool traceSprite =
+      DebugSpriteVerboseEnabled() && DebugTraceMatches(g_debugCurrentInputCrc, IDfound);
   const bool hasOpaque = g_serumData.spriteoriginal_opaque.hasData(nosprite);
   const bool hasDynaActive =
       g_serumData.dynaspritemasks_active.hasData(nosprite);
@@ -4192,7 +4203,8 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
             g_debugCurrentInputCrc, frameID,
             sceneFrameRequested ? "true" : "false");
       }
-      if (DebugTraceMatches(g_debugCurrentInputCrc, frameID)) {
+      if (DebugIdentifyVerboseEnabled() &&
+          DebugTraceMatches(g_debugCurrentInputCrc, frameID)) {
         Log("Serum debug identify result: inputCrc=%u frameId=%u "
             "sceneRequested=%s triggerId=%u",
             g_debugCurrentInputCrc, frameID,
@@ -4410,7 +4422,8 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                 isBackgroundSceneRequested ? lastFrameId : lastfound);
             ti++;
           }
-          if (DebugTraceMatches(
+          if (g_debugStageHashes &&
+              DebugTraceMatches(
                   g_debugCurrentInputCrc,
                   isBackgroundSceneRequested ? lastFrameId : lastfound)) {
             uint64_t spriteHash = DebugHashBytesFNV1a64(

@@ -380,6 +380,8 @@ v6 snapshot policy:
 ## Logging
 - Central callback configured by `Serum_SetLogCallback`.
 - `serum-decode.cpp` and `SceneGenerator.cpp` both use callback-based `Log(...)`.
+- Successful load logging includes Serum runtime version and, for `cROMc`
+  loads, the concentrate version.
 - Missing-file logs from `find_case_insensitive_file(...)` use normalized path joining.
 - Optional runtime debug tracing is env-gated and split by verbosity:
   - `SERUM_DEBUG_TRACE_INPUTS=1` enables high-level lifecycle logs (input,
@@ -391,6 +393,8 @@ v6 snapshot policy:
   - `SERUM_DEBUG_INPUT_CRC`, `SERUM_DEBUG_FRAME_ID`, and
     `SERUM_DEBUG_STAGE_HASHES=1` remain available as output filters and
     expensive hash tracing controls.
+  - Debug-only identify/sprite/stage-hash lines must stay silent by default
+    and may only appear when the corresponding env-gated debug mode is enabled.
 - Optional runtime profiling:
   - If env `SERUM_PROFILE_DYNAMIC_HOTPATHS` is enabled (`1/true/on/yes`),
     periodic average timings are logged for the full end-to-end rendered-frame
