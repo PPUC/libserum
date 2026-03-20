@@ -71,6 +71,9 @@ Vector policy currently used in `SerumData`:
     all-zero payload only when the paired active sidecar still marks active
     pixels; this is required because dynamic layer `0` is a valid value and is
     not equivalent to "no payload".
+  - The pre-normalization source vectors for `dynamasks*` and
+    `dynaspritemasks*` must retain legacy `255` no-data sentinel semantics so
+    an all-layer-`0` active payload is not dropped before sidecar generation.
   - `BuildPackingSidecarsAndNormalize()` also snapshots each generated sidecar
     payload into `m_packingSidecarsStorage` as a transient two-dimensional byte
     store (`std::vector<std::vector<uint8_t>>`).

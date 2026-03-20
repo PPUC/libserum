@@ -46,9 +46,9 @@ SerumData::SerumData()
       cframes(0, false, true),
       cframes_v2(0, false, true),
       cframes_v2_extra(0, false, true),
-      dynamasks(0, false, true, true, 0, 1),
+      dynamasks(255, false, true, true, 0, 1),
       dynamasks_active(0, false, true, true, 0, 1),
-      dynamasks_extra(0, false, true, true, 0, 1),
+      dynamasks_extra(255, false, true, true, 0, 1),
       dynamasks_extra_active(0, false, true, true, 0, 1),
       dyna4cols(0),
       dyna4cols_v2(0, false, true),
@@ -87,9 +87,9 @@ SerumData::SerumData()
       dynashadowscol_extra(0),
       dynasprite4cols(0),
       dynasprite4cols_extra(0),
-      dynaspritemasks(0, false, true, true, 0, 1),
+      dynaspritemasks(255, false, true, true, 0, 1),
       dynaspritemasks_active(0, false, true, true, 0, 1),
-      dynaspritemasks_extra(0, false, true, true, 0, 1),
+      dynaspritemasks_extra(255, false, true, true, 0, 1),
       dynaspritemasks_extra_active(0, false, true, true, 0, 1),
       sprshapemode(0) {
   cframes_v2.setProfileLabel("cframes_v2");
