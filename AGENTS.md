@@ -79,6 +79,9 @@ Vector policy currently used in `SerumData`:
   - `frameHasDynamicExtra`
 - `Colorize_Framev1/v2` uses these flags to bypass dynamic-mask branches
   entirely for frames without active dynamic pixels.
+- Runtime frame rendering must not rely on `activeframes` alone: frames with
+  background-only or dynamic-only content are still renderable and must pass
+  the render gate even when static base pixels are absent.
 - Color rotations use a precomputed lookup index:
   `colorRotationLookupByFrameAndColor[(frameId,isExtra,color)] -> (rotation,position)`
   restored from v6 cROMc when present.

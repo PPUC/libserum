@@ -801,6 +801,27 @@ static void DebugLogFrameMetadataIfRequested(uint32_t frameId) {
   g_serumData.DebugLogPackingSidecarsStorageSizes();
 }
 
+static bool FrameHasRenderableContent(uint32_t frameId) {
+  if (frameId >= g_serumData.nframes) {
+    return false;
+  }
+  if (g_serumData.activeframes[frameId][0] != 0) {
+    return true;
+  }
+  if (g_serumData.backgroundIDs[frameId][0] < g_serumData.nbackgrounds) {
+    return true;
+  }
+  if (frameId < g_serumData.frameHasDynamic.size() &&
+      g_serumData.frameHasDynamic[frameId] > 0) {
+    return true;
+  }
+  if (frameId < g_serumData.frameHasDynamicExtra.size() &&
+      g_serumData.frameHasDynamicExtra[frameId] > 0) {
+    return true;
+  }
+  return false;
+}
+
 static uint64_t DebugHashBytesFNV1a64(const void* data, size_t size) {
   const uint8_t* bytes = static_cast<const uint8_t*>(data);
   uint64_t hash = 1469598103934665603ULL;
@@ -3882,7 +3903,7 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
       bool isspr = Check_Spritesv1(frame, (uint32_t)lastfound, nosprite, &nspr,
                                    frx, fry, spx, spy, wid, hei);
       if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
-          g_serumData.activeframes[lastfound][0] != 0) {
+          FrameHasRenderableContent(lastfound)) {
         Colorize_Framev1(frame, lastfound);
         Copy_Frame_Palette(lastfound);
         {
@@ -4385,7 +4406,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                     isBackgroundSceneRequested ? lastFrameId : lastfound,
                     nosprite, &nspr, frx, fry, spx, spy, wid, hei);
       if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
-          g_serumData.activeframes[lastfound][0] != 0) {
+          FrameHasRenderableContent(lastfound)) {
         const bool profileNow = g_profileDynamicHotPaths;
         std::chrono::steady_clock::time_point profStart;
         if (profileNow) {
@@ -4722,7 +4743,7 @@ uint32_t Serum_RenderScene(void) {
 
         case FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED:
           if (lastfound < MAX_NUMBER_FRAMES &&
-              g_serumData.activeframes[lastfound][0] != 0) {
+              FrameHasRenderableContent(lastfound)) {
             Serum_ColorizeWithMetadatav2(lastFrame);
           } else {
             if (mySerum.frame32)
@@ -4864,7 +4885,7 @@ uint32_t Serum_RenderScene(void) {
 
         case FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED:
           if (lastfound < MAX_NUMBER_FRAMES &&
-              g_serumData.activeframes[lastfound][0] != 0) {
+              FrameHasRenderableContent(lastfound)) {
             Serum_ColorizeWithMetadatav2(lastFrame);
           } else {
             if (mySerum.frame32)
