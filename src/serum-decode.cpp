@@ -118,6 +118,9 @@ static uint64_t g_profileIdentifyCriticalNs = 0;
 static uint64_t g_profileIdentifyNormalCalls = 0;
 static uint64_t g_profileIdentifySceneCalls = 0;
 static uint64_t g_profileIdentifyCriticalCalls = 0;
+static uint64_t g_profileIncomingFrameCalls = 0;
+static uint64_t g_profileNoFrameReturns = 0;
+static uint64_t g_profileSameFrameReturns = 0;
 static uint64_t g_profilePeakRssBytes = 0;
 static uint64_t g_profileStartupStartRssBytes = 0;
 static uint64_t g_profileStartupPeakRssBytes = 0;
@@ -579,6 +582,9 @@ static void ResetDynamicHotPathProfile() {
   g_profileIdentifyNormalCalls = 0;
   g_profileIdentifySceneCalls = 0;
   g_profileIdentifyCriticalCalls = 0;
+  g_profileIncomingFrameCalls = 0;
+  g_profileNoFrameReturns = 0;
+  g_profileSameFrameReturns = 0;
   g_profilePeakRssBytes = GetProcessResidentMemoryBytes();
   g_profileFrameOperationDepth = 0;
   g_profileFrameOperationFinished = false;
@@ -3962,6 +3968,10 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   mySerum.triggerID = 0xffffffff;
   mySerum.frameID = IDENTIFY_NO_FRAME;
   g_debugCurrentInputCrc = 0;
+  if (g_profileDynamicHotPaths && !sceneFrameRequested &&
+      knownFrameId >= g_serumData.nframes) {
+    ++g_profileIncomingFrameCalls;
+  }
 
   // Identify frame unless caller already resolved a concrete frame ID.
   uint32_t frameID = IDENTIFY_NO_FRAME;
@@ -3973,6 +3983,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   if (fastRejectNonInterruptableScene) {
     frameID = IdentifyCriticalTriggerFrame(frame);
     if (frameID == IDENTIFY_NO_FRAME) {
+      if (g_profileDynamicHotPaths && !sceneFrameRequested) {
+        ++g_profileNoFrameReturns;
+      }
       return IDENTIFY_NO_FRAME;
     }
   }
@@ -4047,6 +4060,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
               mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
             mySerum.triggerID = 0xffffffff;
           // Scene is active and not interruptable
+          if (g_profileDynamicHotPaths && !sceneFrameRequested) {
+            ++g_profileNoFrameReturns;
+          }
           return IDENTIFY_NO_FRAME;
         }
         if (IsCriticalMonochromeTriggerFrame(lastfound)) {
@@ -4088,6 +4104,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
         if (keepTriggersInternal ||
             mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
           mySerum.triggerID = 0xffffffff;
+        if (g_profileDynamicHotPaths && !sceneFrameRequested) {
+          ++g_profileSameFrameReturns;
+        }
         return IDENTIFY_SAME_FRAME;
       }
 
@@ -4123,6 +4142,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
           // New frame has the same Trigger ID, continuing an already running
           // seamless looped scene.
           // Wait for the next rotation to have a smooth transition.
+          if (g_profileDynamicHotPaths) {
+            ++g_profileSameFrameReturns;
+          }
           return IDENTIFY_SAME_FRAME;
         } else if (sceneIsLastBackgroundFrame &&
                    (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
@@ -4376,10 +4398,16 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
             Log("Perf dynamic avg: frame=%.3fms Colorize_Framev2=%.3fms "
                 "Colorize_Spritev2=%.3fms Identify=%.3fms "
                 "IdentifyNormal=%.3fms IdentifyScene=%.3fms "
-                "IdentifyCritical=%.3fms rss=%.1fMiB peak=%.1fMiB over %u "
+                "IdentifyCritical=%.3fms inputs=%llu rendered=%llu "
+                "same=%llu noFrame=%llu rss=%.1fMiB peak=%.1fMiB over %u "
                 "frames",
                 roundTripMs, frameMs, spriteMs, identifyMs, identifyNormalMs,
-                identifySceneMs, identifyCriticalMs, rssMiB, peakRssMiB,
+                identifySceneMs, identifyCriticalMs,
+                static_cast<unsigned long long>(g_profileIncomingFrameCalls),
+                static_cast<unsigned long long>(g_profileColorizeCalls),
+                static_cast<unsigned long long>(g_profileSameFrameReturns),
+                static_cast<unsigned long long>(g_profileNoFrameReturns),
+                rssMiB, peakRssMiB,
                 (uint32_t)g_profileColorizeCalls);
             if (g_profileSparseVectors) {
               g_serumData.LogSparseVectorProfileSnapshot();
@@ -4555,6 +4583,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     return 0;  // "colorized" frame with no rotations
   }
 
+  if (g_profileDynamicHotPaths && !sceneFrameRequested) {
+    ++g_profileNoFrameReturns;
+  }
   return IDENTIFY_NO_FRAME;  // no new frame, client has to update rotations!
 }
 

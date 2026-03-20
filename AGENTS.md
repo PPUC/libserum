@@ -396,8 +396,9 @@ v6 snapshot policy:
     periodic average timings are logged for the full end-to-end rendered-frame
     round trip (`frame`), `Colorize_Framev2`, and `Colorize_Spritev2`, along
     with average identification time (`Identify_Frame`) split into
-    normal/scene calls plus the critical-trigger mini-matcher, and current
-    process RSS memory usage and process-local peak RSS seen so far.
+    normal/scene calls plus the critical-trigger mini-matcher, input/result
+    counters (`inputs`, `rendered`, `same`, `noFrame`), and current process
+    RSS memory usage and process-local peak RSS seen so far.
   - If env `SERUM_PROFILE_DYNAMIC_HOTPATHS_WINDOWED=1`, the same counters are
     reset after each emitted 240-frame block so each `Perf dynamic avg` line
     reflects only the most recent window rather than a cumulative average.
