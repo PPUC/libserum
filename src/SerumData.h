@@ -100,6 +100,17 @@ class SerumData {
     }
   };
 
+  struct NormalBucketEntry {
+    uint8_t mask = 0;
+    uint8_t shape = 0;
+    uint16_t reserved = 0;
+
+    template <class Archive>
+    void serialize(Archive &ar) {
+      ar(mask, shape, reserved);
+    }
+  };
+
   SerumData();
   ~SerumData();
 
@@ -215,6 +226,9 @@ class SerumData {
   std::vector<uint16_t> spriteOpaqueRowSegmentCount;
   std::vector<uint16_t> spriteOpaqueSegments;
   std::unordered_map<uint64_t, std::vector<uint32_t>> sceneFramesBySignature;
+  std::unordered_map<uint64_t, std::vector<uint32_t>> normalFramesBySignature;
+  std::vector<NormalBucketEntry> normalIdentifyBuckets;
+  std::vector<uint32_t> frameToNormalBucket;
   std::unordered_map<uint64_t, uint32_t> sceneFrameIdByTriplet;
   std::unordered_map<uint64_t, uint16_t> colorRotationLookupByFrameAndColor;
   std::unordered_map<uint64_t, std::vector<uint32_t>>
@@ -270,6 +284,21 @@ class SerumData {
                     return a.key < b.key;
                   });
 
+        std::vector<SceneSignatureLookupEntry> normalSignatureEntries;
+        normalSignatureEntries.reserve(normalFramesBySignature.size());
+        for (const auto &entry : normalFramesBySignature) {
+          SceneSignatureLookupEntry serialized;
+          serialized.key = entry.first;
+          serialized.frameIds = entry.second;
+          std::sort(serialized.frameIds.begin(), serialized.frameIds.end());
+          normalSignatureEntries.push_back(std::move(serialized));
+        }
+        std::sort(normalSignatureEntries.begin(), normalSignatureEntries.end(),
+                  [](const SceneSignatureLookupEntry &a,
+                     const SceneSignatureLookupEntry &b) {
+                    return a.key < b.key;
+                  });
+
         std::vector<SceneTripletLookupEntry> sceneTripletEntries;
         sceneTripletEntries.reserve(sceneFrameIdByTriplet.size());
         for (const auto &entry : sceneFrameIdByTriplet) {
@@ -307,7 +336,8 @@ class SerumData {
                     return a.key < b.key;
                   });
 
-        ar(frameIsScene, sceneSignatureEntries, spriteoriginal_opaque,
+        ar(frameIsScene, sceneSignatureEntries, normalSignatureEntries,
+           normalIdentifyBuckets, frameToNormalBucket, spriteoriginal_opaque,
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
@@ -320,10 +350,12 @@ class SerumData {
     } else {
       if (concentrateFileVersion >= 6) {
         std::vector<SceneSignatureLookupEntry> sceneSignatureEntries;
+        std::vector<SceneSignatureLookupEntry> normalSignatureEntries;
         std::vector<SceneTripletLookupEntry> sceneTripletEntries;
         std::vector<ColorRotationLookupEntry> colorRotationEntries;
         std::vector<CriticalTriggerLookupEntry> criticalTriggerEntries;
-        ar(frameIsScene, sceneSignatureEntries, spriteoriginal_opaque,
+        ar(frameIsScene, sceneSignatureEntries, normalSignatureEntries,
+           normalIdentifyBuckets, frameToNormalBucket, spriteoriginal_opaque,
            spritemask_extra_opaque, spritedescriptionso_opaque,
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
@@ -337,6 +369,12 @@ class SerumData {
         sceneFramesBySignature.reserve(sceneSignatureEntries.size());
         for (const auto &entry : sceneSignatureEntries) {
           sceneFramesBySignature[entry.key] = entry.frameIds;
+        }
+
+        normalFramesBySignature.clear();
+        normalFramesBySignature.reserve(normalSignatureEntries.size());
+        for (const auto &entry : normalSignatureEntries) {
+          normalFramesBySignature[entry.key] = entry.frameIds;
         }
 
         sceneFrameIdByTriplet.clear();
@@ -359,6 +397,9 @@ class SerumData {
       } else {
         frameIsScene.clear();
         sceneFramesBySignature.clear();
+        normalFramesBySignature.clear();
+        normalIdentifyBuckets.clear();
+        frameToNormalBucket.clear();
         sceneFrameIdByTriplet.clear();
         colorRotationLookupByFrameAndColor.clear();
         criticalTriggerFramesBySignature.clear();

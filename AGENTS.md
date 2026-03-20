@@ -176,6 +176,15 @@ Behavior:
   - scene search skips normal frames
   using `g_serumData.frameIsScene`.
 - Scene requests use signature lookup in `sceneFramesBySignature` for the current `(mask,shape,hash)`.
+- Normal-frame identification uses a persisted signature lookup in
+  `normalFramesBySignature` to narrow candidates before applying the existing
+  wrap-around / same-frame selection rules.
+- Normal-frame identification does not include a fallback full-frame scan once
+  `normalFramesBySignature` is available; missing/incorrect lookup data is a
+  build/load contract bug rather than a runtime fallback case.
+- Runtime normal identification iterates unique `(mask,shape)` buckets in
+  frame-order relative to `lastfound_normal`, so frame-order semantics are
+  preserved while each bucket hash is computed only once per input frame.
 - Scene rendering can bypass generic scene identification when a direct triplet
   entry exists in `sceneFrameIdByTriplet`.
 - During scene playback, direct-triplet mode uses libserum-owned timing
@@ -209,20 +218,33 @@ How it works:
 4. For each loaded frame ID, if `(mask,shape,hashcodes[id])` signature is in scene signature set:
    - mark `frameIsScene[id] = 1`
    - add to `sceneFramesBySignature[signature]`.
-5. For v6 (`concentrateFileVersion >= 6`), precompute direct scene frame IDs:
+5. Build `normalFramesBySignature` for all non-scene frames:
+   - `(mask,shape,hash) -> matching normal frame IDs`
+   - precompute flat normal identification buckets:
+     - `normalIdentifyBuckets`
+     - `frameToNormalBucket`
+    - runtime normal identification uses this as a candidate source while still
+      preserving wrap-around ordering relative to `lastfound_normal`.
+    - runtime does not fall back to a linear normal-frame scan if this lookup is
+      missing or inconsistent.
+   - runtime walks precomputed `(mask,shape)` buckets in frame order and resolves
+     matching frame IDs from the lookup, avoiding repeated per-frame hash
+     computation inside the same bucket and avoiding per-frame bucket-dedup
+     container overhead.
+6. For v6 (`concentrateFileVersion >= 6`), precompute direct scene frame IDs:
    - generate each `(sceneId,group,frameIndex)` scene marker frame
    - identify it once
    - persist mapping in `sceneFrameIdByTriplet`.
    - Runtime playback then combines this triplet lookup with trigger-provided
      `sceneDurationPerFrame`; it does not regenerate marker frames on each
      scene tick.
-6. During the same preprocessing pass, build critical monochrome-trigger
+7. During the same preprocessing pass, build critical monochrome-trigger
    signatures for non-scene frames:
    - include only frames with trigger IDs:
      - `MONOCHROME_TRIGGER_ID`
      - `MONOCHROME_PALETTE_TRIGGER_ID`
    - persist mapping in `criticalTriggerFramesBySignature`.
-7. Initialize `lastfound_scene` / `lastfound_normal` from first available IDs.
+8. Initialize `lastfound_scene` / `lastfound_normal` from first available IDs.
 
 Log line:
 - `Loaded X frames and Y rotation scene frames`
@@ -300,6 +322,9 @@ Stored in v6:
 - Scene lookup acceleration:
   - `frameIsScene`
   - `sceneFramesBySignature`
+  - `normalFramesBySignature`
+  - `normalIdentifyBuckets`
+  - `frameToNormalBucket`
   - `sceneFrameIdByTriplet`
 - Critical monochrome-trigger lookup:
   - `criticalTriggerFramesBySignature`
@@ -368,9 +393,14 @@ v6 snapshot policy:
     expensive hash tracing controls.
 - Optional runtime profiling:
   - If env `SERUM_PROFILE_DYNAMIC_HOTPATHS` is enabled (`1/true/on/yes`),
-    periodic average timings for `Colorize_Framev2` and `Colorize_Spritev2`
-    hot paths are logged, along with total average frame render time and
-    current process RSS memory usage and process-local peak RSS seen so far.
+    periodic average timings are logged for the full end-to-end rendered-frame
+    round trip (`frame`), `Colorize_Framev2`, and `Colorize_Spritev2`, along
+    with average identification time (`Identify_Frame`) split into
+    normal/scene calls plus the critical-trigger mini-matcher, and current
+    process RSS memory usage and process-local peak RSS seen so far.
+  - If env `SERUM_PROFILE_DYNAMIC_HOTPATHS_WINDOWED=1`, the same counters are
+    reset after each emitted 240-frame block so each `Perf dynamic avg` line
+    reflects only the most recent window rather than a cumulative average.
   - The same profiler also logs a one-time startup summary before normal frame
     processing begins:
     `Perf startup peak: start=...MiB current=...MiB peak=...MiB stage=...`

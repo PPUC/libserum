@@ -185,6 +185,9 @@ void SerumData::Clear() {
   spriteOpaqueRowSegmentCount.clear();
   spriteOpaqueSegments.clear();
   sceneFramesBySignature.clear();
+  normalFramesBySignature.clear();
+  normalIdentifyBuckets.clear();
+  frameToNormalBucket.clear();
   sceneFrameIdByTriplet.clear();
   colorRotationLookupByFrameAndColor.clear();
   criticalTriggerFramesBySignature.clear();

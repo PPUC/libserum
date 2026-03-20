@@ -105,14 +105,26 @@ static uint32_t GetEnvUintClamped(const char* name, uint32_t maxValue) {
 }
 
 static bool g_profileDynamicHotPaths = false;
+static bool g_profileDynamicHotPathsWindowed = false;
 static bool g_profileSparseVectors = false;
+static uint64_t g_profileRoundTripNs = 0;
 static uint64_t g_profileColorizeFrameV2Ns = 0;
 static uint64_t g_profileColorizeSpriteV2Ns = 0;
 static uint64_t g_profileColorizeCalls = 0;
+static uint64_t g_profileIdentifyTotalNs = 0;
+static uint64_t g_profileIdentifyNormalNs = 0;
+static uint64_t g_profileIdentifySceneNs = 0;
+static uint64_t g_profileIdentifyCriticalNs = 0;
+static uint64_t g_profileIdentifyNormalCalls = 0;
+static uint64_t g_profileIdentifySceneCalls = 0;
+static uint64_t g_profileIdentifyCriticalCalls = 0;
 static uint64_t g_profilePeakRssBytes = 0;
 static uint64_t g_profileStartupStartRssBytes = 0;
 static uint64_t g_profileStartupPeakRssBytes = 0;
 static const char* g_profileStartupPeakStage = "startup-begin";
+static uint32_t g_profileFrameOperationDepth = 0;
+static bool g_profileFrameOperationFinished = false;
+static std::chrono::steady_clock::time_point g_profileFrameOperationStart;
 static bool g_debugFrameTracingInitialized = false;
 static uint32_t g_debugTargetInputCrc = 0;
 static uint32_t g_debugTargetFrameId = 0xffffffffu;
@@ -180,8 +192,45 @@ const uint16_t greyscale_16[16] = {
 };
 
 extern bool cromloaded;
+extern uint32_t lastfound;
 uint32_t calc_crc32(uint8_t* source, uint8_t mask, uint32_t n, uint8_t Shape);
+uint32_t crc32_fast(uint8_t* s, uint32_t n);
 static uint64_t MakeFrameSignature(uint8_t mask, uint8_t shape, uint32_t hash);
+static bool DebugTraceMatches(uint32_t inputCrc, uint32_t frameId);
+static bool DebugIdentifyVerboseEnabled();
+
+static void BeginProfileFrameOperation(void) {
+  if (!g_profileDynamicHotPaths) {
+    return;
+  }
+  if (g_profileFrameOperationDepth++ == 0) {
+    g_profileFrameOperationStart = std::chrono::steady_clock::now();
+    g_profileFrameOperationFinished = false;
+  }
+}
+
+static void FinishProfileRenderedFrameOperationMaybe(void) {
+  if (!g_profileDynamicHotPaths || g_profileFrameOperationDepth == 0 ||
+      g_profileFrameOperationFinished) {
+    return;
+  }
+  g_profileRoundTripNs +=
+      (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - g_profileFrameOperationStart)
+          .count();
+  ++g_profileColorizeCalls;
+  g_profileFrameOperationFinished = true;
+}
+
+static void EndProfileFrameOperation(void) {
+  if (!g_profileDynamicHotPaths || g_profileFrameOperationDepth == 0) {
+    return;
+  }
+  --g_profileFrameOperationDepth;
+  if (g_profileFrameOperationDepth == 0) {
+    g_profileFrameOperationFinished = false;
+  }
+}
 
 static void InitCriticalTriggerLookupRuntimeState(void) {
   g_criticalTriggerMaskShapes.clear();
@@ -202,8 +251,18 @@ static void InitCriticalTriggerLookupRuntimeState(void) {
 }
 
 static uint32_t IdentifyCriticalTriggerFrame(uint8_t* frame) {
+  const auto profileStart =
+      g_profileDynamicHotPaths ? std::chrono::steady_clock::now()
+                               : std::chrono::steady_clock::time_point{};
   if (!cromloaded || g_criticalTriggerMaskShapes.empty() ||
       g_serumData.criticalTriggerFramesBySignature.empty()) {
+    if (g_profileDynamicHotPaths) {
+      g_profileIdentifyCriticalNs +=
+          (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - profileStart)
+              .count();
+      ++g_profileIdentifyCriticalCalls;
+    }
     return IDENTIFY_NO_FRAME;
   }
 
@@ -217,11 +276,117 @@ static uint32_t IdentifyCriticalTriggerFrame(uint8_t* frame) {
         MakeFrameSignature(maskShape.first, maskShape.second, hash));
     if (it != g_serumData.criticalTriggerFramesBySignature.end() &&
         !it->second.empty()) {
+      if (g_profileDynamicHotPaths) {
+        g_profileIdentifyCriticalNs +=
+            (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - profileStart)
+                .count();
+        ++g_profileIdentifyCriticalCalls;
+      }
       return it->second.front();
     }
   }
 
+  if (g_profileDynamicHotPaths) {
+    g_profileIdentifyCriticalNs +=
+        (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - profileStart)
+            .count();
+    ++g_profileIdentifyCriticalCalls;
+  }
   return IDENTIFY_NO_FRAME;
+}
+
+static uint32_t SelectFrameIdInWrapOrder(const std::vector<uint32_t>& frameIds,
+                                         uint32_t startFrameId) {
+  if (frameIds.empty() || g_serumData.nframes == 0) {
+    return IDENTIFY_NO_FRAME;
+  }
+
+  uint32_t bestFrameId = frameIds.front();
+  uint32_t bestDistance =
+      (bestFrameId >= startFrameId)
+          ? (bestFrameId - startFrameId)
+          : (g_serumData.nframes - startFrameId + bestFrameId);
+  for (size_t i = 1; i < frameIds.size(); ++i) {
+    const uint32_t frameId = frameIds[i];
+    const uint32_t distance =
+        (frameId >= startFrameId) ? (frameId - startFrameId)
+                                  : (g_serumData.nframes - startFrameId + frameId);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestFrameId = frameId;
+    }
+  }
+  return bestFrameId;
+}
+
+static uint32_t ResolveIdentifiedFrameMatch(uint8_t* frame, uint32_t inputCrc,
+                                            uint32_t candidateFrameId,
+                                            uint8_t mask,
+                                            bool& first_match,
+                                            uint32_t& lastfound_stream,
+                                            uint32_t& lastframe_full_crc) {
+  if (candidateFrameId >= g_serumData.nframes) {
+    return IDENTIFY_NO_FRAME;
+  }
+  if (DebugIdentifyVerboseEnabled() &&
+      DebugTraceMatches(inputCrc, candidateFrameId)) {
+    Log("Serum debug identify candidate: inputCrc=%u frameId=%u "
+        "mask=%u storedHash=%u lastfound=%u",
+        inputCrc, candidateFrameId, mask,
+        g_serumData.hashcodes[candidateFrameId][0], lastfound_stream);
+  }
+  if (first_match || candidateFrameId != lastfound_stream || mask < 255) {
+    if (DebugIdentifyVerboseEnabled() &&
+        DebugTraceMatches(inputCrc, candidateFrameId)) {
+      Log("Serum debug identify decision: inputCrc=%u frameId=%u "
+          "reason=%s firstMatch=%s lastfoundStream=%u mask=%u "
+          "fullCrcBefore=%u",
+          inputCrc, candidateFrameId,
+          first_match ? "first-match"
+                      : (candidateFrameId != lastfound_stream ? "new-frame-id"
+                                                             : "mask-lt-255"),
+          first_match ? "true" : "false", lastfound_stream, mask,
+          lastframe_full_crc);
+    }
+    lastfound_stream = candidateFrameId;
+    lastfound = candidateFrameId;
+    lastframe_full_crc = crc32_fast(frame, g_serumData.is256x64
+                                               ? (256 * 64)
+                                               : (g_serumData.fwidth *
+                                                  g_serumData.fheight));
+    first_match = false;
+    return candidateFrameId;
+  }
+
+  const uint32_t full_crc =
+      crc32_fast(frame, g_serumData.is256x64
+                            ? (256 * 64)
+                            : (g_serumData.fwidth * g_serumData.fheight));
+  if (full_crc != lastframe_full_crc) {
+    if (DebugIdentifyVerboseEnabled() &&
+        DebugTraceMatches(inputCrc, candidateFrameId)) {
+      Log("Serum debug identify decision: inputCrc=%u frameId=%u "
+          "reason=full-crc-diff firstMatch=%s lastfoundStream=%u "
+          "mask=%u fullCrcBefore=%u fullCrcNow=%u",
+          inputCrc, candidateFrameId, first_match ? "true" : "false",
+          lastfound_stream, mask, lastframe_full_crc, full_crc);
+    }
+    lastframe_full_crc = full_crc;
+    lastfound = candidateFrameId;
+    return candidateFrameId;
+  }
+  if (DebugIdentifyVerboseEnabled() &&
+      DebugTraceMatches(inputCrc, candidateFrameId)) {
+    Log("Serum debug identify decision: inputCrc=%u frameId=%u "
+        "reason=same-frame firstMatch=%s lastfoundStream=%u mask=%u "
+        "fullCrc=%u",
+        inputCrc, candidateFrameId, first_match ? "true" : "false",
+        lastfound_stream, mask, full_crc);
+  }
+  lastfound = candidateFrameId;
+  return IDENTIFY_SAME_FRAME;
 }
 
 static bool IsCriticalMonochromeTriggerFrame(uint32_t frameId) {
@@ -400,6 +565,23 @@ static void LogStartupRssSummary() {
       (double)g_profileStartupPeakRssBytes / (1024.0 * 1024.0);
   Log("Perf startup peak: start=%.1fMiB current=%.1fMiB peak=%.1fMiB stage=%s",
       startMiB, currentMiB, peakMiB, g_profileStartupPeakStage);
+}
+
+static void ResetDynamicHotPathProfile() {
+  g_profileRoundTripNs = 0;
+  g_profileColorizeFrameV2Ns = 0;
+  g_profileColorizeSpriteV2Ns = 0;
+  g_profileColorizeCalls = 0;
+  g_profileIdentifyTotalNs = 0;
+  g_profileIdentifyNormalNs = 0;
+  g_profileIdentifySceneNs = 0;
+  g_profileIdentifyCriticalNs = 0;
+  g_profileIdentifyNormalCalls = 0;
+  g_profileIdentifySceneCalls = 0;
+  g_profileIdentifyCriticalCalls = 0;
+  g_profilePeakRssBytes = GetProcessResidentMemoryBytes();
+  g_profileFrameOperationDepth = 0;
+  g_profileFrameOperationFinished = false;
 }
 
 static void InitDebugFrameTracingFromEnv(void) {
@@ -1811,11 +1993,23 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
                                         uint8_t flags) {
   Serum_free();
   g_profileDynamicHotPaths = IsEnvFlagEnabled("SERUM_PROFILE_DYNAMIC_HOTPATHS");
+  g_profileDynamicHotPathsWindowed =
+      IsEnvFlagEnabled("SERUM_PROFILE_DYNAMIC_HOTPATHS_WINDOWED");
   g_profileSparseVectors = IsEnvFlagEnabled("SERUM_PROFILE_SPARSE_VECTORS");
+  g_profileRoundTripNs = 0;
   g_profileColorizeFrameV2Ns = 0;
   g_profileColorizeSpriteV2Ns = 0;
   g_profileColorizeCalls = 0;
+  g_profileIdentifyTotalNs = 0;
+  g_profileIdentifyNormalNs = 0;
+  g_profileIdentifySceneNs = 0;
+  g_profileIdentifyCriticalNs = 0;
+  g_profileIdentifyNormalCalls = 0;
+  g_profileIdentifySceneCalls = 0;
+  g_profileIdentifyCriticalCalls = 0;
   g_profilePeakRssBytes = 0;
+  g_profileFrameOperationDepth = 0;
+  g_profileFrameOperationFinished = false;
   ResetStartupRssProfile();
 
   mySerum.SerumVersion = g_serumData.SerumVersion = 0;
@@ -1954,6 +2148,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     InitCriticalTriggerLookupRuntimeState();
     NoteStartupRssSample("before-runtime");
     LogStartupRssSummary();
+    ResetDynamicHotPathProfile();
   }
   if (is_real_machine()) {
     monochromeMode = true;
@@ -1968,10 +2163,14 @@ static void BuildFrameLookupVectors(void) {
   uint32_t numSceneFrames = 0;
   g_serumData.frameIsScene.clear();
   g_serumData.sceneFramesBySignature.clear();
+  g_serumData.normalFramesBySignature.clear();
+  g_serumData.normalIdentifyBuckets.clear();
+  g_serumData.frameToNormalBucket.clear();
   g_serumData.sceneFrameIdByTriplet.clear();
 
   if (g_serumData.nframes == 0) return;
   g_serumData.frameIsScene.resize(g_serumData.nframes, 0);
+  g_serumData.frameToNormalBucket.assign(g_serumData.nframes, 0xffffffffu);
   const uint32_t pixels = g_serumData.is256x64
                               ? (256 * 64)
                               : (g_serumData.fwidth * g_serumData.fheight);
@@ -2084,6 +2283,31 @@ static void BuildFrameLookupVectors(void) {
     }
   }
 
+  for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
+    if (g_serumData.frameIsScene[frameId] != 0) {
+      continue;
+    }
+    const uint8_t mask = g_serumData.compmaskID[frameId][0];
+    const uint8_t shape = g_serumData.shapecompmode[frameId][0];
+    const uint32_t hash = g_serumData.hashcodes[frameId][0];
+    uint32_t bucketIndex = 0xffffffffu;
+    for (uint32_t i = 0; i < g_serumData.normalIdentifyBuckets.size(); ++i) {
+      const auto& bucket = g_serumData.normalIdentifyBuckets[i];
+      if (bucket.mask == mask && bucket.shape == shape) {
+        bucketIndex = i;
+        break;
+      }
+    }
+    if (bucketIndex == 0xffffffffu) {
+      bucketIndex =
+          static_cast<uint32_t>(g_serumData.normalIdentifyBuckets.size());
+      g_serumData.normalIdentifyBuckets.push_back({mask, shape, 0});
+    }
+    g_serumData.frameToNormalBucket[frameId] = bucketIndex;
+    g_serumData.normalFramesBySignature[MakeFrameSignature(mask, shape, hash)]
+        .push_back(frameId);
+  }
+
   Log("Loaded %d frames and %d rotation scene frames",
       g_serumData.nframes - numSceneFrames, numSceneFrames);
 
@@ -2145,7 +2369,27 @@ static void InitFrameLookupRuntimeStateFromStoredData(void) {
 }
 
 uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
-  if (!cromloaded) return IDENTIFY_NO_FRAME;
+  const auto profileStart =
+      g_profileDynamicHotPaths ? std::chrono::steady_clock::now()
+                               : std::chrono::steady_clock::time_point{};
+  auto finishProfile = [&](uint32_t result) -> uint32_t {
+    if (g_profileDynamicHotPaths) {
+      const uint64_t elapsedNs =
+          (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - profileStart)
+              .count();
+      g_profileIdentifyTotalNs += elapsedNs;
+      if (sceneFrameRequested) {
+        g_profileIdentifySceneNs += elapsedNs;
+        ++g_profileIdentifySceneCalls;
+      } else {
+        g_profileIdentifyNormalNs += elapsedNs;
+        ++g_profileIdentifyNormalCalls;
+      }
+    }
+    return result;
+  };
+  if (!cromloaded) return finishProfile(IDENTIFY_NO_FRAME);
   DebugLogFrameMetadataIfRequested(g_debugTargetFrameId);
   uint32_t tj = sceneFrameRequested
                     ? lastfound_scene
@@ -2154,7 +2398,6 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
                               ? (256 * 64)
                               : (g_serumData.fwidth * g_serumData.fheight);
   const uint32_t inputCrc = crc32_fast(frame, pixels);
-  memset(framechecked, false, g_serumData.nframes);
   uint32_t& lastfound_stream =
       sceneFrameRequested ? lastfound_scene : lastfound_normal;
   bool& first_match =
@@ -2162,6 +2405,67 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   uint32_t& lastframe_full_crc = sceneFrameRequested
                                      ? lastframe_full_crc_scene
                                      : lastframe_full_crc_normal;
+  if (!sceneFrameRequested) {
+    const uint32_t bucketCount =
+        static_cast<uint32_t>(g_serumData.normalIdentifyBuckets.size());
+    if (bucketCount == 0 || g_serumData.frameToNormalBucket.size() !=
+                                g_serumData.nframes) {
+      if (DebugIdentifyVerboseEnabled() && DebugTraceMatchesInputCrc(inputCrc)) {
+        Log("Serum debug identify miss: inputCrc=%u sceneRequested=false",
+            inputCrc);
+      }
+      return finishProfile(IDENTIFY_NO_FRAME);
+    }
+    std::vector<uint8_t> bucketVisited(bucketCount, 0);
+    do {
+      if (g_serumData.frameIsScene[tj] != 0) {
+        if (++tj >= g_serumData.nframes) tj = 0;
+        continue;
+      }
+
+      const uint32_t bucketIndex = g_serumData.frameToNormalBucket[tj];
+      if (bucketIndex >= bucketCount || bucketVisited[bucketIndex]) {
+        if (++tj >= g_serumData.nframes) tj = 0;
+        continue;
+      }
+      bucketVisited[bucketIndex] = 1;
+
+      const auto& bucket = g_serumData.normalIdentifyBuckets[bucketIndex];
+      const uint8_t mask = bucket.mask;
+      const uint8_t Shape = bucket.shape;
+
+      const uint32_t Hashc = calc_crc32(frame, mask, pixels, Shape);
+      if (DebugIdentifyVerboseEnabled() && DebugTraceMatches(inputCrc, tj)) {
+        Log("Serum debug identify seed: inputCrc=%u startFrame=%u "
+            "sceneRequested=false mask=%u shape=%u hash=%u",
+            inputCrc, tj, mask, Shape, Hashc);
+      }
+
+      auto normalSigIt = g_serumData.normalFramesBySignature.find(
+          MakeFrameSignature(mask, Shape, Hashc));
+      if (normalSigIt != g_serumData.normalFramesBySignature.end() &&
+          !normalSigIt->second.empty()) {
+        const uint32_t candidateFrameId =
+            SelectFrameIdInWrapOrder(normalSigIt->second, tj);
+        const uint32_t resolved = ResolveIdentifiedFrameMatch(
+            frame, inputCrc, candidateFrameId, mask, first_match,
+            lastfound_stream, lastframe_full_crc);
+        if (resolved != IDENTIFY_NO_FRAME) {
+          return finishProfile(resolved);
+        }
+      }
+
+      if (++tj >= g_serumData.nframes) tj = 0;
+    } while (tj != lastfound_stream);
+
+    if (DebugIdentifyVerboseEnabled() && DebugTraceMatchesInputCrc(inputCrc)) {
+      Log("Serum debug identify miss: inputCrc=%u sceneRequested=false",
+          inputCrc);
+    }
+    return finishProfile(IDENTIFY_NO_FRAME);
+  }
+
+  memset(framechecked, false, g_serumData.nframes);
   do {
     if (g_serumData.frameIsScene[tj] != (sceneFrameRequested ? 1 : 0)) {
       if (++tj >= g_serumData.nframes) tj = 0;
@@ -2212,7 +2516,7 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
             lastfound = ti;
             lastframe_full_crc = crc32_fast(frame, pixels);
             first_match = false;
-            return ti;
+            return finishProfile(ti);
           }
 
           uint32_t full_crc = crc32_fast(frame, pixels);
@@ -2227,7 +2531,7 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
             }
             lastframe_full_crc = full_crc;
             lastfound = ti;
-            return ti;
+            return finishProfile(ti);
           }
           if (DebugIdentifyVerboseEnabled() &&
               DebugTraceMatches(inputCrc, ti)) {
@@ -2238,85 +2542,13 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
                 mask, full_crc);
           }
           lastfound = ti;
-          return IDENTIFY_SAME_FRAME;
+          return finishProfile(IDENTIFY_SAME_FRAME);
         }
         framechecked[tj] = true;
         if (++tj >= g_serumData.nframes) tj = 0;
         continue;
       }
-      // now we can compare with all the crom frames that share these same mask
-      // and shapemode
-      uint32_t ti = tj;
-      do {
-        if (g_serumData.frameIsScene[ti] != (sceneFrameRequested ? 1 : 0)) {
-          if (++ti >= g_serumData.nframes) ti = 0;
-          continue;
-        }
-        if (!framechecked[ti]) {
-          if ((g_serumData.compmaskID[ti][0] == mask) &&
-              (g_serumData.shapecompmode[ti][0] == Shape)) {
-            if (DebugIdentifyVerboseEnabled() &&
-                DebugTraceMatches(inputCrc, ti)) {
-              Log("Serum debug identify candidate: inputCrc=%u frameId=%u "
-                  "mask=%u shape=%u hash=%u storedHash=%u lastfound=%u",
-                  inputCrc, ti, mask, Shape, Hashc,
-                  g_serumData.hashcodes[ti][0], lastfound_stream);
-            }
-            if (Hashc == g_serumData.hashcodes[ti][0]) {
-              if (first_match || ti != lastfound_stream || mask < 255) {
-                if (DebugIdentifyVerboseEnabled() &&
-                    DebugTraceMatches(inputCrc, ti)) {
-                  Log("Serum debug identify decision: inputCrc=%u frameId=%u "
-                      "reason=%s firstMatch=%s lastfoundStream=%u mask=%u "
-                      "fullCrcBefore=%u",
-                      inputCrc, ti,
-                      first_match ? "first-match"
-                                  : (ti != lastfound_stream ? "new-frame-id"
-                                                            : "mask-lt-255"),
-                      first_match ? "true" : "false", lastfound_stream, mask,
-                      lastframe_full_crc);
-                }
-                // Reset_ColorRotations();
-                lastfound_stream = ti;
-                lastfound = ti;
-                lastframe_full_crc = crc32_fast(frame, pixels);
-                first_match = false;
-                return ti;  // we found the frame, we return it
-              }
-
-              uint32_t full_crc = crc32_fast(frame, pixels);
-              if (full_crc != lastframe_full_crc) {
-                if (DebugIdentifyVerboseEnabled() &&
-                    DebugTraceMatches(inputCrc, ti)) {
-                  Log("Serum debug identify decision: inputCrc=%u frameId=%u "
-                      "reason=full-crc-diff firstMatch=%s lastfoundStream=%u "
-                      "mask=%u fullCrcBefore=%u fullCrcNow=%u",
-                      inputCrc, ti, first_match ? "true" : "false",
-                      lastfound_stream, mask, lastframe_full_crc, full_crc);
-                }
-                lastframe_full_crc = full_crc;
-                lastfound = ti;
-                return ti;  // we found the same frame with shape as before, but
-                            // the full frame is different
-              }
-              if (DebugIdentifyVerboseEnabled() &&
-                  DebugTraceMatches(inputCrc, ti)) {
-                Log("Serum debug identify decision: inputCrc=%u frameId=%u "
-                    "reason=same-frame firstMatch=%s lastfoundStream=%u "
-                    "mask=%u fullCrc=%u",
-                    inputCrc, ti, first_match ? "true" : "false",
-                    lastfound_stream, mask, full_crc);
-              }
-              lastfound = ti;
-              return IDENTIFY_SAME_FRAME;  // we found the frame, but it is the
-                                           // same full frame as before (no
-                                           // mask)
-            }
-            framechecked[ti] = true;
-          }
-        }
-        if (++ti >= g_serumData.nframes) ti = 0;
-      } while (ti != tj);
+      framechecked[tj] = true;
     }
     if (++tj >= g_serumData.nframes) tj = 0;
   } while (tj != lastfound_stream);
@@ -2325,7 +2557,7 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
     Log("Serum debug identify miss: inputCrc=%u sceneRequested=%s", inputCrc,
         sceneFrameRequested ? "true" : "false");
   }
-  return IDENTIFY_NO_FRAME;  // we found no corresponding frame
+  return finishProfile(IDENTIFY_NO_FRAME);  // we found no corresponding frame
 }
 
 static uint32_t BuildRuntimeFeatureFlags(uint32_t frameId) {
@@ -4106,14 +4338,34 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                     .count();
           }
         }
+        FinishProfileRenderedFrameOperationMaybe();
         if (profileNow) {
-          ++g_profileColorizeCalls;
           if ((g_profileColorizeCalls % 240u) == 0u) {
+            const double roundTripMs =
+                (double)g_profileRoundTripNs /
+                (double)g_profileColorizeCalls / 1000000.0;
             const double frameMs = (double)g_profileColorizeFrameV2Ns /
                                    (double)g_profileColorizeCalls / 1000000.0;
             const double spriteMs = (double)g_profileColorizeSpriteV2Ns /
                                     (double)g_profileColorizeCalls / 1000000.0;
-            const double totalMs = frameMs + spriteMs;
+            const double identifyMs =
+                (double)g_profileIdentifyTotalNs /
+                (double)g_profileColorizeCalls / 1000000.0;
+            const double identifyNormalMs =
+                g_profileIdentifyNormalCalls == 0
+                    ? 0.0
+                    : (double)g_profileIdentifyNormalNs /
+                          (double)g_profileIdentifyNormalCalls / 1000000.0;
+            const double identifySceneMs =
+                g_profileIdentifySceneCalls == 0
+                    ? 0.0
+                    : (double)g_profileIdentifySceneNs /
+                          (double)g_profileIdentifySceneCalls / 1000000.0;
+            const double identifyCriticalMs =
+                g_profileIdentifyCriticalCalls == 0
+                    ? 0.0
+                    : (double)g_profileIdentifyCriticalNs /
+                          (double)g_profileIdentifyCriticalCalls / 1000000.0;
             const uint64_t rssBytes = GetProcessResidentMemoryBytes();
             if (rssBytes > g_profilePeakRssBytes) {
               g_profilePeakRssBytes = rssBytes;
@@ -4122,12 +4374,18 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
             const double peakRssMiB =
                 (double)g_profilePeakRssBytes / (1024.0 * 1024.0);
             Log("Perf dynamic avg: frame=%.3fms Colorize_Framev2=%.3fms "
-                "Colorize_Spritev2=%.3fms rss=%.1fMiB peak=%.1fMiB over %u "
+                "Colorize_Spritev2=%.3fms Identify=%.3fms "
+                "IdentifyNormal=%.3fms IdentifyScene=%.3fms "
+                "IdentifyCritical=%.3fms rss=%.1fMiB peak=%.1fMiB over %u "
                 "frames",
-                totalMs, frameMs, spriteMs, rssMiB, peakRssMiB,
+                roundTripMs, frameMs, spriteMs, identifyMs, identifyNormalMs,
+                identifySceneMs, identifyCriticalMs, rssMiB, peakRssMiB,
                 (uint32_t)g_profileColorizeCalls);
             if (g_profileSparseVectors) {
               g_serumData.LogSparseVectorProfileSnapshot();
+            }
+            if (g_profileDynamicHotPathsWindowed) {
+              ResetDynamicHotPathProfile();
             }
           }
         }
@@ -4292,6 +4550,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       colorrotnexttime64[ti] = 0;
     }
     mySerum.rotationtimer = 0;
+    FinishProfileRenderedFrameOperationMaybe();
 
     return 0;  // "colorized" frame with no rotations
   }
@@ -4301,8 +4560,11 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
 
 SERUM_API uint32_t
 Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
-  return Serum_ColorizeWithMetadatav2Internal(frame, sceneFrameRequested,
-                                              IDENTIFY_NO_FRAME);
+  BeginProfileFrameOperation();
+  const uint32_t result = Serum_ColorizeWithMetadatav2Internal(
+      frame, sceneFrameRequested, IDENTIFY_NO_FRAME);
+  EndProfileFrameOperation();
+  return result;
 }
 
 SERUM_API uint32_t Serum_Colorize(uint8_t* frame) {
@@ -4352,6 +4614,11 @@ uint32_t Serum_ApplyRotationsv1(void) {
 }
 
 uint32_t Serum_RenderScene(void) {
+  BeginProfileFrameOperation();
+  auto finishSceneProfile = [&](uint32_t result) -> uint32_t {
+    EndProfileFrameOperation();
+    return result;
+  };
   if (g_serumData.sceneGenerator->isActive() &&
       (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0)) {
     const uint32_t now = GetMonotonicTimeMs();
@@ -4362,7 +4629,8 @@ uint32_t Serum_RenderScene(void) {
             sceneFrameCount, sceneDurationPerFrame, sceneOptionFlags,
             sceneInterruptable, sceneStartImmediately, sceneRepeatCount);
         mySerum.rotationtimer = sceneEndHoldUntilMs - now;
-        return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_SCENE;
+        return finishSceneProfile((mySerum.rotationtimer & 0xffff) |
+                                  FLAG_RETURNED_V2_SCENE);
       }
 
       // End hold elapsed: finish scene now.
@@ -4381,6 +4649,7 @@ uint32_t Serum_RenderScene(void) {
         case FLAG_SCENE_BLACK_WHEN_FINISHED:
           if (mySerum.frame32) memset(mySerum.frame32, 0, 32 * mySerum.width32);
           if (mySerum.frame64) memset(mySerum.frame64, 0, 64 * mySerum.width64);
+          FinishProfileRenderedFrameOperationMaybe();
           break;
 
         case FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED:
@@ -4392,6 +4661,7 @@ uint32_t Serum_RenderScene(void) {
               memset(mySerum.frame32, 0, 32 * mySerum.width32);
             if (mySerum.frame64)
               memset(mySerum.frame64, 0, 64 * mySerum.width64);
+            FinishProfileRenderedFrameOperationMaybe();
           }
           break;
 
@@ -4407,7 +4677,7 @@ uint32_t Serum_RenderScene(void) {
           break;
       }
 
-      return FLAG_RETURNED_V2_SCENE;
+      return finishSceneProfile(FLAG_RETURNED_V2_SCENE);
     }
 
     bool renderedFromDirectTriplet = false;
@@ -4431,7 +4701,8 @@ uint32_t Serum_RenderScene(void) {
                              sceneInterruptable, sceneStartImmediately,
                              sceneRepeatCount, currentGroup, waitMs);
           mySerum.rotationtimer = waitMs;
-          return mySerum.rotationtimer | FLAG_RETURNED_V2_SCENE;
+          return finishSceneProfile(mySerum.rotationtimer |
+                                    FLAG_RETURNED_V2_SCENE);
         }
         mySerum.rotationtimer = sceneDurationPerFrame;
         sceneNextFrameAtMs = now + sceneDurationPerFrame;
@@ -4458,7 +4729,8 @@ uint32_t Serum_RenderScene(void) {
       if (result > 0 && result < 0xffff) {
         // frame not ready yet, return the time to wait
         mySerum.rotationtimer = result;
-        return mySerum.rotationtimer | FLAG_RETURNED_V2_SCENE;
+        return finishSceneProfile(mySerum.rotationtimer |
+                                  FLAG_RETURNED_V2_SCENE);
       }
       if (result != 0xffff) {
         DebugLogSceneEvent(
@@ -4470,8 +4742,10 @@ uint32_t Serum_RenderScene(void) {
         mySerum.rotationtimer = 0;
         sceneNextFrameAtMs = 0;
         ForceNormalFrameRefreshAfterSceneEnd();
-        return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_ROTATED32 |
-               FLAG_RETURNED_V2_ROTATED64 | FLAG_RETURNED_V2_SCENE;
+        return finishSceneProfile((mySerum.rotationtimer & 0xffff) |
+                                  FLAG_RETURNED_V2_ROTATED32 |
+                                  FLAG_RETURNED_V2_ROTATED64 |
+                                  FLAG_RETURNED_V2_SCENE);
       }
       mySerum.rotationtimer = sceneDurationPerFrame;
       sceneNextFrameAtMs = now + sceneDurationPerFrame;
@@ -4505,7 +4779,8 @@ uint32_t Serum_RenderScene(void) {
       if (sceneEndHoldDurationMs > 0) {
         sceneEndHoldUntilMs = now + sceneEndHoldDurationMs;
         mySerum.rotationtimer = sceneEndHoldDurationMs;
-        return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_SCENE;
+        return finishSceneProfile((mySerum.rotationtimer & 0xffff) |
+                                  FLAG_RETURNED_V2_SCENE);
       }
 
       sceneFrameCount = 0;  // scene ended
@@ -4544,13 +4819,14 @@ uint32_t Serum_RenderScene(void) {
       }
     }
 
-    return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_ROTATED32 |
-           FLAG_RETURNED_V2_ROTATED64 |
-           FLAG_RETURNED_V2_SCENE;  // scene frame, so we consider both frames
-                                    // changed
+    return finishSceneProfile(
+        (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_ROTATED32 |
+        FLAG_RETURNED_V2_ROTATED64 |
+        FLAG_RETURNED_V2_SCENE);  // scene frame, so we consider both frames
+                                  // changed
   }
 
-  return 0;
+  return finishSceneProfile(0);
 }
 
 uint32_t Serum_ApplyRotationsv2(void) {
