@@ -121,6 +121,7 @@ static uint64_t g_profileIdentifyCriticalCalls = 0;
 static uint64_t g_profileIncomingFrameCalls = 0;
 static uint64_t g_profileNoFrameReturns = 0;
 static uint64_t g_profileSameFrameReturns = 0;
+static uint64_t g_profileLastLoggedInputCount = 0;
 static uint64_t g_profilePeakRssBytes = 0;
 static uint64_t g_profileStartupStartRssBytes = 0;
 static uint64_t g_profileStartupPeakRssBytes = 0;
@@ -585,9 +586,80 @@ static void ResetDynamicHotPathProfile() {
   g_profileIncomingFrameCalls = 0;
   g_profileNoFrameReturns = 0;
   g_profileSameFrameReturns = 0;
+  g_profileLastLoggedInputCount = 0;
   g_profilePeakRssBytes = GetProcessResidentMemoryBytes();
   g_profileFrameOperationDepth = 0;
   g_profileFrameOperationFinished = false;
+}
+
+static void MaybeLogDynamicHotPathProfileWindow(bool sceneFrameRequested) {
+  if (!g_profileDynamicHotPaths || sceneFrameRequested ||
+      g_profileIncomingFrameCalls == 0 ||
+      (g_profileIncomingFrameCalls % 240u) != 0u ||
+      g_profileIncomingFrameCalls == g_profileLastLoggedInputCount) {
+    return;
+  }
+
+  const double roundTripMs =
+      g_profileColorizeCalls == 0
+          ? 0.0
+          : (double)g_profileRoundTripNs / (double)g_profileColorizeCalls /
+                1000000.0;
+  const double frameMs =
+      g_profileColorizeCalls == 0
+          ? 0.0
+          : (double)g_profileColorizeFrameV2Ns / (double)g_profileColorizeCalls /
+                1000000.0;
+  const double spriteMs =
+      g_profileColorizeCalls == 0
+          ? 0.0
+          : (double)g_profileColorizeSpriteV2Ns /
+                (double)g_profileColorizeCalls / 1000000.0;
+  const double identifyMs =
+      g_profileColorizeCalls == 0
+          ? 0.0
+          : (double)g_profileIdentifyTotalNs / (double)g_profileColorizeCalls /
+                1000000.0;
+  const double identifyNormalMs =
+      g_profileIdentifyNormalCalls == 0
+          ? 0.0
+          : (double)g_profileIdentifyNormalNs /
+                (double)g_profileIdentifyNormalCalls / 1000000.0;
+  const double identifySceneMs =
+      g_profileIdentifySceneCalls == 0
+          ? 0.0
+          : (double)g_profileIdentifySceneNs /
+                (double)g_profileIdentifySceneCalls / 1000000.0;
+  const double identifyCriticalMs =
+      g_profileIdentifyCriticalCalls == 0
+          ? 0.0
+          : (double)g_profileIdentifyCriticalNs /
+                (double)g_profileIdentifyCriticalCalls / 1000000.0;
+  const uint64_t rssBytes = GetProcessResidentMemoryBytes();
+  if (rssBytes > g_profilePeakRssBytes) {
+    g_profilePeakRssBytes = rssBytes;
+  }
+  const double rssMiB = (double)rssBytes / (1024.0 * 1024.0);
+  const double peakRssMiB = (double)g_profilePeakRssBytes / (1024.0 * 1024.0);
+  Log("Perf dynamic avg: frame=%.3fms Colorize_Framev2=%.3fms "
+      "Colorize_Spritev2=%.3fms Identify=%.3fms "
+      "IdentifyNormal=%.3fms IdentifyScene=%.3fms "
+      "IdentifyCritical=%.3fms inputs=%llu rendered=%llu "
+      "same=%llu noFrame=%llu rss=%.1fMiB peak=%.1fMiB",
+      roundTripMs, frameMs, spriteMs, identifyMs, identifyNormalMs,
+      identifySceneMs, identifyCriticalMs,
+      static_cast<unsigned long long>(g_profileIncomingFrameCalls),
+      static_cast<unsigned long long>(g_profileColorizeCalls),
+      static_cast<unsigned long long>(g_profileSameFrameReturns),
+      static_cast<unsigned long long>(g_profileNoFrameReturns), rssMiB,
+      peakRssMiB);
+  if (g_profileSparseVectors) {
+    g_serumData.LogSparseVectorProfileSnapshot();
+  }
+  g_profileLastLoggedInputCount = g_profileIncomingFrameCalls;
+  if (g_profileDynamicHotPathsWindowed) {
+    ResetDynamicHotPathProfile();
+  }
 }
 
 static void InitDebugFrameTracingFromEnv(void) {
@@ -3986,6 +4058,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       if (g_profileDynamicHotPaths && !sceneFrameRequested) {
         ++g_profileNoFrameReturns;
       }
+      MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
       return IDENTIFY_NO_FRAME;
     }
   }
@@ -4063,6 +4136,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
           if (g_profileDynamicHotPaths && !sceneFrameRequested) {
             ++g_profileNoFrameReturns;
           }
+          MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
           return IDENTIFY_NO_FRAME;
         }
         if (IsCriticalMonochromeTriggerFrame(lastfound)) {
@@ -4107,6 +4181,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
         if (g_profileDynamicHotPaths && !sceneFrameRequested) {
           ++g_profileSameFrameReturns;
         }
+        MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
         return IDENTIFY_SAME_FRAME;
       }
 
@@ -4145,6 +4220,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
           if (g_profileDynamicHotPaths) {
             ++g_profileSameFrameReturns;
           }
+          MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
           return IDENTIFY_SAME_FRAME;
         } else if (sceneIsLastBackgroundFrame &&
                    (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
@@ -4263,8 +4339,10 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                                      sceneOptionFlags, sceneInterruptable,
                                      sceneStartImmediately, sceneRepeatCount);
                   uint32_t sceneRotationResult = Serum_RenderScene();
-                  if (sceneRotationResult & FLAG_RETURNED_V2_SCENE)
+                  if (sceneRotationResult & FLAG_RETURNED_V2_SCENE) {
+                    MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
                     return sceneRotationResult;
+                  }
                 }
                 mySerum.rotationtimer = sceneDurationPerFrame;
                 rotationIsScene = true;
@@ -4361,62 +4439,6 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
           }
         }
         FinishProfileRenderedFrameOperationMaybe();
-        if (profileNow) {
-          if ((g_profileColorizeCalls % 240u) == 0u) {
-            const double roundTripMs =
-                (double)g_profileRoundTripNs /
-                (double)g_profileColorizeCalls / 1000000.0;
-            const double frameMs = (double)g_profileColorizeFrameV2Ns /
-                                   (double)g_profileColorizeCalls / 1000000.0;
-            const double spriteMs = (double)g_profileColorizeSpriteV2Ns /
-                                    (double)g_profileColorizeCalls / 1000000.0;
-            const double identifyMs =
-                (double)g_profileIdentifyTotalNs /
-                (double)g_profileColorizeCalls / 1000000.0;
-            const double identifyNormalMs =
-                g_profileIdentifyNormalCalls == 0
-                    ? 0.0
-                    : (double)g_profileIdentifyNormalNs /
-                          (double)g_profileIdentifyNormalCalls / 1000000.0;
-            const double identifySceneMs =
-                g_profileIdentifySceneCalls == 0
-                    ? 0.0
-                    : (double)g_profileIdentifySceneNs /
-                          (double)g_profileIdentifySceneCalls / 1000000.0;
-            const double identifyCriticalMs =
-                g_profileIdentifyCriticalCalls == 0
-                    ? 0.0
-                    : (double)g_profileIdentifyCriticalNs /
-                          (double)g_profileIdentifyCriticalCalls / 1000000.0;
-            const uint64_t rssBytes = GetProcessResidentMemoryBytes();
-            if (rssBytes > g_profilePeakRssBytes) {
-              g_profilePeakRssBytes = rssBytes;
-            }
-            const double rssMiB = (double)rssBytes / (1024.0 * 1024.0);
-            const double peakRssMiB =
-                (double)g_profilePeakRssBytes / (1024.0 * 1024.0);
-            Log("Perf dynamic avg: frame=%.3fms Colorize_Framev2=%.3fms "
-                "Colorize_Spritev2=%.3fms Identify=%.3fms "
-                "IdentifyNormal=%.3fms IdentifyScene=%.3fms "
-                "IdentifyCritical=%.3fms inputs=%llu rendered=%llu "
-                "same=%llu noFrame=%llu rss=%.1fMiB peak=%.1fMiB over %u "
-                "frames",
-                roundTripMs, frameMs, spriteMs, identifyMs, identifyNormalMs,
-                identifySceneMs, identifyCriticalMs,
-                static_cast<unsigned long long>(g_profileIncomingFrameCalls),
-                static_cast<unsigned long long>(g_profileColorizeCalls),
-                static_cast<unsigned long long>(g_profileSameFrameReturns),
-                static_cast<unsigned long long>(g_profileNoFrameReturns),
-                rssMiB, peakRssMiB,
-                (uint32_t)g_profileColorizeCalls);
-            if (g_profileSparseVectors) {
-              g_serumData.LogSparseVectorProfileSnapshot();
-            }
-            if (g_profileDynamicHotPathsWindowed) {
-              ResetDynamicHotPathProfile();
-            }
-          }
-        }
 
         bool allowParallelRotations =
             (sceneFrameCount == 0) ||
@@ -4528,6 +4550,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
             mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
           mySerum.triggerID = 0xffffffff;
 
+        MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
         return (uint32_t)mySerum.rotationtimer |
                (rotationIsScene ? FLAG_RETURNED_V2_SCENE : 0);
       }
@@ -4595,6 +4618,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
   const uint32_t result = Serum_ColorizeWithMetadatav2Internal(
       frame, sceneFrameRequested, IDENTIFY_NO_FRAME);
   EndProfileFrameOperation();
+  MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
   return result;
 }
 

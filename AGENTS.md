@@ -399,8 +399,12 @@ v6 snapshot policy:
     normal/scene calls plus the critical-trigger mini-matcher, input/result
     counters (`inputs`, `rendered`, `same`, `noFrame`), and current process
     RSS memory usage and process-local peak RSS seen so far.
+  - `Perf dynamic avg` is emitted on fixed 240-input host windows, not on
+    rendered-output count, so runs stay comparable even when different
+    branches suppress or render different numbers of frames from the same dump.
+    The window size is conveyed by `inputs=...`; no extra trailer is appended.
   - If env `SERUM_PROFILE_DYNAMIC_HOTPATHS_WINDOWED=1`, the same counters are
-    reset after each emitted 240-frame block so each `Perf dynamic avg` line
+    reset after each emitted 240-input block so each `Perf dynamic avg` line
     reflects only the most recent window rather than a cumulative average.
   - The same profiler also logs a one-time startup summary before normal frame
     processing begins:
