@@ -209,6 +209,58 @@ bool SceneGenerator::getSceneInfo(uint16_t sceneId, uint16_t &frameCount,
   return true;
 }
 
+bool SceneGenerator::getCurrentGroup(uint16_t sceneId, uint8_t &group) const {
+  auto it = std::find_if(
+      m_sceneData.begin(), m_sceneData.end(),
+      [sceneId](const SceneData &data) { return data.sceneId == sceneId; });
+  if (it == m_sceneData.end()) {
+    group = 1;
+    return false;
+  }
+  group = it->currentGroup > 0 ? it->currentGroup : 1;
+  return true;
+}
+
+bool SceneGenerator::updateAndGetCurrentGroup(uint16_t sceneId,
+                                              uint16_t frameIndex,
+                                              int requestedGroup,
+                                              uint8_t &group) {
+  auto it = std::find_if(
+      m_sceneData.begin(), m_sceneData.end(),
+      [sceneId](const SceneData &data) { return data.sceneId == sceneId; });
+  if (it == m_sceneData.end()) {
+    group = 1;
+    return false;
+  }
+
+  if (frameIndex >= it->frameCount) {
+    group = 1;
+    return false;
+  }
+
+  if (frameIndex == 0) {
+    if (requestedGroup == -1) {
+      if (it->frameGroups > 1) {
+        if (it->random) {
+          it->currentGroup = rand() % it->frameGroups + 1;
+        } else {
+          it->currentGroup++;
+          if (it->currentGroup > it->frameGroups) it->currentGroup = 1;
+        }
+      } else {
+        it->currentGroup = 1;
+      }
+    } else {
+      it->currentGroup = (uint8_t)requestedGroup;
+    }
+  } else if (it->currentGroup == 0) {
+    it->currentGroup = 1;
+  }
+
+  group = it->currentGroup > 0 ? it->currentGroup : 1;
+  return true;
+}
+
 bool SceneGenerator::getSceneEndHoldDurationMs(uint16_t sceneId,
                                                uint32_t &durationMs) const {
   auto holdIt = m_sceneEndHoldDurationMs.find(sceneId);
@@ -269,21 +321,9 @@ uint16_t SceneGenerator::generateFrame(uint16_t sceneId, uint16_t frameIndex,
   }
   lastTime = now;
 
-  if (frameIndex == 0) {
-    if (group == -1) {
-      if (it->frameGroups > 1) {
-        if (it->random) {
-          it->currentGroup = rand() % it->frameGroups + 1;
-        } else {
-          it->currentGroup++;
-          if (it->currentGroup > it->frameGroups) it->currentGroup = 1;
-        }
-      } else {
-        it->currentGroup = 1;
-      }
-    } else {
-      it->currentGroup = (uint8_t)group;
-    }
+  uint8_t currentGroup = 1;
+  if (!updateAndGetCurrentGroup(sceneId, frameIndex, group, currentGroup)) {
+    return 0;
   }
 
   // Copy pre-rendered template
@@ -293,7 +333,7 @@ uint16_t SceneGenerator::generateFrame(uint16_t sceneId, uint16_t frameIndex,
   std::string sceneIdStr = formatNumber(sceneId, NUMBER_WIDTH);
   renderString(buffer, sceneIdStr, NUM_X, SCENE_Y);
 
-  std::string groupStr = formatNumber(it->currentGroup, NUMBER_WIDTH);
+  std::string groupStr = formatNumber(currentGroup, NUMBER_WIDTH);
   renderString(buffer, groupStr, NUM_X, GROUP_Y);
 
   std::string frameStr = formatNumber(frameIndex + 1, NUMBER_WIDTH);
