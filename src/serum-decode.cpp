@@ -243,7 +243,8 @@ static void InitCriticalTriggerLookupRuntimeState(void) {
   }
 
   std::unordered_set<uint16_t> uniqueMaskShapeKeys;
-  uniqueMaskShapeKeys.reserve(g_serumData.criticalTriggerFramesBySignature.size());
+  uniqueMaskShapeKeys.reserve(
+      g_serumData.criticalTriggerFramesBySignature.size());
   for (const auto& entry : g_serumData.criticalTriggerFramesBySignature) {
     const uint8_t mask = static_cast<uint8_t>((entry.first >> 40) & 0xffu);
     const uint8_t shape = static_cast<uint8_t>((entry.first >> 32) & 0xffu);
@@ -255,9 +256,9 @@ static void InitCriticalTriggerLookupRuntimeState(void) {
 }
 
 static uint32_t IdentifyCriticalTriggerFrame(uint8_t* frame) {
-  const auto profileStart =
-      g_profileDynamicHotPaths ? std::chrono::steady_clock::now()
-                               : std::chrono::steady_clock::time_point{};
+  const auto profileStart = g_profileDynamicHotPaths
+                                ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point{};
   if (!cromloaded || g_criticalTriggerMaskShapes.empty() ||
       g_serumData.criticalTriggerFramesBySignature.empty()) {
     if (g_profileDynamicHotPaths) {
@@ -315,8 +316,9 @@ static uint32_t SelectFrameIdInWrapOrder(const std::vector<uint32_t>& frameIds,
   for (size_t i = 1; i < frameIds.size(); ++i) {
     const uint32_t frameId = frameIds[i];
     const uint32_t distance =
-        (frameId >= startFrameId) ? (frameId - startFrameId)
-                                  : (g_serumData.nframes - startFrameId + frameId);
+        (frameId >= startFrameId)
+            ? (frameId - startFrameId)
+            : (g_serumData.nframes - startFrameId + frameId);
     if (distance < bestDistance) {
       bestDistance = distance;
       bestFrameId = frameId;
@@ -327,8 +329,7 @@ static uint32_t SelectFrameIdInWrapOrder(const std::vector<uint32_t>& frameIds,
 
 static uint32_t ResolveIdentifiedFrameMatch(uint8_t* frame, uint32_t inputCrc,
                                             uint32_t candidateFrameId,
-                                            uint8_t mask,
-                                            bool& first_match,
+                                            uint8_t mask, bool& first_match,
                                             uint32_t& lastfound_stream,
                                             uint32_t& lastframe_full_crc) {
   if (candidateFrameId >= g_serumData.nframes) {
@@ -350,24 +351,23 @@ static uint32_t ResolveIdentifiedFrameMatch(uint8_t* frame, uint32_t inputCrc,
           inputCrc, candidateFrameId,
           first_match ? "first-match"
                       : (candidateFrameId != lastfound_stream ? "new-frame-id"
-                                                             : "mask-lt-255"),
+                                                              : "mask-lt-255"),
           first_match ? "true" : "false", lastfound_stream, mask,
           lastframe_full_crc);
     }
     lastfound_stream = candidateFrameId;
     lastfound = candidateFrameId;
-    lastframe_full_crc = crc32_fast(frame, g_serumData.is256x64
-                                               ? (256 * 64)
-                                               : (g_serumData.fwidth *
-                                                  g_serumData.fheight));
+    lastframe_full_crc =
+        crc32_fast(frame, g_serumData.is256x64
+                              ? (256 * 64)
+                              : (g_serumData.fwidth * g_serumData.fheight));
     first_match = false;
     return candidateFrameId;
   }
 
-  const uint32_t full_crc =
-      crc32_fast(frame, g_serumData.is256x64
-                            ? (256 * 64)
-                            : (g_serumData.fwidth * g_serumData.fheight));
+  const uint32_t full_crc = crc32_fast(
+      frame, g_serumData.is256x64 ? (256 * 64)
+                                  : (g_serumData.fwidth * g_serumData.fheight));
   if (full_crc != lastframe_full_crc) {
     if (DebugIdentifyVerboseEnabled() &&
         DebugTraceMatches(inputCrc, candidateFrameId)) {
@@ -600,36 +600,34 @@ static void MaybeLogDynamicHotPathProfileWindow(bool sceneFrameRequested) {
     return;
   }
 
-  const double roundTripMs =
-      g_profileColorizeCalls == 0
-          ? 0.0
-          : (double)g_profileRoundTripNs / (double)g_profileColorizeCalls /
-                1000000.0;
-  const double frameMs =
-      g_profileColorizeCalls == 0
-          ? 0.0
-          : (double)g_profileColorizeFrameV2Ns / (double)g_profileColorizeCalls /
-                1000000.0;
-  const double spriteMs =
-      g_profileColorizeCalls == 0
-          ? 0.0
-          : (double)g_profileColorizeSpriteV2Ns /
-                (double)g_profileColorizeCalls / 1000000.0;
-  const double identifyMs =
-      g_profileColorizeCalls == 0
-          ? 0.0
-          : (double)g_profileIdentifyTotalNs / (double)g_profileColorizeCalls /
-                1000000.0;
+  const double roundTripMs = g_profileColorizeCalls == 0
+                                 ? 0.0
+                                 : (double)g_profileRoundTripNs /
+                                       (double)g_profileColorizeCalls /
+                                       1000000.0;
+  const double frameMs = g_profileColorizeCalls == 0
+                             ? 0.0
+                             : (double)g_profileColorizeFrameV2Ns /
+                                   (double)g_profileColorizeCalls / 1000000.0;
+  const double spriteMs = g_profileColorizeCalls == 0
+                              ? 0.0
+                              : (double)g_profileColorizeSpriteV2Ns /
+                                    (double)g_profileColorizeCalls / 1000000.0;
+  const double identifyMs = g_profileColorizeCalls == 0
+                                ? 0.0
+                                : (double)g_profileIdentifyTotalNs /
+                                      (double)g_profileColorizeCalls /
+                                      1000000.0;
   const double identifyNormalMs =
       g_profileIdentifyNormalCalls == 0
           ? 0.0
           : (double)g_profileIdentifyNormalNs /
                 (double)g_profileIdentifyNormalCalls / 1000000.0;
-  const double identifySceneMs =
-      g_profileIdentifySceneCalls == 0
-          ? 0.0
-          : (double)g_profileIdentifySceneNs /
-                (double)g_profileIdentifySceneCalls / 1000000.0;
+  const double identifySceneMs = g_profileIdentifySceneCalls == 0
+                                     ? 0.0
+                                     : (double)g_profileIdentifySceneNs /
+                                           (double)g_profileIdentifySceneCalls /
+                                           1000000.0;
   const double identifyCriticalMs =
       g_profileIdentifyCriticalCalls == 0
           ? 0.0
@@ -2342,7 +2340,6 @@ static void BuildFrameLookupVectors(void) {
             .push_back(frameId);
         numSceneFrames++;
       }
-
     }
 
     g_serumData.BuildCriticalTriggerLookup();
@@ -2481,9 +2478,9 @@ static void InitFrameLookupRuntimeStateFromStoredData(void) {
 }
 
 uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
-  const auto profileStart =
-      g_profileDynamicHotPaths ? std::chrono::steady_clock::now()
-                               : std::chrono::steady_clock::time_point{};
+  const auto profileStart = g_profileDynamicHotPaths
+                                ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point{};
   auto finishProfile = [&](uint32_t result) -> uint32_t {
     if (g_profileDynamicHotPaths) {
       const uint64_t elapsedNs =
@@ -2520,9 +2517,10 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   if (!sceneFrameRequested) {
     const uint32_t bucketCount =
         static_cast<uint32_t>(g_serumData.normalIdentifyBuckets.size());
-    if (bucketCount == 0 || g_serumData.frameToNormalBucket.size() !=
-                                g_serumData.nframes) {
-      if (DebugIdentifyVerboseEnabled() && DebugTraceMatchesInputCrc(inputCrc)) {
+    if (bucketCount == 0 ||
+        g_serumData.frameToNormalBucket.size() != g_serumData.nframes) {
+      if (DebugIdentifyVerboseEnabled() &&
+          DebugTraceMatchesInputCrc(inputCrc)) {
         Log("Serum debug identify miss: inputCrc=%u sceneRequested=false",
             inputCrc);
       }
@@ -3575,8 +3573,8 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
   uint16_t *pfr, *prot;
   uint16_t* prt;
   uint32_t* cshft;
-  const bool traceSprite =
-      DebugSpriteVerboseEnabled() && DebugTraceMatches(g_debugCurrentInputCrc, IDfound);
+  const bool traceSprite = DebugSpriteVerboseEnabled() &&
+                           DebugTraceMatches(g_debugCurrentInputCrc, IDfound);
   const bool hasOpaque = g_serumData.spriteoriginal_opaque.hasData(nosprite);
   const bool hasDynaActive =
       g_serumData.dynaspritemasks_active.hasData(nosprite);
@@ -4786,12 +4784,11 @@ uint32_t Serum_RenderScene(void) {
         if (sceneNextFrameAtMs > now) {
           const uint16_t waitMs =
               static_cast<uint16_t>(sceneNextFrameAtMs - now);
-          DebugLogSceneEvent("triplet-wait",
-                             static_cast<uint16_t>(lastTriggerID),
-                             sceneCurrentFrame, sceneFrameCount,
-                             sceneDurationPerFrame, sceneOptionFlags,
-                             sceneInterruptable, sceneStartImmediately,
-                             sceneRepeatCount, currentGroup, waitMs);
+          DebugLogSceneEvent(
+              "triplet-wait", static_cast<uint16_t>(lastTriggerID),
+              sceneCurrentFrame, sceneFrameCount, sceneDurationPerFrame,
+              sceneOptionFlags, sceneInterruptable, sceneStartImmediately,
+              sceneRepeatCount, currentGroup, waitMs);
           mySerum.rotationtimer = waitMs;
           return finishSceneProfile(mySerum.rotationtimer |
                                     FLAG_RETURNED_V2_SCENE);
@@ -4834,10 +4831,9 @@ uint32_t Serum_RenderScene(void) {
         mySerum.rotationtimer = 0;
         sceneNextFrameAtMs = 0;
         ForceNormalFrameRefreshAfterSceneEnd();
-        return finishSceneProfile((mySerum.rotationtimer & 0xffff) |
-                                  FLAG_RETURNED_V2_ROTATED32 |
-                                  FLAG_RETURNED_V2_ROTATED64 |
-                                  FLAG_RETURNED_V2_SCENE);
+        return finishSceneProfile(
+            (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_ROTATED32 |
+            FLAG_RETURNED_V2_ROTATED64 | FLAG_RETURNED_V2_SCENE);
       }
       mySerum.rotationtimer = sceneDurationPerFrame;
       sceneNextFrameAtMs = now + sceneDurationPerFrame;

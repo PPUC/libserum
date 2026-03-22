@@ -1,10 +1,10 @@
 #pragma once
 
+#include <algorithm>
 #include <cereal/archives/portable_binary.hpp>
 #include <cereal/types/string.hpp>
 #include <cereal/types/unordered_map.hpp>
 #include <cereal/types/vector.hpp>
-#include <algorithm>
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -279,11 +279,10 @@ class SerumData {
           std::sort(serialized.frameIds.begin(), serialized.frameIds.end());
           sceneSignatureEntries.push_back(std::move(serialized));
         }
-        std::sort(sceneSignatureEntries.begin(), sceneSignatureEntries.end(),
-                  [](const SceneSignatureLookupEntry &a,
-                     const SceneSignatureLookupEntry &b) {
-                    return a.key < b.key;
-                  });
+        std::sort(
+            sceneSignatureEntries.begin(), sceneSignatureEntries.end(),
+            [](const SceneSignatureLookupEntry &a,
+               const SceneSignatureLookupEntry &b) { return a.key < b.key; });
 
         std::vector<SceneSignatureLookupEntry> normalSignatureEntries;
         normalSignatureEntries.reserve(normalFramesBySignature.size());
@@ -294,33 +293,30 @@ class SerumData {
           std::sort(serialized.frameIds.begin(), serialized.frameIds.end());
           normalSignatureEntries.push_back(std::move(serialized));
         }
-        std::sort(normalSignatureEntries.begin(), normalSignatureEntries.end(),
-                  [](const SceneSignatureLookupEntry &a,
-                     const SceneSignatureLookupEntry &b) {
-                    return a.key < b.key;
-                  });
+        std::sort(
+            normalSignatureEntries.begin(), normalSignatureEntries.end(),
+            [](const SceneSignatureLookupEntry &a,
+               const SceneSignatureLookupEntry &b) { return a.key < b.key; });
 
         std::vector<SceneTripletLookupEntry> sceneTripletEntries;
         sceneTripletEntries.reserve(sceneFrameIdByTriplet.size());
         for (const auto &entry : sceneFrameIdByTriplet) {
           sceneTripletEntries.push_back({entry.first, entry.second});
         }
-        std::sort(sceneTripletEntries.begin(), sceneTripletEntries.end(),
-                  [](const SceneTripletLookupEntry &a,
-                     const SceneTripletLookupEntry &b) {
-                    return a.key < b.key;
-                  });
+        std::sort(
+            sceneTripletEntries.begin(), sceneTripletEntries.end(),
+            [](const SceneTripletLookupEntry &a,
+               const SceneTripletLookupEntry &b) { return a.key < b.key; });
 
         std::vector<ColorRotationLookupEntry> colorRotationEntries;
         colorRotationEntries.reserve(colorRotationLookupByFrameAndColor.size());
         for (const auto &entry : colorRotationLookupByFrameAndColor) {
           colorRotationEntries.push_back({entry.first, entry.second});
         }
-        std::sort(colorRotationEntries.begin(), colorRotationEntries.end(),
-                  [](const ColorRotationLookupEntry &a,
-                     const ColorRotationLookupEntry &b) {
-                    return a.key < b.key;
-                  });
+        std::sort(
+            colorRotationEntries.begin(), colorRotationEntries.end(),
+            [](const ColorRotationLookupEntry &a,
+               const ColorRotationLookupEntry &b) { return a.key < b.key; });
 
         std::vector<CriticalTriggerLookupEntry> criticalTriggerEntries;
         criticalTriggerEntries.reserve(criticalTriggerFramesBySignature.size());
@@ -331,11 +327,10 @@ class SerumData {
           std::sort(serialized.frameIds.begin(), serialized.frameIds.end());
           criticalTriggerEntries.push_back(std::move(serialized));
         }
-        std::sort(criticalTriggerEntries.begin(), criticalTriggerEntries.end(),
-                  [](const CriticalTriggerLookupEntry &a,
-                     const CriticalTriggerLookupEntry &b) {
-                    return a.key < b.key;
-                  });
+        std::sort(
+            criticalTriggerEntries.begin(), criticalTriggerEntries.end(),
+            [](const CriticalTriggerLookupEntry &a,
+               const CriticalTriggerLookupEntry &b) { return a.key < b.key; });
 
         ar(frameIsScene, sceneSignatureEntries, normalSignatureEntries,
            normalIdentifyBuckets, frameToNormalBucket, spriteoriginal_opaque,
