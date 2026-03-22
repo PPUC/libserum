@@ -36,9 +36,9 @@ Format of a PUP scene line:
 3: duration of each frame
 4: 0 - not interruptable, 1 - interruptable by frame match or PUP event
 5: 0 - start immediately, replacing the triggering frame, 1 - start after frame duration (see 3)
-      for background scenes this does not take over the full frame; instead the first
-      background scene frame is primed immediately and the triggering normal frame
-      still renders in the foreground
+      background scenes do not replace the triggering frame; instead the first
+      background scene frame is prepared immediately and the triggering normal
+      frame still renders in the foreground
 6: 0 - play once, 1 - loop, >= 2 - repeat x times
 7: 0 - no frame groups, >= 2 - create x frame groups (you get x times the number of frames entered in 2 to play changing scenes)
 8: 0 - play frame group in order, 1 - play random frame group
@@ -47,7 +47,7 @@ Format of a PUP scene line:
 10: scene flags. When no flags are provided and scene is finished, the last frame of the scene is shown until a new frame is matched.
    1 - black screen when scene finished
    2 - show last frame before scene started when scene finished
-   4 - run scene as background; the first background scene frame is primed immediately so the replaced static background image is not shown for an extra tick, while the triggering normal frame still renders in the foreground
+   4 - run scene as background; the first background scene frame is prepared immediately so the new background starts without an extra tick delay, while the triggering normal frame still renders in the foreground
    8 - replace static content with background scene, only dynamic zones, sprites and shadows will be in the foreground
   16 - continue scene at previous frame when interrupted for less than 8s
 ```

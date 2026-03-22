@@ -327,10 +327,12 @@ Flags (from `serum.h`):
 `startImmediately` behavior:
 - `startImmediately` is honored for foreground scenes.
 - Background scenes do not use foreground-style immediate takeover semantics.
-- Instead, a new background scene primes its first scene frame immediately into
-  background state so the replaced static background image or the previous
-  scene's last frame is not shown for one extra tick.
-- The triggering normal frame still renders in the foreground on that same call.
+- When a new background scene is armed, libserum immediately renders the first
+  scene frame into background state and then continues by rendering the
+  triggering normal frame in the foreground on the same call.
+- Same-trigger background-scene continuation still uses the historical
+  `IDENTIFY_SAME_FRAME` path so repeated trigger frames do not restart or
+  recompose the scene between rotations.
 - Foreground scenes still stop color rotations when they start immediately;
   background scenes do not.
 
