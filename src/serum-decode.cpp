@@ -4340,8 +4340,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                     (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
                     FLAG_SCENE_AS_BACKGROUND;
                 if (sceneIsBackground) {
-                  // Background scenes should not preempt rendering immediately.
-                  sceneStartImmediately = false;
+                  sceneStartImmediately = true;
                 } else {
                   // Foreground scenes and color rotations are mutually
                   // exclusive.
@@ -4375,7 +4374,8 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                                      sceneOptionFlags, sceneInterruptable,
                                      sceneStartImmediately, sceneRepeatCount);
                   uint32_t sceneRotationResult = Serum_RenderScene();
-                  if (sceneRotationResult & FLAG_RETURNED_V2_SCENE) {
+                  if (!sceneIsBackground &&
+                      (sceneRotationResult & FLAG_RETURNED_V2_SCENE)) {
                     MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
                     return sceneRotationResult;
                   }
@@ -5135,7 +5135,7 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
   sceneOptionFlags = options;
   if ((sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
       FLAG_SCENE_AS_BACKGROUND) {
-    sceneStartImmediately = false;
+    sceneStartImmediately = true;
   } else {
     StopV2ColorRotations();
   }

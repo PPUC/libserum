@@ -322,8 +322,13 @@ Flags (from `serum.h`):
 - `16`: resume interrupted scene if retriggered within 8s
 
 `startImmediately` behavior:
-- `startImmediately` is honored only for foreground scenes.
-- For background scenes (`FLAG_SCENE_AS_BACKGROUND`), `startImmediately` is forced to `false`.
+- `startImmediately` is honored for foreground scenes.
+- Background scenes are forced to start immediately regardless of authored CSV
+  value.
+- Background scenes must also start immediately so a replaced static background
+  image or the previous scene's last frame is not shown for one extra tick.
+- Foreground scenes still stop color rotations when they start immediately;
+  background scenes do not.
 
 ## cROMc persistence
 Current concentrate version: **6**.
