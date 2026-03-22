@@ -794,12 +794,51 @@ bool SerumData::TryGetColorRotation(uint32_t frameId, uint16_t color,
   return true;
 }
 
+void SerumData::DebugLogSceneLookupSummary(const char *stage) {
+  const char *sceneVerbose = std::getenv("SERUM_DEBUG_SCENE_VERBOSE");
+  if (!sceneVerbose || (strcmp(sceneVerbose, "1") != 0 &&
+                        strcasecmp(sceneVerbose, "true") != 0 &&
+                        strcasecmp(sceneVerbose, "on") != 0 &&
+                        strcasecmp(sceneVerbose, "yes") != 0)) {
+    return;
+  }
+
+  uint32_t sceneFrameCount = 0;
+  for (uint8_t isScene : frameIsScene) {
+    if (isScene != 0) {
+      ++sceneFrameCount;
+    }
+  }
+
+  size_t sceneSignatureFrameRefs = 0;
+  for (const auto &entry : sceneFramesBySignature) {
+    sceneSignatureFrameRefs += entry.second.size();
+  }
+
+  const bool sceneGeneratorActive =
+      (sceneGenerator != nullptr) && sceneGenerator->isActive();
+  const uint32_t sceneCount =
+      (sceneGenerator != nullptr)
+          ? static_cast<uint32_t>(sceneGenerator->getSceneData().size())
+          : 0u;
+
+  Log("Serum debug scene lookup summary: stage=%s sceneGeneratorActive=%s "
+      "sceneCount=%u nframes=%u frameIsSceneSize=%u sceneFrames=%u "
+      "sceneSignatures=%u sceneSignatureFrameRefs=%u sceneTriplets=%u",
+      stage ? stage : "unknown", sceneGeneratorActive ? "true" : "false",
+      sceneCount, nframes, static_cast<uint32_t>(frameIsScene.size()),
+      sceneFrameCount, static_cast<uint32_t>(sceneFramesBySignature.size()),
+      static_cast<uint32_t>(sceneSignatureFrameRefs),
+      static_cast<uint32_t>(sceneFrameIdByTriplet.size()));
+}
+
 bool SerumData::SaveToFile(const char *filename) {
   try {
     BuildPackingSidecarsAndNormalize();
     if (!HasSpriteRuntimeSidecars()) {
       BuildSpriteRuntimeSidecars();
     }
+    DebugLogSceneLookupSummary("pre-save");
     Log("Writing %s", filename);
     // Serialize to memory buffer first
     std::ostringstream ss(std::ios::binary);
@@ -966,6 +1005,7 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
     }
 
     fclose(fp);
+    DebugLogSceneLookupSummary("post-load-file");
     return true;
   } catch (const std::exception &e) {
     Log("Exception when opening %s: %s", filename, e.what());
@@ -1054,6 +1094,7 @@ bool SerumData::LoadFromBuffer(const uint8_t *data, size_t size,
       archive(*this);
     }
 
+    DebugLogSceneLookupSummary("post-load-buffer");
     return true;
   } catch (const std::exception &e) {
     Log("Exception when loading: %s", e.what());

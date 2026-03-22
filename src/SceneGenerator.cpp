@@ -45,6 +45,12 @@ void SceneGenerator::setDepth(uint8_t depth) {
 }
 
 bool SceneGenerator::parseCSV(const std::string &csv_filename) {
+  const char *sceneVerbose = std::getenv("SERUM_DEBUG_SCENE_VERBOSE");
+  const bool logParseSummary =
+      sceneVerbose && (strcmp(sceneVerbose, "1") == 0 ||
+                       strcasecmp(sceneVerbose, "true") == 0 ||
+                       strcasecmp(sceneVerbose, "on") == 0 ||
+                       strcasecmp(sceneVerbose, "yes") == 0);
   std::ifstream in_csv(csv_filename);
   if (!in_csv.is_open()) {
     Log("SceneGenerator: Could not open CSV file: %s", csv_filename.c_str());
@@ -57,6 +63,7 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
   m_sceneEndHoldDurationMs.clear();
   std::string line;
   int lineNum = 0;
+  uint32_t skippedInvalidLines = 0;
   while (std::getline(in_csv, line)) {
     lineNum++;
     if (line.empty()) continue;
@@ -83,6 +90,7 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
       Log("SceneGenerator: Skipping invalid line %d - expected at least 3 "
           "columns",
           lineNum);
+      ++skippedInvalidLines;
       continue;
     }
 
@@ -122,11 +130,17 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
     } catch (...) {
       Log("SceneGenerator: Skipping invalid line %d - non-integer value",
           lineNum);
+      ++skippedInvalidLines;
       continue;
     }
   }
 
   m_active = !m_sceneData.empty();
+  if (logParseSummary) {
+    Log("SceneGenerator: Parsed %s scenes=%u skippedInvalid=%u active=%s",
+        csv_filename.c_str(), static_cast<uint32_t>(m_sceneData.size()),
+        skippedInvalidLines, m_active ? "true" : "false");
+  }
 
   return true;
 }

@@ -255,6 +255,12 @@ How it works:
 Log line:
 - `Loaded X frames and Y rotation scene frames`
 
+Save-time invariant:
+- `Serum_SaveConcentrate()` must set `SceneGenerator` depth from
+  `g_serumData.nocolors` before `BuildFrameLookupVectors()`. Otherwise large
+  v2 scene sets authored for 4-level scene markers can serialize empty derived
+  scene lookup data even though the source `.pup.csv` parses successfully.
+
 ## Colorization flow (v2)
 Entry point: `Serum_ColorizeWithMetadatav2(frame, sceneFrameRequested=false)`.
 
@@ -388,6 +394,10 @@ v6 snapshot policy:
 - `serum-decode.cpp` and `SceneGenerator.cpp` both use callback-based `Log(...)`.
 - Successful load logging includes Serum runtime version and, for `cROMc`
   loads, the concentrate version.
+- Under `SERUM_DEBUG_SCENE_VERBOSE=1`, `SceneGenerator::parseCSV(...)` logs a
+  one-line parse summary with parsed scene count, skipped invalid-line count,
+  and final active state. Use this first when a found `.pup.csv` still appears
+  to yield `0` rotation scene frames.
 - Missing-file logs from `find_case_insensitive_file(...)` use normalized path joining.
 - Optional runtime debug tracing is env-gated and split by verbosity:
   - `SERUM_DEBUG_TRACE_INPUTS=1` enables high-level lifecycle logs (input,
@@ -396,6 +406,11 @@ v6 snapshot policy:
   - `SERUM_DEBUG_SPRITE_VERBOSE=1` enables sprite candidate/detection/rejection
     logs.
   - `SERUM_DEBUG_SCENE_VERBOSE=1` enables scene-path and scene-event logs.
+    It also emits compact scene-lookup persistence summaries at `cROMc`
+    save/load time (`pre-save`, `post-load-file`, `post-load-buffer`) with
+    counts for `frameIsScene`, `sceneFramesBySignature`, and
+    `sceneFrameIdByTriplet`, which is the primary debug surface for
+    scene-related direct-`v6` load mismatches.
   - `SERUM_DEBUG_INPUT_CRC`, `SERUM_DEBUG_FRAME_ID`, and
     `SERUM_DEBUG_STAGE_HASHES=1` remain available as output filters and
     expensive hash tracing controls.

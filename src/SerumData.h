@@ -138,6 +138,7 @@ class SerumData {
                            uint16_t &rotationIndex,
                            uint16_t &positionInRotation) const;
   void LogSparseVectorProfileSnapshot();
+  void DebugLogSceneLookupSummary(const char *stage);
 
   // Header data
   char rname[64];

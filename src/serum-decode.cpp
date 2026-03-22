@@ -1368,6 +1368,9 @@ long serum_file_length;
 
 bool Serum_SaveConcentrate(const char* filename) {
   if (!cromloaded || is_real_machine()) return false;
+  if (g_serumData.sceneGenerator && g_serumData.sceneGenerator->isActive()) {
+    g_serumData.sceneGenerator->setDepth(g_serumData.nocolors == 16 ? 4 : 2);
+  }
   BuildFrameLookupVectors();
 
   std::string concentratePath;
