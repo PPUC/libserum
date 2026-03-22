@@ -14,6 +14,10 @@
 
 #include "TimeUtils.h"
 
+#ifdef _MSC_VER
+#define strcasecmp _stricmp
+#endif
+
 std::string formatNumber(int num, int width) {
   std::string s = std::to_string(num);
   if (s.length() < width) {

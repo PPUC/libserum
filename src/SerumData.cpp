@@ -1,10 +1,16 @@
 #include "SerumData.h"
 
+#include <cstdlib>
+#include <cstring>
 #include <unordered_set>
 
 #include "DecompressingIStream.h"
 #include "miniz/miniz.h"
 #include "serum-version.h"
+
+#ifdef _MSC_VER
+#define strcasecmp _stricmp
+#endif
 
 bool is_real_machine();
 
