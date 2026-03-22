@@ -326,10 +326,11 @@ Flags (from `serum.h`):
 
 `startImmediately` behavior:
 - `startImmediately` is honored for foreground scenes.
-- Background scenes are forced to start immediately regardless of authored CSV
-  value.
-- Background scenes must also start immediately so a replaced static background
-  image or the previous scene's last frame is not shown for one extra tick.
+- Background scenes do not use foreground-style immediate takeover semantics.
+- Instead, a new background scene primes its first scene frame immediately into
+  background state so the replaced static background image or the previous
+  scene's last frame is not shown for one extra tick.
+- The triggering normal frame still renders in the foreground on that same call.
 - Foreground scenes still stop color rotations when they start immediately;
   background scenes do not.
 

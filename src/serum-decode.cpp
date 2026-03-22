@@ -4337,8 +4337,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                 const bool sceneIsBackground =
                     (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
                     FLAG_SCENE_AS_BACKGROUND;
+                const bool primeBackgroundSceneImmediately = sceneIsBackground;
                 if (sceneIsBackground) {
-                  sceneStartImmediately = true;
+                  sceneStartImmediately = false;
                 } else {
                   // Foreground scenes and color rotations are mutually
                   // exclusive.
@@ -4365,8 +4366,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                 } else {
                   g_sceneResumeState.erase(lastTriggerID);
                 }
-                if (sceneStartImmediately) {
-                  DebugLogSceneEvent("start-immediate",
+                if (sceneStartImmediately || primeBackgroundSceneImmediately) {
+                  DebugLogSceneEvent(sceneIsBackground ? "prime-background"
+                                                       : "start-immediate",
                                      static_cast<uint16_t>(lastTriggerID), 0,
                                      sceneFrameCount, sceneDurationPerFrame,
                                      sceneOptionFlags, sceneInterruptable,
@@ -5129,9 +5131,10 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
   sceneStartImmediately = startImmediately;
   sceneRepeatCount = repeat;
   sceneOptionFlags = options;
-  if ((sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
-      FLAG_SCENE_AS_BACKGROUND) {
-    sceneStartImmediately = true;
+  const bool primeBackgroundSceneImmediately =
+      (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) == FLAG_SCENE_AS_BACKGROUND;
+  if (primeBackgroundSceneImmediately) {
+    sceneStartImmediately = false;
   } else {
     StopV2ColorRotations();
   }
@@ -5161,7 +5164,7 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
     mySerum.triggerID = 0xffffffff;
   }
 
-  if (sceneStartImmediately) {
+  if (sceneStartImmediately || primeBackgroundSceneImmediately) {
     return Serum_RenderScene();
   }
 
