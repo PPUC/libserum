@@ -4,6 +4,9 @@
 This document explains how `libserum` works end-to-end, with emphasis on runtime flow, scene handling, and cROMc persistence.
 
 **Maintenance rule:** Any feature change, behavior change, data format change, or API/signature change in this repository **must** be reflected in this file in the same PR/commit.
+**Formatting rule:** Code formatting in this repository is defined by
+`.clang-format`. Any code changes must be formatted accordingly before they are
+considered done.
 
 **Platform-independence rule:** `libserum` is intended to behave the same on
 all supported platforms. Runtime behavior, persisted `cROMc` semantics, and
