@@ -126,11 +126,18 @@ Vector policy currently used in `SerumData`:
 Entry point: `Serum_Load(altcolorpath, romname, flags)`.
 
 1. Reset all runtime state via `Serum_free()`.
-2. Look for optional `*.pup.csv`.
-3. Prefer loading `*.cROMc` unless `skip-cromc.txt` exists.
+2. On real-machine runtime (`is_real_machine()==true`):
+   - load only `*.cROMc`
+   - do not scan or apply `*.pup.csv`
+   - ignore `skip-cromc.txt`
+   - do not fall back to `*.cROM` / `*.cRZ`
+3. On non-real-machine/runtime-update flows:
+   - look for optional `*.pup.csv`
+   - prefer loading `*.cROMc` unless `skip-cromc.txt` exists.
    - If `*.cROMc` starts with `CROM` magic, load via `SerumData::LoadFromFile`.
    - Otherwise, try encrypted in-memory load (`vault::read` + `SerumData::LoadFromBuffer`).
-4. If cROMc load fails or is absent, load `*.cROM`/`*.cRZ`.
+4. If cROMc load fails or is absent on non-real-machine/runtime-update flows,
+   load `*.cROM`/`*.cRZ`.
 5. If CSV exists and format is v2, parse scenes via `SceneGenerator::parseCSV`.
 6. Set scene depth from color count when scenes are active.
 7. Build or restore frame lookup acceleration:

@@ -2143,14 +2143,18 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   pathbuf += '/';
 
   Log("Searching colorization file for %s in %s", romname, pathbuf.c_str());
+  const bool realMachine = is_real_machine();
 
   // If no specific frame tyoe is requested, activate both
   if ((flags & (FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES)) == 0) {
     flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
   }
 
-  std::optional<std::string> csvFoundFile =
-      find_case_insensitive_file(pathbuf, std::string(romname) + ".pup.csv");
+  std::optional<std::string> csvFoundFile;
+  if (!realMachine) {
+    csvFoundFile =
+        find_case_insensitive_file(pathbuf, std::string(romname) + ".pup.csv");
+  }
   NoteStartupRssSample("after-file-scan");
   if (csvFoundFile) {
     Log("Found %s", csvFoundFile->c_str());
@@ -2163,38 +2167,62 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   bool loadedFromConcentrate = false;
   bool sceneDataUpdatedFromCsv = false;
   std::optional<std::string> pFoundFile;
-  std::optional<std::string> skipFoundFile =
-      find_case_insensitive_file(pathbuf, "skip-cromc.txt");
-  if (skipFoundFile) {
-    Log("Skipping .cROMc load due to presence of %s", skipFoundFile->c_str());
+  if (!realMachine) {
+    std::optional<std::string> skipFoundFile =
+        find_case_insensitive_file(pathbuf, "skip-cromc.txt");
+    if (skipFoundFile) {
+      Log("Skipping .cROMc load due to presence of %s", skipFoundFile->c_str());
+    } else {
+      pFoundFile =
+          find_case_insensitive_file(pathbuf, std::string(romname) + ".cROMc");
+
+      if (pFoundFile) {
+        Log("Found %s", pFoundFile->c_str());
+        NoteStartupRssSample("before-cromc-load");
+        result = Serum_LoadConcentrate(pFoundFile->c_str(), flags);
+        loadedFromConcentrate = (result != NULL);
+        if (result) {
+          NoteStartupRssSample("after-cromc-load");
+          LogLoadedColorizationSource(*pFoundFile, true);
+          if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
+              g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str())) {
+            sceneDataUpdatedFromCsv = true;
+            NoteStartupRssSample("after-csv-update");
+#ifdef WRITE_CROMC
+            // Update the concentrate file with new PUP data
+            if (generateCRomC) Serum_SaveConcentrate(pFoundFile->c_str());
+#endif
+          }
+        } else {
+          Log("Failed to load %s", pFoundFile->c_str());
+        }
+      }
+    }
   } else {
     pFoundFile =
         find_case_insensitive_file(pathbuf, std::string(romname) + ".cROMc");
-
-    if (pFoundFile) {
-      Log("Found %s", pFoundFile->c_str());
-      NoteStartupRssSample("before-cromc-load");
-      result = Serum_LoadConcentrate(pFoundFile->c_str(), flags);
-      loadedFromConcentrate = (result != NULL);
-      if (result) {
-        NoteStartupRssSample("after-cromc-load");
-        LogLoadedColorizationSource(*pFoundFile, true);
-        if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
-            g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str())) {
-          sceneDataUpdatedFromCsv = true;
-          NoteStartupRssSample("after-csv-update");
-#ifdef WRITE_CROMC
-          // Update the concentrate file with new PUP data
-          if (generateCRomC) Serum_SaveConcentrate(pFoundFile->c_str());
-#endif
-        }
-      } else {
-        Log("Failed to load %s", pFoundFile->c_str());
-      }
+    if (!pFoundFile) {
+      Log("Real-machine mode only supports .cROMc; no concentrate file found "
+          "for %s",
+          romname);
+      enabled = false;
+      return NULL;
+    }
+    Log("Found %s", pFoundFile->c_str());
+    NoteStartupRssSample("before-cromc-load");
+    result = Serum_LoadConcentrate(pFoundFile->c_str(), flags);
+    loadedFromConcentrate = (result != NULL);
+    if (result) {
+      NoteStartupRssSample("after-cromc-load");
+      LogLoadedColorizationSource(*pFoundFile, true);
+    } else {
+      Log("Failed to load %s", pFoundFile->c_str());
+      enabled = false;
+      return NULL;
     }
   }
 
-  if (!result) {
+  if (!result && !realMachine) {
 #ifdef WRITE_CROMC
     // by default, we request both frame types
     flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
@@ -2260,7 +2288,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     LogStartupRssSummary();
     ResetDynamicHotPathProfile();
   }
-  if (is_real_machine()) {
+  if (realMachine) {
     monochromeMode = true;
   }
 
