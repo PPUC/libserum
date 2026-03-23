@@ -776,15 +776,14 @@ class SparseVector {
     }
   }
 
-  template <typename U = T>
-  void readFromCRomFile(size_t elementSize, uint32_t numElements, FILE *stream,
-                        SparseVector<U> *parent = nullptr) {
+  template <typename Reader, typename U = T>
+  void readFromCRomReader(size_t elementSize, uint32_t numElements,
+                          Reader &reader, SparseVector<U> *parent = nullptr) {
     if (useIndex) {
       index.resize(numElements);
       for (uint32_t i = 0; i < numElements; ++i) {
         index[i].resize(elementSize);
-        if (fread(index[i].data(), sizeof(T), elementSize, stream) !=
-            elementSize) {
+        if (!reader.readExact(index[i].data(), elementSize * sizeof(T))) {
           fprintf(stderr, "File read error\n");
           exit(1);
         }
@@ -793,7 +792,7 @@ class SparseVector {
       std::vector<T> tmp(elementSize);
 
       for (uint32_t i = 0; i < numElements; ++i) {
-        if (fread(tmp.data(), elementSize * sizeof(T), 1, stream) != 1) {
+        if (!reader.readExact(tmp.data(), elementSize * sizeof(T))) {
           fprintf(stderr, "File read error\n");
           exit(1);
         }
@@ -801,6 +800,18 @@ class SparseVector {
         set(i, tmp.data(), elementSize, parent);
       }
     }
+  }
+
+  template <typename U = T>
+  void readFromCRomFile(size_t elementSize, uint32_t numElements, FILE *stream,
+                        SparseVector<U> *parent = nullptr) {
+    struct FileReader {
+      FILE *stream;
+      bool readExact(void *dst, size_t bytes) {
+        return fread(dst, 1, bytes, stream) == bytes;
+      }
+    } reader{stream};
+    readFromCRomReader(elementSize, numElements, reader, parent);
   }
 
   void reserve(size_t elementSize) {

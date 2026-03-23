@@ -127,10 +127,13 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
 
 1. Reset all runtime state via `Serum_free()`.
 2. On real-machine runtime (`is_real_machine()==true`):
-   - load only `*.cROMc`
    - do not scan or apply `*.pup.csv`
    - ignore `skip-cromc.txt`
-   - do not fall back to `*.cROM` / `*.cRZ`
+   - accept `*.cROMc` only for Serum v2 content
+   - if no acceptable `*.cROMc` is available, fall back only to plain `*.cROM`
+   - raw real-machine fallback must resolve to Serum v1 content; reject raw
+     Serum v2 loads
+   - skip `*.cRZ` entirely on real-machine runtime
 3. On non-real-machine/runtime-update flows:
    - look for optional `*.pup.csv`
    - prefer loading `*.cROMc` unless `skip-cromc.txt` exists.
