@@ -2354,6 +2354,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     ResetDynamicHotPathProfile();
   }
   if (realMachine) {
+    // Render probably not colorized ROM version and status info.
     monochromeMode = true;
   }
 
