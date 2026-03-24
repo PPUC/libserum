@@ -1573,14 +1573,6 @@ Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
   return Serum_LoadConcentratePrepared(flags);
 }
 
-Serum_Frame_Struc* Serum_LoadFilev2(FILE* pfile, const uint8_t flags,
-                                    uint32_t sizeheader) {
-  FileCRomReader reader{pfile};
-  Serum_Frame_Struc* result = Serum_LoadFilev2Stream(reader, flags, sizeheader);
-  fclose(pfile);
-  return result;
-}
-
 template <typename Reader>
 static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
                                                  const uint8_t flags,
@@ -2143,21 +2135,7 @@ Serum_Frame_Struc* Serum_LoadFilev1(const char* const filename,
     enabled = false;
     return NULL;
   }
-
   FileCRomReader reader{pfile};
-  if (!ReadBytes(reader, g_serumData.rname, 64)) {
-    fclose(pfile);
-    enabled = false;
-    return NULL;
-  }
-  uint32_t sizeheader;
-  if (!ReadValue(reader, sizeheader)) {
-    fclose(pfile);
-    enabled = false;
-    return NULL;
-  }
-  if (sizeheader >= 14 * sizeof(uint32_t))
-    return Serum_LoadFilev2(pfile, flags, sizeheader);
   Serum_Frame_Struc* result = Serum_LoadFilev1Stream(reader, flags);
   fclose(pfile);
   return result;
@@ -2272,17 +2250,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
       result = Serum_LoadConcentrate(pFoundFile->c_str(), flags);
       loadedFromConcentrate = (result != NULL);
       if (result) {
-        if (g_serumData.SerumVersion != SERUM_V2) {
-          Log("Real-machine mode accepts .cROMc only for Serum v2; rejecting "
-              "%s",
-              pFoundFile->c_str());
-          Serum_free();
-          result = NULL;
-          loadedFromConcentrate = false;
-        } else {
-          NoteStartupRssSample("after-cromc-load");
-          LogLoadedColorizationSource(*pFoundFile, true);
-        }
+        NoteStartupRssSample("after-cromc-load");
+        LogLoadedColorizationSource(*pFoundFile, true);
       } else {
         Log("Failed to load %s", pFoundFile->c_str());
       }
@@ -2290,13 +2259,18 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   }
 
   if (!result) {
+    if (realMachine) {
+      Log("Real-machine mode supports only .cROMc loads for %s", romname);
+      enabled = false;
+      return NULL;
+    }
 #ifdef WRITE_CROMC
     // by default, we request both frame types
     flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
 #endif
     pFoundFile =
         find_case_insensitive_file(pathbuf, std::string(romname) + ".cROM");
-    if (!pFoundFile && !realMachine)
+    if (!pFoundFile)
       pFoundFile =
           find_case_insensitive_file(pathbuf, std::string(romname) + ".cRZ");
     if (!pFoundFile) {
@@ -2307,14 +2281,6 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     NoteStartupRssSample("before-crom-load");
     result = Serum_LoadFilev1(pFoundFile->c_str(), flags);
     if (result) {
-      if (realMachine && g_serumData.SerumVersion != SERUM_V1) {
-        Log("Real-machine mode accepts raw loads only from Serum v1 .cROM; "
-            "rejecting %s",
-            pFoundFile->c_str());
-        Serum_free();
-        enabled = false;
-        return NULL;
-      }
       NoteStartupRssSample("after-crom-load");
       LogLoadedColorizationSource(*pFoundFile, false);
       if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2) {
