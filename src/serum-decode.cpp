@@ -2453,6 +2453,8 @@ static Serum_Frame_Struc* Serum_LoadFilev1Stream(Reader& reader,
     mySerum.width32 = g_serumData.fwidth;
     mySerum.width64 = 0;
   }
+  Full_Reset_ColorRotations();
+  cromloaded = true;
   enabled = true;
   return &mySerum;
 }
