@@ -3964,13 +3964,15 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
       }
 
       if (frameID == IDENTIFY_SAME_FRAME) {
-        if (DebugTraceMatchesInputCrc(g_debugCurrentInputCrc)) {
+        if (cromloaded && enabled && lastfound < g_serumData.nframes &&
+            DebugIdentifyVerboseEnabled() &&
+            DebugTraceMatchesInputCrc(g_debugCurrentInputCrc)) {
           Log("Serum debug identify same-frame: inputCrc=%u lastfound=%u "
               "sceneRequested=%s triggerId=%u",
               g_debugCurrentInputCrc, lastfound, "false",
               g_serumData.triggerIDs[lastfound][0]);
         }
-        if (DebugTraceAllInputsEnabled()) {
+        if (cromloaded && enabled && DebugTraceAllInputsEnabled()) {
           Log("Serum debug input result: api=v1 inputCrc=%u result=same-frame "
               "lastfound=%u",
               g_debugCurrentInputCrc, lastfound);
@@ -4290,14 +4292,16 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       }
 
       if (frameID == IDENTIFY_SAME_FRAME) {
-        if (DebugTraceMatchesInputCrc(g_debugCurrentInputCrc)) {
+        if (cromloaded && enabled && lastfound < g_serumData.nframes &&
+            DebugIdentifyVerboseEnabled() &&
+            DebugTraceMatchesInputCrc(g_debugCurrentInputCrc)) {
           Log("Serum debug identify same-frame: inputCrc=%u lastfound=%u "
               "sceneRequested=%s triggerId=%u",
               g_debugCurrentInputCrc, lastfound,
               sceneFrameRequested ? "true" : "false",
               g_serumData.triggerIDs[lastfound][0]);
         }
-        if (DebugTraceAllInputsEnabled()) {
+        if (cromloaded && enabled && DebugTraceAllInputsEnabled()) {
           Log("Serum debug input result: api=v2 inputCrc=%u result=same-frame "
               "lastfound=%u sceneRequested=%s",
               g_debugCurrentInputCrc, lastfound,
