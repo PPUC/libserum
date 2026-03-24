@@ -1300,45 +1300,6 @@ uint32_t calc_crc32(uint8_t* source, uint8_t mask, uint32_t n, uint8_t Shape) {
   return crc32_fast(source, pixels);
 }
 
-bool unzip_crz(const char* const filename, const char* const extractpath,
-               char* cromname, int cromsize) {
-  bool ok = true;
-  mz_zip_archive zip_archive = {0};
-
-  if (!mz_zip_reader_init_file(&zip_archive, filename, 0)) {
-    return false;
-  }
-
-  int num_files = mz_zip_reader_get_num_files(&zip_archive);
-
-  if (num_files == 0 ||
-      !mz_zip_reader_get_filename(&zip_archive, 0, cromname, cromsize)) {
-    mz_zip_reader_end(&zip_archive);
-    return false;
-  }
-
-  for (int i = 0; i < num_files; i++) {
-    mz_zip_archive_file_stat file_stat;
-    if (!mz_zip_reader_file_stat(&zip_archive, i, &file_stat)) continue;
-
-    char dstPath[pathbuflen];
-    if (strcpy_s(dstPath, pathbuflen, extractpath)) goto fail;
-    if (strcat_s(dstPath, pathbuflen, file_stat.m_filename)) goto fail;
-
-    mz_zip_reader_extract_file_to_file(&zip_archive, file_stat.m_filename,
-                                       dstPath, 0);
-  }
-
-  goto nofail;
-fail:
-  ok = false;
-nofail:
-
-  mz_zip_reader_end(&zip_archive);
-
-  return ok;
-}
-
 struct FileCRomReader {
   FILE* stream = nullptr;
 
@@ -1371,6 +1332,15 @@ template <typename Reader>
 static bool ReadBytes(Reader& reader, void* dst, size_t bytes) {
   return reader.readExact(dst, bytes);
 }
+
+template <typename Reader>
+static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
+                                                 const uint8_t flags,
+                                                 uint32_t sizeheader);
+
+template <typename Reader>
+static Serum_Frame_Struc* Serum_LoadFilev1Stream(Reader& reader,
+                                                 const uint8_t flags);
 
 static bool ExtractCRZEntryToMemory(const char* filename,
                                     std::vector<uint8_t>& outData) {
@@ -1604,325 +1574,11 @@ Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
 }
 
 Serum_Frame_Struc* Serum_LoadFilev2(FILE* pfile, const uint8_t flags,
-                                    bool uncompressedCROM, char* pathbuf,
                                     uint32_t sizeheader) {
-  fread(&g_serumData.fwidth, 4, 1, pfile);
-  fread(&g_serumData.fheight, 4, 1, pfile);
-  fread(&g_serumData.fwidth_extra, 4, 1, pfile);
-  fread(&g_serumData.fheight_extra, 4, 1, pfile);
-  isoriginalrequested = false;
-  isextrarequested = false;
-  mySerum.width32 = 0;
-  mySerum.width64 = 0;
-  if (g_serumData.fheight == 32) {
-    if (flags & FLAG_REQUEST_32P_FRAMES) {
-      isoriginalrequested = true;
-      mySerum.width32 = g_serumData.fwidth;
-    }
-    if (flags & FLAG_REQUEST_64P_FRAMES) {
-      isextrarequested = true;
-      mySerum.width64 = g_serumData.fwidth_extra;
-    }
-
-  } else {
-    if (flags & FLAG_REQUEST_64P_FRAMES) {
-      isoriginalrequested = true;
-      mySerum.width64 = g_serumData.fwidth;
-    }
-    if (flags & FLAG_REQUEST_32P_FRAMES) {
-      isextrarequested = true;
-      mySerum.width32 = g_serumData.fwidth_extra;
-    }
-  }
-  fread(&g_serumData.nframes, 4, 1, pfile);
-  fread(&g_serumData.nocolors, 4, 1, pfile);
-  mySerum.nocolors = g_serumData.nocolors;
-  if ((g_serumData.nframes == 0) || (g_serumData.nocolors == 0) ||
-      !ValidateLoadedGeometry(true, "cROM/v2")) {
-    // incorrect file format
-    fclose(pfile);
-    enabled = false;
-    return NULL;
-  }
-  fread(&g_serumData.ncompmasks, 4, 1, pfile);
-  fread(&g_serumData.nsprites, 4, 1, pfile);
-  fread(&g_serumData.nbackgrounds, 2, 1,
-        pfile);  // g_serumData.nbackgrounds is a uint16_t
-  if (sizeheader >= 20 * sizeof(uint32_t)) {
-    int is256x64;
-    fread(&is256x64, sizeof(int), 1, pfile);
-    g_serumData.is256x64 = (is256x64 != 0);
-  }
-
-  frameshape = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-
-  if (flags & FLAG_REQUEST_32P_FRAMES) {
-    mySerum.frame32 =
-        (uint16_t*)malloc(32 * mySerum.width32 * sizeof(uint16_t));
-    mySerum.rotations32 = (uint16_t*)malloc(
-        MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * sizeof(uint16_t));
-    mySerum.rotationsinframe32 =
-        (uint16_t*)malloc(2 * 32 * mySerum.width32 * sizeof(uint16_t));
-    if (flags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS)
-      mySerum.modifiedelements32 = (uint8_t*)malloc(32 * mySerum.width32);
-    if (!mySerum.frame32 || !mySerum.rotations32 ||
-        !mySerum.rotationsinframe32 ||
-        (flags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS &&
-         !mySerum.modifiedelements32)) {
-      Serum_free();
-      fclose(pfile);
-      enabled = false;
-      return NULL;
-    }
-  }
-  if (flags & FLAG_REQUEST_64P_FRAMES) {
-    mySerum.frame64 =
-        (uint16_t*)malloc(64 * mySerum.width64 * sizeof(uint16_t));
-    mySerum.rotations64 = (uint16_t*)malloc(
-        MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * sizeof(uint16_t));
-    mySerum.rotationsinframe64 =
-        (uint16_t*)malloc(2 * 64 * mySerum.width64 * sizeof(uint16_t));
-    if (flags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS)
-      mySerum.modifiedelements64 = (uint8_t*)malloc(64 * mySerum.width64);
-    if (!mySerum.frame64 || !mySerum.rotations64 ||
-        !mySerum.rotationsinframe64 ||
-        (flags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS &&
-         !mySerum.modifiedelements64)) {
-      Serum_free();
-      fclose(pfile);
-      enabled = false;
-      return NULL;
-    }
-  }
-
-  g_serumData.hashcodes.readFromCRomFile(1, g_serumData.nframes, pfile);
-  g_serumData.shapecompmode.readFromCRomFile(1, g_serumData.nframes, pfile);
-  g_serumData.compmaskID.readFromCRomFile(1, g_serumData.nframes, pfile);
-  g_serumData.compmasks.readFromCRomFile(
-      g_serumData.is256x64 ? (256 * 64)
-                           : (g_serumData.fwidth * g_serumData.fheight),
-      g_serumData.ncompmasks, pfile);
-  g_serumData.isextraframe.readFromCRomFile(1, g_serumData.nframes, pfile);
-  if (isextrarequested) {
-    for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
-      if (g_serumData.isextraframe[ti][0] > 0) {
-        mySerum.flags |= FLAG_RETURNED_EXTRA_AVAILABLE;
-        break;
-      }
-    }
-  } else
-    g_serumData.isextraframe.clearIndex();
-  g_serumData.cframes_v2.readFromCRomFile(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.nframes, pfile);
-  g_serumData.cframes_v2_extra.readFromCRomFile(
-      g_serumData.fwidth_extra * g_serumData.fheight_extra, g_serumData.nframes,
-      pfile, &g_serumData.isextraframe);
-  g_serumData.dynamasks.readFromCRomFile(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.nframes, pfile);
-  g_serumData.dynamasks_extra.readFromCRomFile(
-      g_serumData.fwidth_extra * g_serumData.fheight_extra, g_serumData.nframes,
-      pfile, &g_serumData.isextraframe);
-  g_serumData.dyna4cols_v2.readFromCRomFile(
-      MAX_DYNA_SETS_PER_FRAME_V2 * g_serumData.nocolors, g_serumData.nframes,
-      pfile);
-  g_serumData.dyna4cols_v2_extra.readFromCRomFile(
-      MAX_DYNA_SETS_PER_FRAME_V2 * g_serumData.nocolors, g_serumData.nframes,
-      pfile, &g_serumData.isextraframe);
-  g_serumData.isextrasprite.readFromCRomFile(1, g_serumData.nsprites, pfile);
-  if (!isextrarequested) g_serumData.isextrasprite.clearIndex();
-  g_serumData.framesprites.readFromCRomFile(MAX_SPRITES_PER_FRAME,
-                                            g_serumData.nframes, pfile);
-  g_serumData.spriteoriginal.readFromCRomFile(
-      MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites, pfile);
-  g_serumData.spritecolored.readFromCRomFile(
-      MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites, pfile);
-  g_serumData.spritemask_extra.readFromCRomFile(
-      MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites, pfile,
-      &g_serumData.isextrasprite);
-  g_serumData.spritecolored_extra.readFromCRomFile(
-      MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites, pfile,
-      &g_serumData.isextrasprite);
-  g_serumData.activeframes.readFromCRomFile(1, g_serumData.nframes, pfile);
-  g_serumData.colorrotations_v2.readFromCRomFile(
-      MAX_LENGTH_COLOR_ROTATION * MAX_COLOR_ROTATION_V2, g_serumData.nframes,
-      pfile);
-  g_serumData.colorrotations_v2_extra.readFromCRomFile(
-      MAX_LENGTH_COLOR_ROTATION * MAX_COLOR_ROTATION_V2, g_serumData.nframes,
-      pfile, &g_serumData.isextraframe);
-  g_serumData.spritedetdwords.readFromCRomFile(MAX_SPRITE_DETECT_AREAS,
-                                               g_serumData.nsprites, pfile);
-  g_serumData.spritedetdwordpos.readFromCRomFile(MAX_SPRITE_DETECT_AREAS,
-                                                 g_serumData.nsprites, pfile);
-  g_serumData.spritedetareas.readFromCRomFile(4 * MAX_SPRITE_DETECT_AREAS,
-                                              g_serumData.nsprites, pfile);
-  g_serumData.triggerIDs.readFromCRomFile(1, g_serumData.nframes, pfile);
-  g_serumData.framespriteBB.readFromCRomFile(MAX_SPRITES_PER_FRAME * 4,
-                                             g_serumData.nframes, pfile,
-                                             &g_serumData.framesprites);
-  g_serumData.isextrabackground.readFromCRomFile(1, g_serumData.nbackgrounds,
-                                                 pfile);
-  if (!isextrarequested) g_serumData.isextrabackground.clearIndex();
-  g_serumData.backgroundframes_v2.readFromCRomFile(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.nbackgrounds,
-      pfile);
-  g_serumData.backgroundframes_v2_extra.readFromCRomFile(
-      g_serumData.fwidth_extra * g_serumData.fheight_extra,
-      g_serumData.nbackgrounds, pfile, &g_serumData.isextrabackground);
-  g_serumData.backgroundIDs.readFromCRomFile(1, g_serumData.nframes, pfile);
-  g_serumData.backgroundmask.readFromCRomFile(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.nframes, pfile,
-      &g_serumData.backgroundIDs);
-  g_serumData.backgroundmask_extra.readFromCRomFile(
-      g_serumData.fwidth_extra * g_serumData.fheight_extra, g_serumData.nframes,
-      pfile, &g_serumData.backgroundIDs);
-
-  if (sizeheader >= 15 * sizeof(uint32_t)) {
-    g_serumData.dynashadowsdir.readFromCRomFile(MAX_DYNA_SETS_PER_FRAME_V2,
-                                                g_serumData.nframes, pfile);
-    g_serumData.dynashadowscol.readFromCRomFile(MAX_DYNA_SETS_PER_FRAME_V2,
-                                                g_serumData.nframes, pfile);
-    g_serumData.dynashadowsdir_extra.readFromCRomFile(
-        MAX_DYNA_SETS_PER_FRAME_V2, g_serumData.nframes, pfile,
-        &g_serumData.isextraframe);
-    g_serumData.dynashadowscol_extra.readFromCRomFile(
-        MAX_DYNA_SETS_PER_FRAME_V2, g_serumData.nframes, pfile,
-        &g_serumData.isextraframe);
-  } else {
-    g_serumData.dynashadowsdir.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
-    g_serumData.dynashadowscol.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
-    g_serumData.dynashadowsdir_extra.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
-    g_serumData.dynashadowscol_extra.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
-  }
-
-  if (sizeheader >= 18 * sizeof(uint32_t)) {
-    g_serumData.dynasprite4cols.readFromCRomFile(
-        MAX_DYNA_SETS_PER_SPRITE * g_serumData.nocolors, g_serumData.nsprites,
-        pfile);
-    g_serumData.dynasprite4cols_extra.readFromCRomFile(
-        MAX_DYNA_SETS_PER_SPRITE * g_serumData.nocolors, g_serumData.nsprites,
-        pfile, &g_serumData.isextraframe);
-    g_serumData.dynaspritemasks.readFromCRomFile(
-        MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites, pfile);
-    g_serumData.dynaspritemasks_extra.readFromCRomFile(
-        MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites, pfile,
-        &g_serumData.isextraframe);
-  } else {
-    g_serumData.dynasprite4cols.reserve(MAX_DYNA_SETS_PER_SPRITE *
-                                        g_serumData.nocolors);
-    g_serumData.dynasprite4cols_extra.reserve(MAX_DYNA_SETS_PER_SPRITE *
-                                              g_serumData.nocolors);
-    g_serumData.dynaspritemasks.reserve(MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT);
-    g_serumData.dynaspritemasks_extra.reserve(MAX_SPRITE_WIDTH *
-                                              MAX_SPRITE_HEIGHT);
-  }
-
-  if (sizeheader >= 19 * sizeof(uint32_t)) {
-    g_serumData.sprshapemode.readFromCRomFile(1, g_serumData.nsprites, pfile);
-    for (uint32_t i = 0; i < g_serumData.nsprites; i++) {
-      if (g_serumData.sprshapemode[i][0] > 0) {
-        for (uint32_t j = 0; j < MAX_SPRITE_DETECT_AREAS; j++) {
-          uint32_t detdwords = g_serumData.spritedetdwords[i][j];
-          if ((detdwords & 0xFF000000) > 0)
-            detdwords = (detdwords & 0x00FFFFFF) | 0x01000000;
-          if ((detdwords & 0x00FF0000) > 0)
-            detdwords = (detdwords & 0xFF00FFFF) | 0x00010000;
-          if ((detdwords & 0x0000FF00) > 0)
-            detdwords = (detdwords & 0xFFFF00FF) | 0x00000100;
-          if ((detdwords & 0x000000FF) > 0)
-            detdwords = (detdwords & 0xFFFFFF00) | 0x00000001;
-          g_serumData.spritedetdwords[i][j] = detdwords;
-        }
-        for (uint32_t j = 0; j < MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT; j++) {
-          if (g_serumData.spriteoriginal[i][j] > 0 &&
-              g_serumData.spriteoriginal[i][j] != 255)
-            g_serumData.spriteoriginal[i][j] = 1;
-        }
-      }
-    }
-  } else {
-    g_serumData.sprshapemode.reserve(g_serumData.nsprites);
-  }
-
-  g_serumData.BuildPackingSidecarsAndNormalize();
-
+  FileCRomReader reader{pfile};
+  Serum_Frame_Struc* result = Serum_LoadFilev2Stream(reader, flags, sizeheader);
   fclose(pfile);
-
-  mySerum.ntriggers = 0;
-  uint32_t framespos = g_serumData.nframes / 2;
-  uint32_t framesspace = g_serumData.nframes - framespos;
-  uint32_t framescount = (framesspace + 9) / 10;
-
-  if (framescount > 0) {
-    std::vector<uint32_t> candidates;
-    candidates.reserve(framesspace);
-    for (uint32_t ti = framespos; ti < g_serumData.nframes; ++ti) {
-      if (g_serumData.triggerIDs[ti][0] == 0xffffffff) {
-        candidates.push_back(ti);
-      }
-    }
-
-    if (!candidates.empty()) {
-      std::mt19937 rng(0xC0DE1234);
-      std::shuffle(candidates.begin(), candidates.end(), rng);
-      std::uniform_int_distribution<uint32_t> triggerDist(65433u, 0xfffffffeu);
-
-      uint32_t toAssign = std::min<uint32_t>(framescount, candidates.size());
-      for (uint32_t i = 0; i < toAssign; ++i) {
-        uint32_t triggerValue = triggerDist(rng);
-        g_serumData.triggerIDs.set(candidates[i], &triggerValue, 1);
-      }
-
-      for (uint32_t offset = 0; (framespos + offset) < g_serumData.nframes;
-           ++offset) {
-        uint32_t idx = framespos + offset;
-        if (g_serumData.triggerIDs[idx][0] == 0xffffffff) {
-          uint32_t triggerValue = triggerDist(rng);
-          g_serumData.triggerIDs.set(idx, &triggerValue, 1);
-          break;
-        }
-      }
-    }
-  }
-  for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
-    // Every trigger ID greater than PUP_TRIGGER_MAX_THRESHOLD is an internal
-    // trigger for rotation scenes and must not be communicated to the PUP
-    // Player.
-    if (g_serumData.triggerIDs[ti][0] < PUP_TRIGGER_MAX_THRESHOLD)
-      mySerum.ntriggers++;
-  }
-  framechecked = (bool*)malloc(sizeof(bool) * g_serumData.nframes);
-  if (!framechecked) {
-    Serum_free();
-    enabled = false;
-    return NULL;
-  }
-  if (flags & FLAG_REQUEST_32P_FRAMES) {
-    if (g_serumData.fheight == 32)
-      mySerum.width32 = g_serumData.fwidth;
-    else
-      mySerum.width32 = g_serumData.fwidth_extra;
-  } else
-    mySerum.width32 = 0;
-  if (flags & FLAG_REQUEST_64P_FRAMES) {
-    if (g_serumData.fheight == 32)
-      mySerum.width64 = g_serumData.fwidth_extra;
-    else
-      mySerum.width64 = g_serumData.fwidth;
-  } else
-    mySerum.width64 = 0;
-
-  mySerum.SerumVersion = g_serumData.SerumVersion = SERUM_V2;
-
-  Full_Reset_ColorRotations();
-  cromloaded = true;
-
-  if (!uncompressedCROM) {
-    // remove temporary file that had been extracted from compressed CRZ file
-    remove(pathbuf);
-  }
-
-  enabled = true;
-  return &mySerum;
+  return result;
 }
 
 template <typename Reader>
@@ -2481,219 +2137,30 @@ Serum_Frame_Struc* Serum_LoadFilev1(const char* const filename,
     return Serum_LoadFilev1Stream(reader, flags);
   }
 
-  char pathbuf[pathbuflen];
-  if (strcpy_s(pathbuf, pathbuflen, filename)) return NULL;
-
-  // Open cRom
   FILE* pfile;
-  pfile = fopen(pathbuf, "rb");
+  pfile = fopen(filename, "rb");
   if (!pfile) {
     enabled = false;
     return NULL;
   }
 
-  // read the header to know how much memory is needed
-  fread(g_serumData.rname, 1, 64, pfile);
+  FileCRomReader reader{pfile};
+  if (!ReadBytes(reader, g_serumData.rname, 64)) {
+    fclose(pfile);
+    enabled = false;
+    return NULL;
+  }
   uint32_t sizeheader;
-  fread(&sizeheader, 4, 1, pfile);
-  // if this is a new format file, we load with Serum_LoadNewFile()
+  if (!ReadValue(reader, sizeheader)) {
+    fclose(pfile);
+    enabled = false;
+    return NULL;
+  }
   if (sizeheader >= 14 * sizeof(uint32_t))
-    return Serum_LoadFilev2(pfile, flags, uncompressedCROM, pathbuf,
-                            sizeheader);
-  mySerum.SerumVersion = g_serumData.SerumVersion = SERUM_V1;
-  fread(&g_serumData.fwidth, 4, 1, pfile);
-  fread(&g_serumData.fheight, 4, 1, pfile);
-  // The serum file stored the number of frames as uint32_t, but in fact, the
-  // number of frames will never exceed the size of uint16_t (65535)
-  uint32_t nframes32;
-  fread(&nframes32, 4, 1, pfile);
-  g_serumData.nframes = (uint16_t)nframes32;
-  fread(&g_serumData.nocolors, 4, 1, pfile);
-  mySerum.nocolors = g_serumData.nocolors;
-  fread(&g_serumData.nccolors, 4, 1, pfile);
-  if ((g_serumData.fwidth == 0) || (g_serumData.fheight == 0) ||
-      (g_serumData.nframes == 0) || (g_serumData.nocolors == 0) ||
-      (g_serumData.nccolors == 0)) {
-    // incorrect file format
-    fclose(pfile);
-    enabled = false;
-    return NULL;
-  }
-  if (!ValidateLoadedGeometry(false, "cROM/v1")) {
-    fclose(pfile);
-    enabled = false;
-    return NULL;
-  }
-  fread(&g_serumData.ncompmasks, 4, 1, pfile);
-  fread(&g_serumData.nmovmasks, 4, 1, pfile);
-  fread(&g_serumData.nsprites, 4, 1, pfile);
-  if (sizeheader >= 13 * sizeof(uint32_t))
-    fread(&g_serumData.nbackgrounds, 2, 1, pfile);
-  else
-    g_serumData.nbackgrounds = 0;
-  // allocate memory for the serum format
-  uint8_t* spritedescriptionso = (uint8_t*)malloc(
-      g_serumData.nsprites * MAX_SPRITE_SIZE * MAX_SPRITE_SIZE);
-  uint8_t* spritedescriptionsc = (uint8_t*)malloc(
-      g_serumData.nsprites * MAX_SPRITE_SIZE * MAX_SPRITE_SIZE);
-
-  mySerum.frame = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-  mySerum.palette = (uint8_t*)malloc(3 * 64);
-  mySerum.rotations = (uint8_t*)malloc(MAX_COLOR_ROTATIONS * 3);
-  if (((g_serumData.nsprites > 0) &&
-       (!spritedescriptionso || !spritedescriptionsc)) ||
-      !mySerum.frame || !mySerum.palette || !mySerum.rotations) {
-    Serum_free();
-    fclose(pfile);
-    enabled = false;
-    return NULL;
-  }
-  // read the cRom file
-  g_serumData.hashcodes.readFromCRomFile(1, g_serumData.nframes, pfile);
-  g_serumData.shapecompmode.readFromCRomFile(1, g_serumData.nframes, pfile);
-  g_serumData.compmaskID.readFromCRomFile(1, g_serumData.nframes, pfile);
-  g_serumData.movrctID.readFromCRomFile(1, g_serumData.nframes, pfile);
-  g_serumData.movrctID.clear();  // we don't need this anymore, but we need to
-                                 // read it to skip the data in the file
-  g_serumData.compmasks.readFromCRomFile(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.ncompmasks, pfile);
-  g_serumData.movrcts.readFromCRomFile(g_serumData.fwidth * g_serumData.fheight,
-                                       g_serumData.nmovmasks, pfile);
-  g_serumData.movrcts.clear();  // we don't need this anymore, but we need to
-                                // read it to skip the data in the file
-  g_serumData.cpal.readFromCRomFile(3 * g_serumData.nccolors,
-                                    g_serumData.nframes, pfile);
-  g_serumData.cframes.readFromCRomFile(g_serumData.fwidth * g_serumData.fheight,
-                                       g_serumData.nframes, pfile);
-  g_serumData.dynamasks.readFromCRomFile(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.nframes, pfile);
-  g_serumData.dyna4cols.readFromCRomFile(
-      MAX_DYNA_4COLS_PER_FRAME * g_serumData.nocolors, g_serumData.nframes,
-      pfile);
-  g_serumData.framesprites.readFromCRomFile(MAX_SPRITES_PER_FRAME,
-                                            g_serumData.nframes, pfile);
-
-  for (int ti = 0;
-       ti < (int)g_serumData.nsprites * MAX_SPRITE_SIZE * MAX_SPRITE_SIZE;
-       ti++) {
-    fread(&spritedescriptionsc[ti], 1, 1, pfile);
-    fread(&spritedescriptionso[ti], 1, 1, pfile);
-  }
-  for (uint32_t i = 0; i < g_serumData.nsprites; i++) {
-    g_serumData.spritedescriptionsc.set(
-        i, &spritedescriptionsc[i * MAX_SPRITE_SIZE * MAX_SPRITE_SIZE],
-        MAX_SPRITE_SIZE * MAX_SPRITE_SIZE);
-    g_serumData.spritedescriptionso.set(
-        i, &spritedescriptionso[i * MAX_SPRITE_SIZE * MAX_SPRITE_SIZE],
-        MAX_SPRITE_SIZE * MAX_SPRITE_SIZE);
-  }
-  Free_element((void**)&spritedescriptionso);
-  Free_element((void**)&spritedescriptionsc);
-
-  g_serumData.activeframes.readFromCRomFile(1, g_serumData.nframes, pfile);
-  g_serumData.colorrotations.readFromCRomFile(3 * MAX_COLOR_ROTATIONS,
-                                              g_serumData.nframes, pfile);
-  g_serumData.spritedetdwords.readFromCRomFile(MAX_SPRITE_DETECT_AREAS,
-                                               g_serumData.nsprites, pfile);
-  g_serumData.spritedetdwordpos.readFromCRomFile(MAX_SPRITE_DETECT_AREAS,
-                                                 g_serumData.nsprites, pfile);
-  g_serumData.spritedetareas.readFromCRomFile(4 * MAX_SPRITE_DETECT_AREAS,
-                                              g_serumData.nsprites, pfile);
-  mySerum.ntriggers = 0;
-  if (sizeheader >= 11 * sizeof(uint32_t)) {
-    g_serumData.triggerIDs.readFromCRomFile(1, g_serumData.nframes, pfile);
-  }
-  uint32_t framespos = g_serumData.nframes / 2;
-  uint32_t framesspace = g_serumData.nframes - framespos;
-  uint32_t framescount = (framesspace + 9) / 10;
-
-  if (framescount > 0) {
-    std::vector<uint32_t> candidates;
-    candidates.reserve(framesspace);
-    for (uint32_t ti = framespos; ti < g_serumData.nframes; ++ti) {
-      if (g_serumData.triggerIDs[ti][0] == 0xffffffff) {
-        candidates.push_back(ti);
-      }
-    }
-
-    if (!candidates.empty()) {
-      std::mt19937 rng(0xC0DE1234);
-      std::shuffle(candidates.begin(), candidates.end(), rng);
-      std::uniform_int_distribution<uint32_t> triggerDist(65433u, 0xfffffffeu);
-
-      uint32_t toAssign = std::min<uint32_t>(framescount, candidates.size());
-      for (uint32_t i = 0; i < toAssign; ++i) {
-        uint32_t triggerValue = triggerDist(rng);
-        g_serumData.triggerIDs.set(candidates[i], &triggerValue, 1);
-      }
-
-      for (uint32_t offset = 0; (framespos + offset) < g_serumData.nframes;
-           ++offset) {
-        uint32_t idx = framespos + offset;
-        if (g_serumData.triggerIDs[idx][0] == 0xffffffff) {
-          uint32_t triggerValue = triggerDist(rng);
-          g_serumData.triggerIDs.set(idx, &triggerValue, 1);
-          break;
-        }
-      }
-    }
-  }
-  for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
-    if (g_serumData.triggerIDs[ti][0] != 0xffffffff) mySerum.ntriggers++;
-  }
-  if (sizeheader >= 12 * sizeof(uint32_t))
-    g_serumData.framespriteBB.readFromCRomFile(MAX_SPRITES_PER_FRAME * 4,
-                                               g_serumData.nframes, pfile,
-                                               &g_serumData.framesprites);
-  else {
-    for (uint32_t tj = 0; tj < g_serumData.nframes; tj++) {
-      uint16_t tmp_framespriteBB[4 * MAX_SPRITES_PER_FRAME];
-      for (uint32_t ti = 0; ti < MAX_SPRITES_PER_FRAME; ti++) {
-        tmp_framespriteBB[ti * 4] = 0;
-        tmp_framespriteBB[ti * 4 + 1] = 0;
-        tmp_framespriteBB[ti * 4 + 2] = g_serumData.fwidth - 1;
-        tmp_framespriteBB[ti * 4 + 3] = g_serumData.fheight - 1;
-      }
-      g_serumData.framespriteBB.set(tj, tmp_framespriteBB,
-                                    MAX_SPRITES_PER_FRAME * 4);
-    }
-  }
-  if (sizeheader >= 13 * sizeof(uint32_t)) {
-    g_serumData.backgroundframes.readFromCRomFile(
-        g_serumData.fwidth * g_serumData.fheight, g_serumData.nbackgrounds,
-        pfile);
-    g_serumData.backgroundIDs.readFromCRomFile(1, g_serumData.nframes, pfile);
-    g_serumData.backgroundBB.readFromCRomFile(4, g_serumData.nframes, pfile,
-                                              &g_serumData.backgroundIDs);
-  }
-
-  g_serumData.BuildPackingSidecarsAndNormalize();
+    return Serum_LoadFilev2(pfile, flags, sizeheader);
+  Serum_Frame_Struc* result = Serum_LoadFilev1Stream(reader, flags);
   fclose(pfile);
-
-  // allocate memory for previous detected frame
-  framechecked = (bool*)malloc(sizeof(bool) * g_serumData.nframes);
-  if (!framechecked) {
-    Serum_free();
-    enabled = false;
-    return NULL;
-  }
-  if (g_serumData.fheight == 64) {
-    mySerum.width64 = g_serumData.fwidth;
-    mySerum.width32 = 0;
-  } else {
-    mySerum.width32 = g_serumData.fwidth;
-    mySerum.width64 = 0;
-  }
-  Full_Reset_ColorRotations();
-  cromloaded = true;
-
-  if (!uncompressedCROM) {
-    // remove temporary file that had been extracted from compressed CRZ file
-    remove(pathbuf);
-  }
-
-  enabled = true;
-  return &mySerum;
+  return result;
 }
 
 SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
