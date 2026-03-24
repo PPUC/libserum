@@ -1404,6 +1404,17 @@ uint32_t min(uint32_t v1, uint32_t v2) {
 
 long serum_file_length;
 
+static std::string BuildConcentratePathFromSourcePath(const char* filename) {
+  std::string concentratePath;
+  if (const char* dot = strrchr(filename, '.')) {
+    concentratePath = std::string(filename, dot);
+  } else {
+    concentratePath = filename;
+  }
+  concentratePath += ".cROMc";
+  return concentratePath;
+}
+
 bool Serum_SaveConcentrate(const char* filename) {
   if (!cromloaded || is_real_machine()) return false;
   if (g_serumData.sceneGenerator && g_serumData.sceneGenerator->isActive()) {
@@ -1411,14 +1422,8 @@ bool Serum_SaveConcentrate(const char* filename) {
   }
   BuildFrameLookupVectors();
 
-  std::string concentratePath;
-
-  // Remove extension and add .cROMc
-  if (const char* dot = strrchr(filename, '.')) {
-    concentratePath = std::string(filename, dot);
-  }
-
-  concentratePath += ".cROMc";
+  const std::string concentratePath =
+      BuildConcentratePathFromSourcePath(filename);
 
   return g_serumData.SaveToFile(concentratePath.c_str());
 }
@@ -2209,6 +2214,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   Serum_Frame_Struc* result = NULL;
   bool loadedFromConcentrate = false;
   bool sceneDataUpdatedFromCsv = false;
+  std::optional<std::string> reloadConcentratePath;
   std::optional<std::string> pFoundFile;
   if (!realMachine) {
     std::optional<std::string> skipFoundFile =
@@ -2233,7 +2239,9 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
             NoteStartupRssSample("after-csv-update");
 #ifdef WRITE_CROMC
             // Update the concentrate file with new PUP data
-            if (generateCRomC) Serum_SaveConcentrate(pFoundFile->c_str());
+            if (generateCRomC && Serum_SaveConcentrate(pFoundFile->c_str())) {
+              reloadConcentratePath = *pFoundFile;
+            }
 #endif
           }
         } else {
@@ -2291,10 +2299,26 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
         }
       }
 #ifdef WRITE_CROMC
-      if (generateCRomC) Serum_SaveConcentrate(pFoundFile->c_str());
+      if (generateCRomC && Serum_SaveConcentrate(pFoundFile->c_str())) {
+        reloadConcentratePath =
+            BuildConcentratePathFromSourcePath(pFoundFile->c_str());
+      }
 #endif
     } else {
       Log("Failed to load %s", pFoundFile->c_str());
+    }
+  }
+  if (reloadConcentratePath) {
+    NoteStartupRssSample("before-cromc-reload");
+    Serum_free();
+    result = Serum_LoadConcentrate(reloadConcentratePath->c_str(), flags);
+    loadedFromConcentrate = (result != NULL);
+    sceneDataUpdatedFromCsv = false;
+    if (result) {
+      NoteStartupRssSample("after-cromc-reload");
+      LogLoadedColorizationSource(*reloadConcentratePath, true);
+    } else {
+      Log("Failed to reload %s after update", reloadConcentratePath->c_str());
     }
   }
   if (result && g_serumData.sceneGenerator->isActive())

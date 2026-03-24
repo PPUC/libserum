@@ -141,7 +141,14 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
    - Raw source loads are authoring/update inputs and may be re-saved as
      `*.cROMc` when `WRITE_CROMC` is enabled and runtime generation is not
      disabled through `Serum_SetGenerateCRomC(false)`.
+   - When such a raw source load produces a new `*.cROMc`, libserum reloads
+     that generated `*.cROMc` in the same load cycle so first-run behavior
+     matches the next boot.
 5. If CSV exists and format is v2, parse scenes via `SceneGenerator::parseCSV`.
+   - If CSV parsing updates scene data for a loaded `*.cROMc` and `WRITE_CROMC`
+     generation is enabled, libserum rewrites the `*.cROMc` and reloads it in
+     the same load cycle so the current process immediately uses the persisted
+     scene-aware data.
 6. Set scene depth from color count when scenes are active.
 7. Build or restore frame lookup acceleration:
    - If loaded from cROMc v6 and no CSV update in this run: use stored lookup
