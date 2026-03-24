@@ -127,10 +127,10 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
 
 1. Reset all runtime state via `Serum_free()`.
 2. On real-machine runtime (`is_real_machine()==true`):
-   - load only `*.cROMc`
    - do not scan or apply `*.pup.csv`
    - ignore `skip-cromc.txt`
-   - do not fall back to `*.cROM` / `*.cRZ`
+   - accept only `*.cROMc`
+   - do not fall back to `*.cROM` or `*.cRZ`
 3. On non-real-machine/runtime-update flows:
    - look for optional `*.pup.csv`
    - prefer loading `*.cROMc` unless `skip-cromc.txt` exists.
@@ -138,7 +138,17 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
    - Otherwise, try encrypted in-memory load (`vault::read` + `SerumData::LoadFromBuffer`).
 4. If cROMc load fails or is absent on non-real-machine/runtime-update flows,
    load `*.cROM`/`*.cRZ`.
+   - Raw source loads are authoring/update inputs and may be re-saved as
+     `*.cROMc` when `WRITE_CROMC` is enabled and runtime generation is not
+     disabled through `Serum_SetGenerateCRomC(false)`.
+   - When such a raw source load produces a new `*.cROMc`, libserum reloads
+     that generated `*.cROMc` in the same load cycle so first-run behavior
+     matches the next boot.
 5. If CSV exists and format is v2, parse scenes via `SceneGenerator::parseCSV`.
+   - If CSV parsing updates scene data for a loaded `*.cROMc` and `WRITE_CROMC`
+     generation is enabled, libserum rewrites the `*.cROMc` and reloads it in
+     the same load cycle so the current process immediately uses the persisted
+     scene-aware data.
 6. Set scene depth from color count when scenes are active.
 7. Build or restore frame lookup acceleration:
    - If loaded from cROMc v6 and no CSV update in this run: use stored lookup
@@ -345,6 +355,10 @@ Flags (from `serum.h`):
 
 ## cROMc persistence
 Current concentrate version: **6**.
+
+`cROMc` stores the full Serum model and supports both Serum v1 and Serum v2
+content. Real-machine policy may still restrict which source formats are
+accepted at load time, but the persisted `cROMc` format itself is not v2-only.
 
 Stored in v6:
 - Full Serum model payload.
