@@ -1032,7 +1032,8 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
     }
     Log("cROMc compressed size %u", compressedSize);
 
-    // Create a custom stream that decompresses on the fly
+    // File-based cROMc load must stay streaming to avoid requiring the full
+    // inflated payload in memory on constrained devices.
     DecompressingIStream decompStream(fp, compressedSize, originalSize);
     struct LegacyLoadFlagGuard {
       explicit LegacyLoadFlagGuard(bool legacy) {

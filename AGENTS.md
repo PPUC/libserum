@@ -387,6 +387,13 @@ Stored in v6:
   platforms. A `cROMc` generated on one platform must load with the same
   semantics on another platform without archive-format forks or
   platform-specific compatibility branches.
+- `SerumData::LoadFromFile()` must remain a streaming inflate path.
+  - Do not switch file-based `cROMc` load to "read compressed payload + fully
+    inflate to memory" just to reduce desktop startup time.
+  - Low-memory devices depend on streaming archive load so the full inflated
+    payload does not need to coexist in memory during direct file load.
+  - `LoadFromBuffer()` may still use whole-buffer inflate because the caller
+    has already materialized the archive in memory.
 - Prepared-load metadata:
   - `hasAnyExtraFrame`
   - `publicTriggerCount`
