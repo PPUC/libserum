@@ -83,6 +83,12 @@ Vector policy currently used in `SerumData`:
 - Precomputed frame-level dynamic fast flags are persisted:
   - `frameHasDynamic`
   - `frameHasDynamicExtra`
+- Additional prepared-load metadata is persisted for direct `v6` startup:
+  - `hasAnyExtraFrame`
+  - `publicTriggerCount`
+  - `Serum_LoadConcentratePrepared(...)` uses these to avoid whole-frame scans
+    for extra-frame availability and public-trigger counting on direct `v6`
+    loads.
 - `Colorize_Framev1/v2` uses these flags to bypass dynamic-mask branches
   entirely for frames without active dynamic pixels.
 - Runtime frame rendering must not rely on `activeframes` alone: frames with
@@ -381,6 +387,9 @@ Stored in v6:
   platforms. A `cROMc` generated on one platform must load with the same
   semantics on another platform without archive-format forks or
   platform-specific compatibility branches.
+- Prepared-load metadata:
+  - `hasAnyExtraFrame`
+  - `publicTriggerCount`
 - Sprite runtime sidecars:
   - `spriteCandidateOffsets`, `spriteCandidateIds`, `spriteCandidateSlots`
   - `frameHasShapeSprite`
@@ -402,6 +411,8 @@ Backward compatibility:
   persisted runtime-ready data.
 - For direct `v6` loads, stored scene/color-rotation lookup tables are reused
   directly; their persisted representation is platform-independent.
+- For direct `v6` loads, prepared-load metadata is reused directly; `v5`
+  compatibility loads still compute it at runtime.
 - Cross-platform differences in `v6` behavior are treated as bugs in canonical
   persistence or runtime reconstruction, not as an acceptable reason to add
   platform-tagged `cROMc` variants.
@@ -449,6 +460,15 @@ v6 snapshot policy:
   - Debug-only identify/sprite/stage-hash lines must stay silent by default
     and may only appear when the corresponding env-gated debug mode is enabled.
 - Optional runtime profiling:
+  - If env `SERUM_PROFILE_LOAD_TIMES=1`, startup load timing is logged for the
+    major load stages. This emits:
+    - archive-level timing from `SerumData::LoadFromFile/LoadFromBuffer`
+      (`Perf load archive: ... total=... deserialize=...`)
+    - top-level startup timing from `Serum_Load(...)`
+      (`Perf load total: ...`)
+    - Use this first when comparing `v5` vs `v6` startup regressions, because
+      it separates archive deserialize cost from post-load restore/rebuild
+      stages.
   - If env `SERUM_PROFILE_DYNAMIC_HOTPATHS` is enabled (`1/true/on/yes`),
     periodic average timings are logged for the full end-to-end rendered-frame
     round trip (`frame`), `Colorize_Framev2`, and `Colorize_Spritev2`, along
@@ -495,3 +515,7 @@ Minimum validation:
 10. Build color-rotation lookup index via `BuildColorRotationLookup()` during
     v5 / authoring-time rebuild flows so persisted v6 data provides O(1)
     `ColorInRotation` checks without direct-load fallback.
+    - `SerumData::SaveToFile()` must ensure
+      `colorRotationLookupByFrameAndColor` is populated before serializing
+      `v6`; otherwise direct `v6` load will rebuild the lookup at startup and
+      incur avoidable load-time cost.

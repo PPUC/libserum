@@ -88,6 +88,10 @@ static bool IsEnvFlagEnabled(const char* name) {
          strcasecmp(value, "yes") == 0 || strcasecmp(value, "on") == 0;
 }
 
+static bool IsLoadTimingEnabled() {
+  return IsEnvFlagEnabled("SERUM_PROFILE_LOAD_TIMES");
+}
+
 static uint32_t GetEnvUintClamped(const char* name, uint32_t maxValue) {
   const char* value = std::getenv(name);
   if (!value || value[0] == '\0') {
@@ -130,6 +134,7 @@ static uint32_t g_profileFrameOperationDepth = 0;
 static bool g_profileFrameOperationFinished = false;
 static std::chrono::steady_clock::time_point g_profileFrameOperationStart;
 static bool g_debugFrameTracingInitialized = false;
+static bool g_profileLoadTimes = false;
 static uint32_t g_debugTargetInputCrc = 0;
 static uint32_t g_debugTargetFrameId = 0xffffffffu;
 static bool g_debugStageHashes = false;
@@ -720,6 +725,14 @@ static bool DebugSpriteVerboseEnabled() {
 static bool DebugSceneVerboseEnabled() {
   InitDebugFrameTracingFromEnv();
   return g_debugVerboseScenes;
+}
+
+static double DurationMs(std::chrono::steady_clock::time_point start,
+                         std::chrono::steady_clock::time_point end) {
+  return (double)std::chrono::duration_cast<std::chrono::microseconds>(end -
+                                                                       start)
+             .count() /
+         1000.0;
 }
 
 static void DebugLogSceneEvent(const char* event, uint16_t sceneId,
@@ -1502,10 +1515,16 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(const uint8_t flags) {
     }
 
     if (isextrarequested) {
-      for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
-        if (g_serumData.isextraframe[ti][0] > 0) {
+      if (g_serumData.concentrateFileVersion >= 6) {
+        if (g_serumData.hasAnyExtraFrame) {
           mySerum.flags |= FLAG_RETURNED_EXTRA_AVAILABLE;
-          break;
+        }
+      } else {
+        for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
+          if (g_serumData.isextraframe[ti][0] > 0) {
+            mySerum.flags |= FLAG_RETURNED_EXTRA_AVAILABLE;
+            break;
+          }
         }
       }
     }
@@ -1535,13 +1554,17 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(const uint8_t flags) {
     }
   }
 
-  mySerum.ntriggers = 0;
-  for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
-    // Every trigger ID greater than PUP_TRIGGER_MAX_THRESHOLD is an internal
-    // trigger for rotation scenes and must not be communicated to the PUP
-    // Player.
-    if (g_serumData.triggerIDs[ti][0] < PUP_TRIGGER_MAX_THRESHOLD)
-      mySerum.ntriggers++;
+  if (g_serumData.concentrateFileVersion >= 6) {
+    mySerum.ntriggers = g_serumData.publicTriggerCount;
+  } else {
+    mySerum.ntriggers = 0;
+    for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
+      // Every trigger ID greater than PUP_TRIGGER_MAX_THRESHOLD is an internal
+      // trigger for rotation scenes and must not be communicated to the PUP
+      // Player.
+      if (g_serumData.triggerIDs[ti][0] < PUP_TRIGGER_MAX_THRESHOLD)
+        mySerum.ntriggers++;
+    }
   }
 
   // Allocate framechecked array
@@ -1572,10 +1595,36 @@ static void LogLoadedColorizationSource(const std::string& path,
 Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
                                          const uint8_t flags) {
   if (!crc32_ready) CRC32encode();
+  const bool loadTimingEnabled = IsLoadTimingEnabled();
+  const auto totalStart = loadTimingEnabled
+                              ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
 
+  const auto fileLoadStart = loadTimingEnabled
+                                 ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
   if (!g_serumData.LoadFromFile(filename, flags)) return NULL;
+  const auto fileLoadEnd = loadTimingEnabled
+                               ? std::chrono::steady_clock::now()
+                               : std::chrono::steady_clock::time_point{};
 
-  return Serum_LoadConcentratePrepared(flags);
+  const auto preparedStart = loadTimingEnabled
+                                 ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
+  Serum_Frame_Struc* result = Serum_LoadConcentratePrepared(flags);
+  const auto preparedEnd = loadTimingEnabled
+                               ? std::chrono::steady_clock::now()
+                               : std::chrono::steady_clock::time_point{};
+
+  if (loadTimingEnabled) {
+    Log("Perf load concentrate: total=%.3fms fileLoad=%.3fms prepared=%.3fms "
+        "path=%s",
+        DurationMs(totalStart, preparedEnd),
+        DurationMs(fileLoadStart, fileLoadEnd),
+        DurationMs(preparedStart, preparedEnd), filename);
+  }
+
+  return result;
 }
 
 template <typename Reader>
@@ -2150,6 +2199,10 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
                                         const char* const romname,
                                         uint8_t flags) {
   Serum_free();
+  g_profileLoadTimes = IsEnvFlagEnabled("SERUM_PROFILE_LOAD_TIMES");
+  const auto loadTotalStart = g_profileLoadTimes
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
   g_profileDynamicHotPaths = IsEnvFlagEnabled("SERUM_PROFILE_DYNAMIC_HOTPATHS");
   g_profileDynamicHotPathsWindowed =
       IsEnvFlagEnabled("SERUM_PROFILE_DYNAMIC_HOTPATHS_WINDOWED");
@@ -2192,6 +2245,16 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
 
   Log("Searching colorization file for %s in %s", romname, pathbuf.c_str());
   const bool realMachine = is_real_machine();
+  double csvUpdateMs = 0.0;
+  double cromcLoadMs = 0.0;
+  double rawLoadMs = 0.0;
+  double cromcReloadMs = 0.0;
+  double packingNormalizeMs = 0.0;
+  double frameLookupBuildMs = 0.0;
+  double frameLookupRestoreMs = 0.0;
+  double colorRotationBuildMs = 0.0;
+  double spriteSidecarBuildMs = 0.0;
+  double criticalLookupInitMs = 0.0;
 
   // If no specific frame tyoe is requested, activate both
   if ((flags & (FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES)) == 0) {
@@ -2228,13 +2291,31 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
       if (pFoundFile) {
         Log("Found %s", pFoundFile->c_str());
         NoteStartupRssSample("before-cromc-load");
+        const auto stageStart = g_profileLoadTimes
+                                    ? std::chrono::steady_clock::now()
+                                    : std::chrono::steady_clock::time_point{};
         result = Serum_LoadConcentrate(pFoundFile->c_str(), flags);
+        if (g_profileLoadTimes) {
+          cromcLoadMs +=
+              DurationMs(stageStart, std::chrono::steady_clock::now());
+        }
         loadedFromConcentrate = (result != NULL);
         if (result) {
           NoteStartupRssSample("after-cromc-load");
           LogLoadedColorizationSource(*pFoundFile, true);
-          if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
-              g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str())) {
+          if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 && ([&]() {
+                const auto csvStart =
+                    g_profileLoadTimes
+                        ? std::chrono::steady_clock::now()
+                        : std::chrono::steady_clock::time_point{};
+                const bool parsed =
+                    g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str());
+                if (g_profileLoadTimes) {
+                  csvUpdateMs +=
+                      DurationMs(csvStart, std::chrono::steady_clock::now());
+                }
+                return parsed;
+              })()) {
             sceneDataUpdatedFromCsv = true;
             NoteStartupRssSample("after-csv-update");
 #ifdef WRITE_CROMC
@@ -2255,7 +2336,13 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     if (pFoundFile) {
       Log("Found %s", pFoundFile->c_str());
       NoteStartupRssSample("before-cromc-load");
+      const auto stageStart = g_profileLoadTimes
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
       result = Serum_LoadConcentrate(pFoundFile->c_str(), flags);
+      if (g_profileLoadTimes) {
+        cromcLoadMs += DurationMs(stageStart, std::chrono::steady_clock::now());
+      }
       loadedFromConcentrate = (result != NULL);
       if (result) {
         NoteStartupRssSample("after-cromc-load");
@@ -2287,13 +2374,25 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     }
     Log("Found %s", pFoundFile->c_str());
     NoteStartupRssSample("before-crom-load");
+    const auto rawStageStart = g_profileLoadTimes
+                                   ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
     result = Serum_LoadFilev1(pFoundFile->c_str(), flags);
+    if (g_profileLoadTimes) {
+      rawLoadMs += DurationMs(rawStageStart, std::chrono::steady_clock::now());
+    }
     if (result) {
       NoteStartupRssSample("after-crom-load");
       LogLoadedColorizationSource(*pFoundFile, false);
       if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2) {
+        const auto csvStart = g_profileLoadTimes
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
         sceneDataUpdatedFromCsv =
             g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str());
+        if (g_profileLoadTimes) {
+          csvUpdateMs += DurationMs(csvStart, std::chrono::steady_clock::now());
+        }
         if (sceneDataUpdatedFromCsv) {
           NoteStartupRssSample("after-csv-update");
         }
@@ -2311,7 +2410,14 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   if (reloadConcentratePath) {
     NoteStartupRssSample("before-cromc-reload");
     Serum_free();
+    const auto reloadStart = g_profileLoadTimes
+                                 ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
     result = Serum_LoadConcentrate(reloadConcentratePath->c_str(), flags);
+    if (g_profileLoadTimes) {
+      cromcReloadMs +=
+          DurationMs(reloadStart, std::chrono::steady_clock::now());
+    }
     loadedFromConcentrate = (result != NULL);
     sceneDataUpdatedFromCsv = false;
     if (result) {
@@ -2328,29 +2434,86 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
                                        g_serumData.concentrateFileVersion < 6 ||
                                        sceneDataUpdatedFromCsv;
     if (loadedFromConcentrate && g_serumData.concentrateFileVersion < 6) {
+      const auto stageStart = g_profileLoadTimes
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
       g_serumData.BuildPackingSidecarsAndNormalize();
+      if (g_profileLoadTimes) {
+        packingNormalizeMs +=
+            DurationMs(stageStart, std::chrono::steady_clock::now());
+      }
       NoteStartupRssSample("after-packing-sidecar-normalize");
     }
     if (rebuildDerivedLookups) {
+      const auto stageStart = g_profileLoadTimes
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
       BuildFrameLookupVectors();
+      if (g_profileLoadTimes) {
+        frameLookupBuildMs +=
+            DurationMs(stageStart, std::chrono::steady_clock::now());
+      }
       NoteStartupRssSample("after-frame-lookup-build");
     } else {
+      const auto stageStart = g_profileLoadTimes
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
       InitFrameLookupRuntimeStateFromStoredData();
+      if (g_profileLoadTimes) {
+        frameLookupRestoreMs +=
+            DurationMs(stageStart, std::chrono::steady_clock::now());
+      }
       NoteStartupRssSample("after-frame-lookup-restore");
     }
     if (rebuildDerivedLookups ||
         g_serumData.colorRotationLookupByFrameAndColor.empty()) {
+      const auto stageStart = g_profileLoadTimes
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
       g_serumData.BuildColorRotationLookup();
+      if (g_profileLoadTimes) {
+        colorRotationBuildMs +=
+            DurationMs(stageStart, std::chrono::steady_clock::now());
+      }
       NoteStartupRssSample("after-color-rotation-build");
     }
     if (!g_serumData.HasSpriteRuntimeSidecars() &&
         (!loadedFromConcentrate || g_serumData.concentrateFileVersion < 6)) {
+      const auto stageStart = g_profileLoadTimes
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
       g_serumData.BuildSpriteRuntimeSidecars();
+      if (g_profileLoadTimes) {
+        spriteSidecarBuildMs +=
+            DurationMs(stageStart, std::chrono::steady_clock::now());
+      }
       NoteStartupRssSample("after-sprite-sidecar-build");
     }
+    const auto criticalStart = g_profileLoadTimes
+                                   ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
     InitCriticalTriggerLookupRuntimeState();
+    if (g_profileLoadTimes) {
+      criticalLookupInitMs +=
+          DurationMs(criticalStart, std::chrono::steady_clock::now());
+    }
     NoteStartupRssSample("before-runtime");
     LogStartupRssSummary();
+    if (g_profileLoadTimes) {
+      const double totalMs =
+          DurationMs(loadTotalStart, std::chrono::steady_clock::now());
+      Log("Perf load total: total=%.3fms cROMcLoad=%.3fms rawLoad=%.3fms "
+          "csvUpdate=%.3fms cROMcReload=%.3fms packingNormalize=%.3fms "
+          "frameLookupBuild=%.3fms frameLookupRestore=%.3fms "
+          "colorRotationBuild=%.3fms spriteSidecarBuild=%.3fms "
+          "criticalLookupInit=%.3fms loadedFromConcentrate=%s "
+          "concentrateVersion=%u serumVersion=%u",
+          totalMs, cromcLoadMs, rawLoadMs, csvUpdateMs, cromcReloadMs,
+          packingNormalizeMs, frameLookupBuildMs, frameLookupRestoreMs,
+          colorRotationBuildMs, spriteSidecarBuildMs, criticalLookupInitMs,
+          loadedFromConcentrate ? "true" : "false",
+          g_serumData.concentrateFileVersion, g_serumData.SerumVersion);
+    }
     ResetDynamicHotPathProfile();
   }
   if (realMachine) {

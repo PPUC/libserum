@@ -134,6 +134,7 @@ class SerumData {
   void DebugLogPackingSidecarsStorageSizes();
   bool HasSpriteRuntimeSidecars() const;
   void BuildColorRotationLookup();
+  void RefreshPreparedLoadMetadata();
   bool TryGetColorRotation(uint32_t frameId, uint16_t color, bool isextra,
                            uint16_t &rotationIndex,
                            uint16_t &positionInRotation) const;
@@ -234,6 +235,8 @@ class SerumData {
   std::unordered_map<uint64_t, uint16_t> colorRotationLookupByFrameAndColor;
   std::unordered_map<uint64_t, std::vector<uint32_t>>
       criticalTriggerFramesBySignature;
+  uint8_t hasAnyExtraFrame = 0;
+  uint32_t publicTriggerCount = 0;
 
   SceneGenerator *sceneGenerator;
 
@@ -341,7 +344,8 @@ class SerumData {
            spriteCandidateOffsets, spriteCandidateIds, spriteCandidateSlots,
            frameHasShapeSprite, spriteWidth, spriteHeight, spriteUsesShape,
            spriteDetectOffsets, spriteDetectMeta, spriteOpaqueRowSegmentStart,
-           spriteOpaqueRowSegmentCount, spriteOpaqueSegments);
+           spriteOpaqueRowSegmentCount, spriteOpaqueSegments, hasAnyExtraFrame,
+           publicTriggerCount);
       }
     } else {
       if (concentrateFileVersion >= 6) {
@@ -359,7 +363,8 @@ class SerumData {
            spriteCandidateOffsets, spriteCandidateIds, spriteCandidateSlots,
            frameHasShapeSprite, spriteWidth, spriteHeight, spriteUsesShape,
            spriteDetectOffsets, spriteDetectMeta, spriteOpaqueRowSegmentStart,
-           spriteOpaqueRowSegmentCount, spriteOpaqueSegments);
+           spriteOpaqueRowSegmentCount, spriteOpaqueSegments, hasAnyExtraFrame,
+           publicTriggerCount);
 
         sceneFramesBySignature.clear();
         sceneFramesBySignature.reserve(sceneSignatureEntries.size());
@@ -420,6 +425,8 @@ class SerumData {
         spriteOpaqueRowSegmentStart.clear();
         spriteOpaqueRowSegmentCount.clear();
         spriteOpaqueSegments.clear();
+        hasAnyExtraFrame = 0;
+        publicTriggerCount = 0;
       }
     }
 

@@ -1,5 +1,6 @@
 #include "SerumData.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <unordered_set>
@@ -15,8 +16,18 @@
 bool is_real_machine();
 
 namespace {
+constexpr uint32_t kPupTriggerMaxThreshold = 50000u;
 constexpr uint32_t kMonochromeTriggerId = 65432u;
 constexpr uint32_t kMonochromePaletteTriggerId = 65431u;
+
+bool IsLoadTimingEnabled() {
+  const char *value = std::getenv("SERUM_PROFILE_LOAD_TIMES");
+  if (!value || value[0] == '\0') {
+    return false;
+  }
+  return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 ||
+         strcasecmp(value, "yes") == 0 || strcasecmp(value, "on") == 0;
+}
 
 uint64_t MakeCriticalTriggerSignature(uint8_t mask, uint8_t shape,
                                       uint32_t hash) {
@@ -222,6 +233,26 @@ void SerumData::BuildCriticalTriggerLookup() {
     criticalTriggerFramesBySignature[MakeCriticalTriggerSignature(mask, shape,
                                                                   hash)]
         .push_back(frameId);
+  }
+}
+
+void SerumData::RefreshPreparedLoadMetadata() {
+  hasAnyExtraFrame = 0;
+  publicTriggerCount = 0;
+
+  if (SerumVersion == SERUM_V2) {
+    for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+      if (isextraframe[frameId][0] > 0) {
+        hasAnyExtraFrame = 1;
+        break;
+      }
+    }
+  }
+
+  for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+    if (triggerIDs[frameId][0] < kPupTriggerMaxThreshold) {
+      ++publicTriggerCount;
+    }
   }
 }
 
@@ -841,6 +872,10 @@ void SerumData::DebugLogSceneLookupSummary(const char *stage) {
 bool SerumData::SaveToFile(const char *filename) {
   try {
     BuildPackingSidecarsAndNormalize();
+    RefreshPreparedLoadMetadata();
+    if (colorRotationLookupByFrameAndColor.empty()) {
+      BuildColorRotationLookup();
+    }
     if (!HasSpriteRuntimeSidecars()) {
       BuildSpriteRuntimeSidecars();
     }
@@ -906,6 +941,10 @@ bool SerumData::SaveToFile(const char *filename) {
 bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
   m_loadFlags = flags;
   m_packingSidecarsNormalized = false;
+  const bool loadTimingEnabled = IsLoadTimingEnabled();
+  const auto totalStart = loadTimingEnabled
+                              ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
   FILE *fp;
   try {
     fp = fopen(filename, "rb");
@@ -1005,13 +1044,35 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
     } legacyLoadGuard(concentrateFileVersion <= 5);
 
     // Deserialize directly from the decompressing stream
+    const auto deserializeStart = loadTimingEnabled
+                                      ? std::chrono::steady_clock::now()
+                                      : std::chrono::steady_clock::time_point{};
     {
       cereal::PortableBinaryInputArchive archive(decompStream);
       archive(*this);
     }
+    const auto deserializeEnd = loadTimingEnabled
+                                    ? std::chrono::steady_clock::now()
+                                    : std::chrono::steady_clock::time_point{};
 
     fclose(fp);
     DebugLogSceneLookupSummary("post-load-file");
+    if (loadTimingEnabled) {
+      const double deserializeMs =
+          (double)std::chrono::duration_cast<std::chrono::microseconds>(
+              deserializeEnd - deserializeStart)
+              .count() /
+          1000.0;
+      const double totalMs =
+          (double)std::chrono::duration_cast<std::chrono::microseconds>(
+              deserializeEnd - totalStart)
+              .count() /
+          1000.0;
+      Log("Perf load archive: source=file total=%.3fms deserialize=%.3fms "
+          "compressed=%u original=%u version=%u path=%s",
+          totalMs, deserializeMs, compressedSize, originalSize,
+          concentrateFileVersion, filename);
+    }
     return true;
   } catch (const std::exception &e) {
     Log("Exception when opening %s: %s", filename, e.what());
@@ -1028,6 +1089,10 @@ bool SerumData::LoadFromBuffer(const uint8_t *data, size_t size,
                                const uint8_t flags) {
   m_loadFlags = flags;
   m_packingSidecarsNormalized = false;
+  const bool loadTimingEnabled = IsLoadTimingEnabled();
+  const auto totalStart = loadTimingEnabled
+                              ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
 
   try {
     if (!data || size < (4 + sizeof(uint16_t) + sizeof(uint32_t))) {
@@ -1095,12 +1160,34 @@ bool SerumData::LoadFromBuffer(const uint8_t *data, size_t size,
       }
     } legacyLoadGuard(concentrateFileVersion <= 5);
 
+    const auto deserializeStart = loadTimingEnabled
+                                      ? std::chrono::steady_clock::now()
+                                      : std::chrono::steady_clock::time_point{};
     {
       cereal::PortableBinaryInputArchive archive(iss);
       archive(*this);
     }
+    const auto deserializeEnd = loadTimingEnabled
+                                    ? std::chrono::steady_clock::now()
+                                    : std::chrono::steady_clock::time_point{};
 
     DebugLogSceneLookupSummary("post-load-buffer");
+    if (loadTimingEnabled) {
+      const double deserializeMs =
+          (double)std::chrono::duration_cast<std::chrono::microseconds>(
+              deserializeEnd - deserializeStart)
+              .count() /
+          1000.0;
+      const double totalMs =
+          (double)std::chrono::duration_cast<std::chrono::microseconds>(
+              deserializeEnd - totalStart)
+              .count() /
+          1000.0;
+      Log("Perf load archive: source=buffer total=%.3fms deserialize=%.3fms "
+          "compressed=%u original=%u version=%u",
+          totalMs, deserializeMs, (uint32_t)compressedSize, originalSize,
+          concentrateFileVersion);
+    }
     return true;
   } catch (const std::exception &e) {
     Log("Exception when loading: %s", e.what());
