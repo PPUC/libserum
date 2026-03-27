@@ -2362,7 +2362,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
       enabled = false;
       return NULL;
     }
-    if (!realMachine) {
+    if (!realMachine && !forceLoadFlags) {
       // by default, we request both frame types
       flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
     }
