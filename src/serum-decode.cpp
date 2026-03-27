@@ -1441,6 +1441,24 @@ bool Serum_SaveConcentrate(const char* filename) {
   return g_serumData.SaveToFile(concentratePath.c_str());
 }
 
+static bool ShouldKeepOriginalFallbackForSingleRequestedPlane(uint8_t flags) {
+  const bool request32 = (flags & FLAG_REQUEST_32P_FRAMES) != 0;
+  const bool request64 = (flags & FLAG_REQUEST_64P_FRAMES) != 0;
+  if (request32 == request64) return false;
+
+  if (g_serumData.SerumVersion != SERUM_V2) return false;
+
+  if (request64 && g_serumData.fheight == 32) return true;
+  if (request32 && g_serumData.fheight == 64) return true;
+
+  return false;
+}
+
+static bool ShouldRenderOriginalPlaneForFrame(uint8_t flags, bool isextra) {
+  if (!ShouldKeepOriginalFallbackForSingleRequestedPlane(flags)) return true;
+  return !isextra;
+}
+
 static Serum_Frame_Struc* Serum_LoadConcentratePrepared(const uint8_t flags) {
   // Update mySerum structure
   mySerum.SerumVersion = g_serumData.SerumVersion;
@@ -1492,7 +1510,18 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(const uint8_t flags) {
       }
     }
 
-    if (flags & FLAG_REQUEST_32P_FRAMES) {
+    if (ShouldKeepOriginalFallbackForSingleRequestedPlane(flags)) {
+      isoriginalrequested = true;
+      if (g_serumData.fheight == 32) {
+        mySerum.width32 = g_serumData.fwidth;
+      } else {
+        mySerum.width64 = g_serumData.fwidth;
+      }
+    }
+
+    if ((flags & FLAG_REQUEST_32P_FRAMES) ||
+        (ShouldKeepOriginalFallbackForSingleRequestedPlane(flags) &&
+         g_serumData.fheight == 32)) {
       mySerum.frame32 =
           (uint16_t*)malloc(32 * mySerum.width32 * sizeof(uint16_t));
       mySerum.rotations32 = (uint16_t*)malloc(
@@ -1503,7 +1532,9 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(const uint8_t flags) {
         mySerum.modifiedelements32 = (uint8_t*)malloc(32 * mySerum.width32);
     }
 
-    if (flags & FLAG_REQUEST_64P_FRAMES) {
+    if ((flags & FLAG_REQUEST_64P_FRAMES) ||
+        (ShouldKeepOriginalFallbackForSingleRequestedPlane(flags) &&
+         g_serumData.fheight == 64)) {
       mySerum.frame64 =
           (uint16_t*)malloc(64 * mySerum.width64 * sizeof(uint16_t));
       mySerum.rotations64 = (uint16_t*)malloc(
@@ -1575,6 +1606,7 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(const uint8_t flags) {
     return NULL;
   }
 
+  g_serumData.ApplyForcedSinglePlanePrune();
   Full_Reset_ColorRotations();
   cromloaded = true;
   enabled = true;
@@ -1662,6 +1694,14 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
       mySerum.width32 = g_serumData.fwidth_extra;
     }
   }
+  if (ShouldKeepOriginalFallbackForSingleRequestedPlane(flags)) {
+    isoriginalrequested = true;
+    if (g_serumData.fheight == 32) {
+      mySerum.width32 = g_serumData.fwidth;
+    } else {
+      mySerum.width64 = g_serumData.fwidth;
+    }
+  }
   if (!ReadValue(reader, g_serumData.nframes) ||
       !ReadValue(reader, g_serumData.nocolors)) {
     enabled = false;
@@ -1690,7 +1730,9 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
 
   frameshape = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
 
-  if (flags & FLAG_REQUEST_32P_FRAMES) {
+  if ((flags & FLAG_REQUEST_32P_FRAMES) ||
+      (ShouldKeepOriginalFallbackForSingleRequestedPlane(flags) &&
+       g_serumData.fheight == 32)) {
     mySerum.frame32 =
         (uint16_t*)malloc(32 * mySerum.width32 * sizeof(uint16_t));
     mySerum.rotations32 = (uint16_t*)malloc(
@@ -1708,7 +1750,9 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
       return NULL;
     }
   }
-  if (flags & FLAG_REQUEST_64P_FRAMES) {
+  if ((flags & FLAG_REQUEST_64P_FRAMES) ||
+      (ShouldKeepOriginalFallbackForSingleRequestedPlane(flags) &&
+       g_serumData.fheight == 64)) {
     mySerum.frame64 =
         (uint16_t*)malloc(64 * mySerum.width64 * sizeof(uint16_t));
     mySerum.rotations64 = (uint16_t*)malloc(
@@ -1924,14 +1968,18 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
     enabled = false;
     return NULL;
   }
-  if (flags & FLAG_REQUEST_32P_FRAMES) {
+  if ((flags & FLAG_REQUEST_32P_FRAMES) ||
+      (ShouldKeepOriginalFallbackForSingleRequestedPlane(flags) &&
+       g_serumData.fheight == 32)) {
     if (g_serumData.fheight == 32)
       mySerum.width32 = g_serumData.fwidth;
     else
       mySerum.width32 = g_serumData.fwidth_extra;
   } else
     mySerum.width32 = 0;
-  if (flags & FLAG_REQUEST_64P_FRAMES) {
+  if ((flags & FLAG_REQUEST_64P_FRAMES) ||
+      (ShouldKeepOriginalFallbackForSingleRequestedPlane(flags) &&
+       g_serumData.fheight == 64)) {
     if (g_serumData.fheight == 32)
       mySerum.width64 = g_serumData.fwidth_extra;
     else
@@ -1941,6 +1989,7 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
 
   mySerum.SerumVersion = g_serumData.SerumVersion = SERUM_V2;
 
+  g_serumData.ApplyForcedSinglePlanePrune();
   Full_Reset_ColorRotations();
   cromloaded = true;
 
@@ -2263,6 +2312,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
       (flags & (FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES)) == 0) {
     flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
   }
+  g_serumData.SetLoadFlags(flags);
 
   std::optional<std::string> csvFoundFile;
   if (!realMachine) {
@@ -2275,6 +2325,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     if (!realMachine && !forceLoadFlags) {
       // request both frame types for updating concentrate
       flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
+      g_serumData.SetLoadFlags(flags);
     }
   }
   Serum_Frame_Struc* result = NULL;
@@ -2365,6 +2416,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     if (!realMachine && !forceLoadFlags) {
       // by default, we request both frame types
       flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
+      g_serumData.SetLoadFlags(flags);
     }
     pFoundFile =
         find_case_insensitive_file(pathbuf, std::string(romname) + ".cROM");
@@ -2974,12 +3026,25 @@ static uint32_t BuildRuntimeFeatureFlags(uint32_t frameId) {
     featureFlags |= SERUM_RUNTIME_FEATURE_SHAPE_SPRITES;
   }
 
-  const uint16_t* rotations = g_serumData.colorrotations_v2[frameId];
-  for (uint8_t rotationIndex = 0; rotationIndex < MAX_COLOR_ROTATION_V2;
-       ++rotationIndex) {
-    if (rotations[rotationIndex * MAX_LENGTH_COLOR_ROTATION] > 0) {
-      featureFlags |= SERUM_RUNTIME_FEATURE_COLOR_ROTATION;
-      break;
+  if (g_serumData.colorrotations_v2.hasData(frameId)) {
+    const uint16_t* rotations = g_serumData.colorrotations_v2[frameId];
+    for (uint8_t rotationIndex = 0; rotationIndex < MAX_COLOR_ROTATION_V2;
+         ++rotationIndex) {
+      if (rotations[rotationIndex * MAX_LENGTH_COLOR_ROTATION] > 0) {
+        featureFlags |= SERUM_RUNTIME_FEATURE_COLOR_ROTATION;
+        break;
+      }
+    }
+  }
+  if ((featureFlags & SERUM_RUNTIME_FEATURE_COLOR_ROTATION) == 0 &&
+      g_serumData.colorrotations_v2_extra.hasData(frameId)) {
+    const uint16_t* rotations = g_serumData.colorrotations_v2_extra[frameId];
+    for (uint8_t rotationIndex = 0; rotationIndex < MAX_COLOR_ROTATION_V2;
+         ++rotationIndex) {
+      if (rotations[rotationIndex * MAX_LENGTH_COLOR_ROTATION] > 0) {
+        featureFlags |= SERUM_RUNTIME_FEATURE_COLOR_ROTATION;
+        break;
+      }
     }
   }
 
@@ -3588,7 +3653,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
   uint8_t isdynapix[256 * 64];
   if (((mySerum.frame32 && g_serumData.fheight == 32) ||
        (mySerum.frame64 && g_serumData.fheight == 64)) &&
-      isoriginalrequested) {
+      isoriginalrequested &&
+      ShouldRenderOriginalPlaneForFrame(mySerum.flags, isextra)) {
     const uint16_t backgroundId = g_serumData.backgroundIDs[IDfound][0];
     const bool hasBackground = backgroundId < g_serumData.nbackgrounds;
     const uint8_t* frameBackgroundMask = g_serumData.backgroundmask[IDfound];
@@ -4756,18 +4822,13 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
             ((sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
              FLAG_SCENE_AS_BACKGROUND);
         if (!sceneFrameRequested && allowParallelRotations) {
-          uint16_t *pcr32, *pcr64;
-          if (g_serumData.fheight == 32) {
-            pcr32 = g_serumData.colorrotations_v2[lastfound];
-            pcr64 = g_serumData.colorrotations_v2_extra[lastfound];
-          } else {
-            pcr32 = g_serumData.colorrotations_v2_extra[lastfound];
-            pcr64 = g_serumData.colorrotations_v2[lastfound];
-          }
-
           bool isRotation = false;
 
           if (mySerum.frame32) {
+            uint16_t* pcr32 =
+                (g_serumData.fheight == 32)
+                    ? g_serumData.colorrotations_v2[lastfound]
+                    : g_serumData.colorrotations_v2_extra[lastfound];
             memcpy(mySerum.rotations32, pcr32,
                    MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
             for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
@@ -4799,6 +4860,10 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
             }
           }
           if (mySerum.frame64) {
+            uint16_t* pcr64 =
+                (g_serumData.fheight == 32)
+                    ? g_serumData.colorrotations_v2_extra[lastfound]
+                    : g_serumData.colorrotations_v2[lastfound];
             memcpy(mySerum.rotations64, pcr64,
                    MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
             for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {

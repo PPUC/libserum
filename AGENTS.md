@@ -131,6 +131,33 @@ Vector policy currently used in `SerumData`:
 ## Load flow
 Entry point: `Serum_Load(altcolorpath, romname, flags)`.
 
+Flag policy:
+- `FLAG_REQUEST_FORCE` means the caller-provided load flags are authoritative.
+- When `FLAG_REQUEST_FORCE` is set, `Serum_Load(...)` must not widen or rewrite
+  requested frame-type flags internally.
+- `FLAG_REQUEST_FORCE` is relevant for authoring / `cROMc` generation policy,
+  and for optional in-memory payload pruning, not for removing runtime fallback
+  behavior on mixed-resolution content.
+- Save-time `cROMc` generation must honor the authoritative forced request:
+  when a raw v2 source is loaded with `FLAG_REQUEST_FORCE` and the request
+  targets the extra plane (for example `64p` on `32`-base content or `32p` on
+  `64`-base content), per-frame original-plane render payloads for frames that
+  already have usable extra content must be serialized as empty in the
+  generated `cROMc`.
+- The same forced single-plane-extra policy may be applied to the live
+  in-memory v2 model after load:
+  - original-plane per-frame payloads are pruned only for frames whose extra
+    plane is fully usable
+  - shared base backgrounds and base sprite render payloads are pruned only if
+    no remaining original-plane fallback frame still references them
+- For Serum v2 mixed-resolution content, a single-plane request may still keep
+  the original plane available internally as a fallback for frames that do not
+  have the requested extra plane.
+- In that configuration, runtime must make the decision per frame:
+  - if the requested extra plane exists for the matched frame, render only that
+    plane
+  - otherwise render the original plane fallback
+
 1. Reset all runtime state via `Serum_free()`.
 2. On real-machine runtime (`is_real_machine()==true`):
    - do not scan or apply `*.pup.csv`

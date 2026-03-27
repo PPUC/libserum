@@ -127,6 +127,8 @@ class SerumData {
   bool SaveToFile(const char *filename);
   bool LoadFromFile(const char *filename, const uint8_t flags);
   bool LoadFromBuffer(const uint8_t *data, size_t size, const uint8_t flags);
+  void SetLoadFlags(uint8_t flags) { m_loadFlags = flags; }
+  void ApplyForcedSinglePlanePrune();
   void BuildPackingSidecarsAndNormalize();
   void BuildSpriteRuntimeSidecars();
   void BuildCriticalTriggerLookup();
@@ -254,22 +256,145 @@ class SerumData {
 
   template <class Archive>
   void serialize(Archive &ar) {
+    const bool request32 = (m_loadFlags & FLAG_REQUEST_32P_FRAMES) != 0;
+    const bool request64 = (m_loadFlags & FLAG_REQUEST_64P_FRAMES) != 0;
+    const bool forceRequested = (m_loadFlags & FLAG_REQUEST_FORCE) != 0;
+    const bool requestTargetsExtraPlane =
+        (fheight == 32 && request64 && !request32) ||
+        (fheight == 64 && request32 && !request64);
+    const bool saveForceSinglePlanePrunedBase =
+        forceRequested && SerumVersion == SERUM_V2 && requestTargetsExtraPlane;
+
+    SparseVector<uint16_t> savedCframesV2 = cframes_v2;
+    SparseVector<uint8_t> savedDynamasks = dynamasks;
+    SparseVector<uint8_t> savedDynamasksActive = dynamasks_active;
+    SparseVector<uint16_t> savedDyna4colsV2 = dyna4cols_v2;
+    SparseVector<uint16_t> savedSpriteColored = spritecolored;
+    SparseVector<uint8_t> savedDynaspritemasks = dynaspritemasks;
+    SparseVector<uint8_t> savedDynaspritemasksActive = dynaspritemasks_active;
+    SparseVector<uint16_t> savedDynasprite4cols = dynasprite4cols;
+    SparseVector<uint16_t> savedColorRotationsV2 = colorrotations_v2;
+    SparseVector<uint16_t> savedBackgroundFramesV2 = backgroundframes_v2;
+    SparseVector<uint8_t> savedBackgroundMask = backgroundmask;
+    SparseVector<uint8_t> savedDynashadowsdir = dynashadowsdir;
+    SparseVector<uint16_t> savedDynashadowscol = dynashadowscol;
+    std::vector<uint8_t> savedFrameHasDynamic = frameHasDynamic;
+
+    if constexpr (Archive::is_saving::value) {
+      if (saveForceSinglePlanePrunedBase) {
+        const size_t framePixels = static_cast<size_t>(fwidth) * fheight;
+        const size_t dynamicColors =
+            MAX_DYNA_SETS_PER_FRAME_V2 * static_cast<size_t>(nocolors);
+        const size_t rotationSize =
+            MAX_LENGTH_COLOR_ROTATION * MAX_COLOR_ROTATION_V2;
+        const size_t spritePixels =
+            MAX_SPRITE_WIDTH * static_cast<size_t>(MAX_SPRITE_HEIGHT);
+        const size_t spriteDynamicColors =
+            MAX_DYNA_SETS_PER_SPRITE * static_cast<size_t>(nocolors);
+        const std::vector<uint16_t> zeroFrameColors(framePixels, 0);
+        const std::vector<uint8_t> noDynamicMask(framePixels, 255);
+        const std::vector<uint8_t> noDynamicActive(framePixels, 0);
+        const std::vector<uint16_t> zeroDynamicColors(dynamicColors, 0);
+        const std::vector<uint16_t> zeroRotations(rotationSize, 0);
+        const std::vector<uint8_t> zeroBackgroundMask(framePixels, 0);
+        const std::vector<uint8_t> zeroShadowDir(MAX_DYNA_SETS_PER_FRAME_V2, 0);
+        const std::vector<uint16_t> zeroShadowColor(MAX_DYNA_SETS_PER_FRAME_V2,
+                                                    0);
+        const std::vector<uint16_t> zeroSpriteColors(spritePixels, 0);
+        const std::vector<uint8_t> noSpriteDynamicMask(spritePixels, 255);
+        const std::vector<uint8_t> noSpriteDynamicActive(spritePixels, 0);
+        const std::vector<uint16_t> zeroSpriteDynamicColors(spriteDynamicColors,
+                                                            0);
+        std::vector<uint8_t> keepOriginalFrame(nframes, 1);
+        std::vector<uint8_t> usedBaseBackground(nbackgrounds, 0);
+        std::vector<uint8_t> usedBaseSprite(nsprites, 0);
+
+        for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+          bool hasUsableExtra = isextraframe[frameId][0] > 0;
+          if (hasUsableExtra && backgroundIDs[frameId][0] < nbackgrounds) {
+            hasUsableExtra =
+                isextrabackground[backgroundIDs[frameId][0]][0] > 0;
+          }
+          if (hasUsableExtra) {
+            for (uint32_t slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+              const uint8_t spriteId = framesprites[frameId][slot];
+              if (spriteId < 255 && isextrasprite[spriteId][0] == 0) {
+                hasUsableExtra = false;
+                break;
+              }
+            }
+          }
+          if (!hasUsableExtra) continue;
+          keepOriginalFrame[frameId] = 0;
+          savedCframesV2.set(frameId, zeroFrameColors.data(), framePixels);
+          savedDynamasks.set(frameId, noDynamicMask.data(), framePixels);
+          savedDynamasksActive.set(frameId, noDynamicActive.data(),
+                                   framePixels);
+          savedDyna4colsV2.set(frameId, zeroDynamicColors.data(),
+                               dynamicColors);
+          savedColorRotationsV2.set(frameId, zeroRotations.data(),
+                                    rotationSize);
+          savedBackgroundMask.set(frameId, zeroBackgroundMask.data(),
+                                  framePixels);
+          savedDynashadowsdir.set(frameId, zeroShadowDir.data(),
+                                  MAX_DYNA_SETS_PER_FRAME_V2);
+          savedDynashadowscol.set(frameId, zeroShadowColor.data(),
+                                  MAX_DYNA_SETS_PER_FRAME_V2);
+          if (frameId < savedFrameHasDynamic.size()) {
+            savedFrameHasDynamic[frameId] = 0;
+          }
+        }
+
+        for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+          if (keepOriginalFrame[frameId] == 0) continue;
+          if (backgroundIDs[frameId][0] < nbackgrounds) {
+            usedBaseBackground[backgroundIDs[frameId][0]] = 1;
+          }
+          for (uint32_t slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+            const uint8_t spriteId = framesprites[frameId][slot];
+            if (spriteId < nsprites) {
+              usedBaseSprite[spriteId] = 1;
+            }
+          }
+        }
+
+        for (uint32_t backgroundId = 0; backgroundId < nbackgrounds;
+             ++backgroundId) {
+          if (usedBaseBackground[backgroundId] != 0) continue;
+          savedBackgroundFramesV2.set(backgroundId, zeroFrameColors.data(),
+                                      framePixels);
+        }
+
+        for (uint32_t spriteId = 0; spriteId < nsprites; ++spriteId) {
+          if (usedBaseSprite[spriteId] != 0) continue;
+          savedSpriteColored.set(spriteId, zeroSpriteColors.data(),
+                                 spritePixels);
+          savedDynaspritemasks.set(spriteId, noSpriteDynamicMask.data(),
+                                   spritePixels);
+          savedDynaspritemasksActive.set(spriteId, noSpriteDynamicActive.data(),
+                                         spritePixels);
+          savedDynasprite4cols.set(spriteId, zeroSpriteDynamicColors.data(),
+                                   spriteDynamicColors);
+        }
+      }
+    }
+
     ar(rname, SerumVersion, fwidth, fheight, fwidth_extra, fheight_extra,
        nframes, nocolors, nccolors, ncompmasks, nmovmasks, nsprites,
        nbackgrounds, is256x64, hashcodes, shapecompmode, compmaskID, movrctID,
-       compmasks, movrcts, cpal, isextraframe, cframes, cframes_v2,
-       cframes_v2_extra, dynamasks, dynamasks_extra, dyna4cols, dyna4cols_v2,
-       dyna4cols_v2_extra, framesprites, spritedescriptionso,
+       compmasks, movrcts, cpal, isextraframe, cframes, savedCframesV2,
+       cframes_v2_extra, savedDynamasks, dynamasks_extra, dyna4cols,
+       savedDyna4colsV2, dyna4cols_v2_extra, framesprites, spritedescriptionso,
        spritedescriptionsc, isextrasprite, spriteoriginal, spritemask_extra,
-       spritecolored, spritecolored_extra, activeframes, colorrotations,
-       colorrotations_v2, colorrotations_v2_extra, spritedetdwords,
+       savedSpriteColored, spritecolored_extra, activeframes, colorrotations,
+       savedColorRotationsV2, colorrotations_v2_extra, spritedetdwords,
        spritedetdwordpos, spritedetareas, triggerIDs, framespriteBB,
-       isextrabackground, backgroundframes, backgroundframes_v2,
-       backgroundframes_v2_extra, backgroundIDs, backgroundBB, backgroundmask,
-       backgroundmask_extra, dynashadowsdir, dynashadowscol,
-       dynashadowsdir_extra, dynashadowscol_extra, dynasprite4cols,
-       dynasprite4cols_extra, dynaspritemasks, dynaspritemasks_extra,
-       sprshapemode);
+       isextrabackground, backgroundframes, savedBackgroundFramesV2,
+       backgroundframes_v2_extra, backgroundIDs, backgroundBB,
+       savedBackgroundMask, backgroundmask_extra, savedDynashadowsdir,
+       savedDynashadowscol, dynashadowsdir_extra, dynashadowscol_extra,
+       savedDynasprite4cols, dynasprite4cols_extra, savedDynaspritemasks,
+       dynaspritemasks_extra, sprshapemode);
 
     if constexpr (Archive::is_saving::value) {
       if (concentrateFileVersion >= 6) {
@@ -338,12 +463,13 @@ class SerumData {
         ar(frameIsScene, sceneSignatureEntries, normalSignatureEntries,
            normalIdentifyBuckets, frameToNormalBucket, spriteoriginal_opaque,
            spritemask_extra_opaque, spritedescriptionso_opaque,
-           dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
-           dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
-           sceneTripletEntries, colorRotationEntries, criticalTriggerEntries,
-           spriteCandidateOffsets, spriteCandidateIds, spriteCandidateSlots,
-           frameHasShapeSprite, spriteWidth, spriteHeight, spriteUsesShape,
-           spriteDetectOffsets, spriteDetectMeta, spriteOpaqueRowSegmentStart,
+           savedDynamasksActive, dynamasks_extra_active,
+           savedDynaspritemasksActive, dynaspritemasks_extra_active,
+           savedFrameHasDynamic, frameHasDynamicExtra, sceneTripletEntries,
+           colorRotationEntries, criticalTriggerEntries, spriteCandidateOffsets,
+           spriteCandidateIds, spriteCandidateSlots, frameHasShapeSprite,
+           spriteWidth, spriteHeight, spriteUsesShape, spriteDetectOffsets,
+           spriteDetectMeta, spriteOpaqueRowSegmentStart,
            spriteOpaqueRowSegmentCount, spriteOpaqueSegments, hasAnyExtraFrame,
            publicTriggerCount);
       }

@@ -210,6 +210,105 @@ void SerumData::Clear() {
   criticalTriggerFramesBySignature.clear();
 }
 
+void SerumData::ApplyForcedSinglePlanePrune() {
+  const bool request32 = (m_loadFlags & FLAG_REQUEST_32P_FRAMES) != 0;
+  const bool request64 = (m_loadFlags & FLAG_REQUEST_64P_FRAMES) != 0;
+  const bool forceRequested = (m_loadFlags & FLAG_REQUEST_FORCE) != 0;
+  const bool requestTargetsExtraPlane =
+      (fheight == 32 && request64 && !request32) ||
+      (fheight == 64 && request32 && !request64);
+  if (!(forceRequested && SerumVersion == SERUM_V2 &&
+        requestTargetsExtraPlane)) {
+    return;
+  }
+
+  const size_t framePixels = static_cast<size_t>(fwidth) * fheight;
+  const size_t dynamicColors =
+      MAX_DYNA_SETS_PER_FRAME_V2 * static_cast<size_t>(nocolors);
+  const size_t rotationSize = MAX_LENGTH_COLOR_ROTATION * MAX_COLOR_ROTATION_V2;
+  const size_t spritePixels =
+      MAX_SPRITE_WIDTH * static_cast<size_t>(MAX_SPRITE_HEIGHT);
+  const size_t spriteDynamicColors =
+      MAX_DYNA_SETS_PER_SPRITE * static_cast<size_t>(nocolors);
+  const std::vector<uint16_t> zeroFrameColors(framePixels, 0);
+  const std::vector<uint8_t> noDynamicMask(framePixels, 255);
+  const std::vector<uint8_t> noDynamicActive(framePixels, 0);
+  const std::vector<uint16_t> zeroDynamicColors(dynamicColors, 0);
+  const std::vector<uint16_t> zeroRotations(rotationSize, 0);
+  const std::vector<uint8_t> zeroBackgroundMask(framePixels, 0);
+  const std::vector<uint8_t> zeroShadowDir(MAX_DYNA_SETS_PER_FRAME_V2, 0);
+  const std::vector<uint16_t> zeroShadowColor(MAX_DYNA_SETS_PER_FRAME_V2, 0);
+  const std::vector<uint16_t> zeroSpriteColors(spritePixels, 0);
+  const std::vector<uint8_t> noSpriteDynamicMask(spritePixels, 255);
+  const std::vector<uint8_t> noSpriteDynamicActive(spritePixels, 0);
+  const std::vector<uint16_t> zeroSpriteDynamicColors(spriteDynamicColors, 0);
+  std::vector<uint8_t> keepOriginalFrame(nframes, 1);
+  std::vector<uint8_t> usedBaseBackground(nbackgrounds, 0);
+  std::vector<uint8_t> usedBaseSprite(nsprites, 0);
+
+  for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+    bool hasUsableExtra = isextraframe[frameId][0] > 0;
+    if (hasUsableExtra && backgroundIDs[frameId][0] < nbackgrounds) {
+      hasUsableExtra = isextrabackground[backgroundIDs[frameId][0]][0] > 0;
+    }
+    if (hasUsableExtra) {
+      for (uint32_t slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+        const uint8_t spriteId = framesprites[frameId][slot];
+        if (spriteId < 255 && isextrasprite[spriteId][0] == 0) {
+          hasUsableExtra = false;
+          break;
+        }
+      }
+    }
+    if (!hasUsableExtra) {
+      continue;
+    }
+
+    keepOriginalFrame[frameId] = 0;
+    cframes_v2.set(frameId, zeroFrameColors.data(), framePixels);
+    dynamasks.set(frameId, noDynamicMask.data(), framePixels);
+    dynamasks_active.set(frameId, noDynamicActive.data(), framePixels);
+    dyna4cols_v2.set(frameId, zeroDynamicColors.data(), dynamicColors);
+    colorrotations_v2.set(frameId, zeroRotations.data(), rotationSize);
+    backgroundmask.set(frameId, zeroBackgroundMask.data(), framePixels);
+    dynashadowsdir.set(frameId, zeroShadowDir.data(),
+                       MAX_DYNA_SETS_PER_FRAME_V2);
+    dynashadowscol.set(frameId, zeroShadowColor.data(),
+                       MAX_DYNA_SETS_PER_FRAME_V2);
+    if (frameId < frameHasDynamic.size()) {
+      frameHasDynamic[frameId] = 0;
+    }
+  }
+
+  for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+    if (keepOriginalFrame[frameId] == 0) continue;
+    if (backgroundIDs[frameId][0] < nbackgrounds) {
+      usedBaseBackground[backgroundIDs[frameId][0]] = 1;
+    }
+    for (uint32_t slot = 0; slot < MAX_SPRITES_PER_FRAME; ++slot) {
+      const uint8_t spriteId = framesprites[frameId][slot];
+      if (spriteId < nsprites) {
+        usedBaseSprite[spriteId] = 1;
+      }
+    }
+  }
+
+  for (uint32_t backgroundId = 0; backgroundId < nbackgrounds; ++backgroundId) {
+    if (usedBaseBackground[backgroundId] != 0) continue;
+    backgroundframes_v2.set(backgroundId, zeroFrameColors.data(), framePixels);
+  }
+
+  for (uint32_t spriteId = 0; spriteId < nsprites; ++spriteId) {
+    if (usedBaseSprite[spriteId] != 0) continue;
+    spritecolored.set(spriteId, zeroSpriteColors.data(), spritePixels);
+    dynaspritemasks.set(spriteId, noSpriteDynamicMask.data(), spritePixels);
+    dynaspritemasks_active.set(spriteId, noSpriteDynamicActive.data(),
+                               spritePixels);
+    dynasprite4cols.set(spriteId, zeroSpriteDynamicColors.data(),
+                        spriteDynamicColors);
+  }
+}
+
 void SerumData::BuildCriticalTriggerLookup() {
   criticalTriggerFramesBySignature.clear();
   if (nframes == 0) {
