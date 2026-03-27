@@ -2198,7 +2198,9 @@ Serum_Frame_Struc* Serum_LoadFilev1(const char* const filename,
 SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
                                         const char* const romname,
                                         uint8_t flags) {
+  const bool realMachine = is_real_machine();
   Serum_free();
+  flags |= realMachine ? FLAG_REQUEST_64P_FRAMES : 0;
   g_profileLoadTimes = IsEnvFlagEnabled("SERUM_PROFILE_LOAD_TIMES");
   const auto loadTotalStart = g_profileLoadTimes
                                   ? std::chrono::steady_clock::now()
@@ -2244,7 +2246,6 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   pathbuf += '/';
 
   Log("Searching colorization file for %s in %s", romname, pathbuf.c_str());
-  const bool realMachine = is_real_machine();
   double csvUpdateMs = 0.0;
   double cromcLoadMs = 0.0;
   double rawLoadMs = 0.0;
@@ -2256,7 +2257,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   double spriteSidecarBuildMs = 0.0;
   double criticalLookupInitMs = 0.0;
 
-  // If no specific frame tyoe is requested, activate both
+  // If no specific frame type is requested, activate both
   if ((flags & (FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES)) == 0) {
     flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
   }
@@ -2269,10 +2270,10 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   NoteStartupRssSample("after-file-scan");
   if (csvFoundFile) {
     Log("Found %s", csvFoundFile->c_str());
-#ifdef WRITE_CROMC
-    // request both frame types for updating concentrate
-    flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
-#endif
+    if (!realMachine) {
+      // request both frame types for updating concentrate
+      flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
+    }
   }
   Serum_Frame_Struc* result = NULL;
   bool loadedFromConcentrate = false;
@@ -2318,12 +2319,12 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
               })()) {
             sceneDataUpdatedFromCsv = true;
             NoteStartupRssSample("after-csv-update");
-#ifdef WRITE_CROMC
-            // Update the concentrate file with new PUP data
-            if (generateCRomC && Serum_SaveConcentrate(pFoundFile->c_str())) {
-              reloadConcentratePath = *pFoundFile;
+            if (!realMachine) {
+              // Update the concentrate file with new PUP data
+              if (generateCRomC && Serum_SaveConcentrate(pFoundFile->c_str())) {
+                reloadConcentratePath = *pFoundFile;
+              }
             }
-#endif
           }
         } else {
           Log("Failed to load %s", pFoundFile->c_str());
@@ -2359,10 +2360,10 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
       enabled = false;
       return NULL;
     }
-#ifdef WRITE_CROMC
-    // by default, we request both frame types
-    flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
-#endif
+    if (!realMachine) {
+      // by default, we request both frame types
+      flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
+    }
     pFoundFile =
         find_case_insensitive_file(pathbuf, std::string(romname) + ".cROM");
     if (!pFoundFile)
@@ -2397,12 +2398,12 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
           NoteStartupRssSample("after-csv-update");
         }
       }
-#ifdef WRITE_CROMC
-      if (generateCRomC && Serum_SaveConcentrate(pFoundFile->c_str())) {
-        reloadConcentratePath =
-            BuildConcentratePathFromSourcePath(pFoundFile->c_str());
+      if (!realMachine) {
+        if (generateCRomC && Serum_SaveConcentrate(pFoundFile->c_str())) {
+          reloadConcentratePath =
+              BuildConcentratePathFromSourcePath(pFoundFile->c_str());
+        }
       }
-#endif
     } else {
       Log("Failed to load %s", pFoundFile->c_str());
     }

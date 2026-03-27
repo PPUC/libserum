@@ -15,6 +15,8 @@
 
 #include "LZ4Stream.h"
 
+bool is_real_machine();
+
 namespace sparse_vector_serialization {
 inline bool &LegacyLoadExpectedFlag() {
   static bool flag = false;
@@ -751,18 +753,13 @@ class SparseVector {
           const size_t maxCompressedSize =
               LZ4_compressBound(static_cast<int>(storeByteSize));
           std::vector<uint8_t> compBuffer(maxCompressedSize);
-
-          int compressedSize =
-              LZ4_compress_HC(reinterpret_cast<const char *>(storeBytes),
-                              reinterpret_cast<char *>(compBuffer.data()),
-                              static_cast<int>(storeByteSize),
-                              static_cast<int>(maxCompressedSize),
-#ifdef WRITE_CROMC
-                              LZ4HC_CLEVEL_MAX  // max compression level
-#else
-                              LZ4HC_CLEVEL_MIN  // min compression level
-#endif
-              );
+          const int compressionLevel =
+              is_real_machine() ? LZ4HC_CLEVEL_MIN : LZ4HC_CLEVEL_MAX;
+          int compressedSize = LZ4_compress_HC(
+              reinterpret_cast<const char *>(storeBytes),
+              reinterpret_cast<char *>(compBuffer.data()),
+              static_cast<int>(storeByteSize),
+              static_cast<int>(maxCompressedSize), compressionLevel);
 
           if (compressedSize > 0) {
             data[elementId].assign(compBuffer.begin(),

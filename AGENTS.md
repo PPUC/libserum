@@ -145,13 +145,13 @@ Entry point: `Serum_Load(altcolorpath, romname, flags)`.
 4. If cROMc load fails or is absent on non-real-machine/runtime-update flows,
    load `*.cROM`/`*.cRZ`.
    - Raw source loads are authoring/update inputs and may be re-saved as
-     `*.cROMc` when `WRITE_CROMC` is enabled and runtime generation is not
-     disabled through `Serum_SetGenerateCRomC(false)`.
+     `*.cROMc` when runtime generation is not disabled through
+     `Serum_SetGenerateCRomC(false)`.
    - When such a raw source load produces a new `*.cROMc`, libserum reloads
      that generated `*.cROMc` in the same load cycle so first-run behavior
      matches the next boot.
 5. If CSV exists and format is v2, parse scenes via `SceneGenerator::parseCSV`.
-   - If CSV parsing updates scene data for a loaded `*.cROMc` and `WRITE_CROMC`
+   - If CSV parsing updates scene data for a loaded `*.cROMc` and runtime
      generation is enabled, libserum rewrites the `*.cROMc` and reloads it in
      the same load cycle so the current process immediately uses the persisted
      scene-aware data.
