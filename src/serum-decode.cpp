@@ -2199,6 +2199,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
                                         const char* const romname,
                                         uint8_t flags) {
   const bool realMachine = is_real_machine();
+  const bool forceLoadFlags = (flags & FLAG_REQUEST_FORCE) != 0;
   Serum_free();
   flags |= realMachine ? FLAG_REQUEST_64P_FRAMES : 0;
   g_profileLoadTimes = IsEnvFlagEnabled("SERUM_PROFILE_LOAD_TIMES");
@@ -2258,7 +2259,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   double criticalLookupInitMs = 0.0;
 
   // If no specific frame type is requested, activate both
-  if ((flags & (FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES)) == 0) {
+  if (!forceLoadFlags &&
+      (flags & (FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES)) == 0) {
     flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
   }
 
@@ -2270,7 +2272,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   NoteStartupRssSample("after-file-scan");
   if (csvFoundFile) {
     Log("Found %s", csvFoundFile->c_str());
-    if (!realMachine) {
+    if (!realMachine && !forceLoadFlags) {
       // request both frame types for updating concentrate
       flags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
     }

@@ -36,10 +36,11 @@ enum  // returned by Serum_Load in *SerumVersion
 // Flags to send to Serum_Load
 enum {
   FLAG_REQUEST_32P_FRAMES = 1,  // there is a output DMD which is 32 leds high
-  FLAG_REQUEST_64P_FRAMES = 2,  // there is a output h is 64 leds high
+  FLAG_REQUEST_64P_FRAMES = 2,  // there is a output DMD which 64 leds high
   FLAG_REQUEST_FILL_MODIFIED_ELEMENTS =
       4,  // does the modifiedelementsXX structures must be allocated and
           // returned
+  FLAG_REQUEST_FORCE = 8,  // force the output
 };
 
 enum  // returned values in Serum_Frame_Sttruc::flags for v2+ format
