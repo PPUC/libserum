@@ -131,6 +131,22 @@ Vector policy currently used in `SerumData`:
 ## Load flow
 Entry point: `Serum_Load(altcolorpath, romname, flags)`.
 
+Requested-output mode:
+- `FLAG_REQUEST_FALLBACK` extends single-plane extra-resolution requests.
+- If the caller requests only the extra-resolution output plane
+  (`FLAG_REQUEST_64P_FRAMES` for 32p source content, or
+  `FLAG_REQUEST_32P_FRAMES` for 64p source content), libserum enters an
+  extra-preferred runtime mode.
+- In that mode without `FLAG_REQUEST_FALLBACK`, runtime renders only the extra
+  plane and skips original-plane frame/rotation preparation entirely.
+- In that mode with `FLAG_REQUEST_FALLBACK`, runtime first tries the extra
+  plane for each matched frame/scene frame; if that frame has no complete extra
+  payload (frame/background/sprite coverage), runtime renders only the original
+  plane as fallback for that call.
+- Authoring/update load flows may still widen internal load flags so both
+  planes remain available for `.cROMc` regeneration, but runtime output
+  behavior must continue to follow the caller's original request flags.
+
 1. Reset all runtime state via `Serum_free()`.
 2. On real-machine runtime (`is_real_machine()==true`):
    - do not scan or apply `*.pup.csv`
@@ -299,6 +315,19 @@ Main phases:
 6. Optional sprite overlays.
 7. Configure color rotations and return next timer.
 
+Preferred-extra runtime mode:
+- When load flags request only the extra output plane, `Colorize_Framev2`
+  treats extra resolution as the preferred render target.
+- If `FLAG_REQUEST_FALLBACK` is not set, original-resolution output is not
+  colorized for matched frames in that mode.
+- If `FLAG_REQUEST_FALLBACK` is set, original-resolution output is colorized
+  only on calls where `CheckExtraFrameAvailable(frameId)` fails; otherwise the
+  original plane stays untouched for that frame.
+- Rotation setup follows the same policy: only planes actually rendered on the
+  current call receive fresh rotation tables/timers; inactive planes are reset
+  so `Serum_Rotate()` does not keep rotating stale original-resolution output
+  while extra-resolution output is active.
+
 Dynamic-shadow hot path:
 - `CheckDynaShadow(...)` receives pre-fetched per-frame shadow vectors
   (`dynashadowsdir*`, `dynashadowscol*`) from `Colorize_Framev2` instead of
@@ -358,6 +387,11 @@ Flags (from `serum.h`):
   recompose the scene between rotations.
 - Foreground scenes still stop color rotations when they start immediately;
   background scenes do not.
+- In preferred-extra runtime mode, scene rendering follows the same per-frame
+  extra-first policy as normal frame colorization: if a scene frame has extra
+  content, only the extra plane is prepared for that call; original-plane scene
+  rendering is used only as `FLAG_REQUEST_FALLBACK` fallback when the extra
+  scene frame is incomplete/unavailable.
 
 ## cROMc persistence
 Current concentrate version: **6**.

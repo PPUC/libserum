@@ -41,6 +41,9 @@ enum {
       4,  // does the modifiedelementsXX structures must be allocated and
           // returned
   FLAG_REQUEST_FORCE = 8,  // force the output
+  FLAG_REQUEST_FALLBACK =
+      16,  // if extra-only output is requested, fall back to original output
+           // when no extra-resolution frame is available
 };
 
 enum  // returned values in Serum_Frame_Sttruc::flags for v2+ format
