@@ -177,7 +177,7 @@ const uint32_t MAX_NUMBER_FRAMES = 0x7fffffff;
 const uint16_t greyscale_4[4] = {
     0x0000,  // Black (0, 0, 0)
     0x528A,  // Dark grey (~1/3 intensity)
-    0xAD55,  // Light grey (~2/3 intensity)
+    0xAD14,  // Light grey (~2/3 intensity)
     0xFFFF   // White (31, 63, 31)
 };
 
