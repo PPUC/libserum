@@ -13,10 +13,12 @@ typedef void(SERUM_CALLBACK* Serum_LogCallback)(const char* format,
                                                 va_list args,
                                                 const void* userData);
 
+// mask for the mutually exclusive scene-finish behavior bits
+#define FLAG_SCENE_FINISH_MODE_MASK 3
+
 enum {
   // default: when scene is finished, show last frame of the scene until a
   // new frame is matched.
-
   // black screen after scene is finished
   FLAG_SCENE_BLACK_WHEN_FINISHED = 1,
   // show last frame before scene started

@@ -370,11 +370,28 @@ Critical-trigger fast rejection:
 Scene data comes from CSV (`SceneGenerator`).
 
 Flags (from `serum.h`):
+- Scene finish behavior is selected by the low finish-mode bits: `0`, `1`, or
+  `2`. Other scene flags are orthogonal and may be combined with that finish
+  mode.
+- `0` (default): keep the last scene frame visible when the scene finishes
+  until a new normal frame is identified
 - `1`: black when scene finished
 - `2`: show previous frame when scene finished
 - `4`: run scene as background
 - `8`: only dynamic content in foreground over background scene
 - `16`: resume interrupted scene if retriggered within 8s
+
+Finished-scene default behavior:
+- Foreground scenes with flag `0` leave the last rendered scene frame visible
+  until normal-frame identification resumes with a newly matched normal frame.
+- If that next newly matched normal frame would immediately retrigger the same
+  scene, libserum does not restart the scene and keeps the preserved last scene
+  frame visible.
+- Background scenes with flag `0` keep the last scene frame composited as
+  background until a newly identified normal frame stops that background
+  state.
+- Same-trigger background-scene continuation does not clear that preserved
+  background frame; it follows the historical seamless continuation path.
 
 `startImmediately` behavior:
 - `startImmediately` is honored for foreground scenes.

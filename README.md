@@ -124,9 +124,18 @@ Format of a PUP scene line:
    if scene flag 0 is used for a non-interruptable scene, this value is used as
    end-hold duration in seconds instead
 10: scene flags
+   the finish behavior is selected by the low bits: 0, 1 or 2
+   0 - default: keep the last scene frame visible when the scene finishes
+       until a new normal frame is identified
+       if that next identified normal frame would immediately retrigger the
+       same scene, the scene is not restarted and the preserved last scene
+       frame remains visible
    1 - black screen when scene finished
    2 - show last frame before scene started when scene finished
    4 - run scene as background
+       after a background scene finishes with flag 0, its last scene frame
+       remains visible in the background until a newly identified normal frame
+       stops that background state; same-trigger continuation does not clear it
    8 - replace static content with background scene, only dynamic zones,
        sprites and shadows stay in the foreground
   16 - continue scene at previous frame when interrupted for less than 8s
