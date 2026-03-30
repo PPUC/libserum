@@ -153,6 +153,7 @@ uint16_t sceneCurrentFrame = 0;
 uint16_t sceneDurationPerFrame = 0;
 bool sceneInterruptable = false;
 bool sceneStartImmediately = false;
+bool sceneIsLastForegroundFrame = false;
 bool sceneIsLastBackgroundFrame = false;
 uint8_t sceneRepeatCount = 0;
 uint8_t sceneOptionFlags = 0;
@@ -1223,6 +1224,7 @@ void Serum_free(void) {
   sceneEndHoldUntilMs = 0;
   sceneEndHoldDurationMs = 0;
   sceneNextFrameAtMs = 0;
+  sceneIsLastForegroundFrame = false;
   monochromeMode = false;
   monochromePaletteMode = false;
   monochromePaletteV2Length = 0;
@@ -4375,7 +4377,8 @@ static void ConfigureSceneEndHold(uint16_t sceneId, bool interruptable,
                                   uint8_t sceneOptions) {
   sceneEndHoldUntilMs = 0;
   sceneEndHoldDurationMs = 0;
-  if (sceneOptions != 0 || interruptable || !g_serumData.sceneGenerator) {
+  if ((sceneOptions & FLAG_SCENE_FINISH_MODE_MASK) != 0 || interruptable ||
+      !g_serumData.sceneGenerator) {
     return;
   }
 
@@ -4384,6 +4387,29 @@ static void ConfigureSceneEndHold(uint16_t sceneId, bool interruptable,
       holdMs > 0) {
     sceneEndHoldDurationMs = holdMs;
   }
+}
+
+static bool ShouldSuppressFinishedSceneRetrigger(uint32_t triggerId) {
+  if (!g_serumData.sceneGenerator || !g_serumData.sceneGenerator->isActive() ||
+      triggerId > 0xffff) {
+    return false;
+  }
+
+  uint16_t frameCount = 0;
+  uint16_t durationPerFrame = 0;
+  bool interruptable = false;
+  bool startImmediately = false;
+  uint8_t repeat = 0;
+  uint8_t sceneOptions = 0;
+  if (!g_serumData.sceneGenerator->getSceneInfo(
+          static_cast<uint16_t>(triggerId), frameCount, durationPerFrame,
+          interruptable, startImmediately, repeat, sceneOptions)) {
+    return false;
+  }
+
+  const bool sceneIsBackground =
+      (sceneOptions & FLAG_SCENE_AS_BACKGROUND) == FLAG_SCENE_AS_BACKGROUND;
+  return startImmediately || sceneIsBackground;
 }
 
 static void ForceNormalFrameRefreshAfterSceneEnd(void) {
@@ -4509,6 +4535,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
               sceneFrameCount, sceneDurationPerFrame, sceneOptionFlags,
               sceneInterruptable, sceneStartImmediately, sceneRepeatCount);
           sceneFrameCount = 0;
+          sceneIsLastForegroundFrame = false;
           sceneIsLastBackgroundFrame = false;
           sceneEndHoldUntilMs = 0;
           sceneEndHoldDurationMs = 0;
@@ -4574,12 +4601,13 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       if (!sceneFrameRequested) {
         memcpy(lastFrame, frame, g_serumData.fwidth * g_serumData.fheight);
         lastFrameId = frameID;
+        const uint32_t matchedTriggerId = g_serumData.triggerIDs[lastfound][0];
 
         if (sceneFrameCount > 0 &&
             (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
                 FLAG_SCENE_AS_BACKGROUND &&
             lastTriggerID < MONOCHROME_TRIGGER_ID &&
-            g_serumData.triggerIDs[lastfound][0] == lastTriggerID) {
+            matchedTriggerId == lastTriggerID) {
           // New frame has the same Trigger ID, continuing an already running
           // seamless looped scene.
           // Wait for the next rotation to have a smooth transition.
@@ -4592,8 +4620,19 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                    (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
                        FLAG_SCENE_AS_BACKGROUND &&
                    lastTriggerID < MONOCHROME_TRIGGER_ID &&
-                   g_serumData.triggerIDs[lastfound][0] == lastTriggerID) {
+                   matchedTriggerId == lastTriggerID) {
           // New frame has the same Trigger ID, continuing an already running.
+        } else if (sceneIsLastForegroundFrame &&
+                   lastTriggerID < MONOCHROME_TRIGGER_ID &&
+                   matchedTriggerId == lastTriggerID &&
+                   ShouldSuppressFinishedSceneRetrigger(matchedTriggerId)) {
+          // Keep the last visible scene frame instead of immediately
+          // retriggering the same scene on the next matching normal frame.
+          if (g_profileDynamicHotPaths) {
+            ++g_profileSameFrameReturns;
+          }
+          MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
+          return IDENTIFY_SAME_FRAME;
         } else {
           if (sceneFrameCount > 0 &&
               (sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
@@ -4612,6 +4651,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                 sceneRepeatCount);
           }
           sceneFrameCount = 0;
+          sceneIsLastForegroundFrame = false;
           sceneIsLastBackgroundFrame = false;
           sceneEndHoldUntilMs = 0;
           sceneEndHoldDurationMs = 0;
@@ -5094,15 +5134,21 @@ uint32_t Serum_RenderScene(void) {
       sceneFrameCount = 0;
       mySerum.rotationtimer = 0;
       ForceNormalFrameRefreshAfterSceneEnd();
+      const uint8_t sceneFinishMode =
+          sceneOptionFlags & FLAG_SCENE_FINISH_MODE_MASK;
 
-      switch (sceneOptionFlags) {
+      switch (sceneFinishMode) {
         case FLAG_SCENE_BLACK_WHEN_FINISHED:
+          sceneIsLastForegroundFrame = false;
+          sceneIsLastBackgroundFrame = false;
           if (mySerum.frame32) memset(mySerum.frame32, 0, 32 * mySerum.width32);
           if (mySerum.frame64) memset(mySerum.frame64, 0, 64 * mySerum.width64);
           FinishProfileRenderedFrameOperationMaybe();
           break;
 
         case FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED:
+          sceneIsLastForegroundFrame = false;
+          sceneIsLastBackgroundFrame = false;
           if (lastfound < MAX_NUMBER_FRAMES &&
               FrameHasRenderableContent(lastfound)) {
             Serum_ColorizeWithMetadatav2(lastFrame);
@@ -5123,6 +5169,10 @@ uint32_t Serum_RenderScene(void) {
           }
           if (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) {
             sceneIsLastBackgroundFrame = true;
+            sceneIsLastForegroundFrame = false;
+          } else {
+            sceneIsLastForegroundFrame = true;
+            sceneIsLastBackgroundFrame = false;
           }
           break;
       }
@@ -5234,14 +5284,20 @@ uint32_t Serum_RenderScene(void) {
       mySerum.rotationtimer = 0;
       sceneNextFrameAtMs = 0;
       ForceNormalFrameRefreshAfterSceneEnd();
+      const uint8_t sceneFinishMode =
+          sceneOptionFlags & FLAG_SCENE_FINISH_MODE_MASK;
 
-      switch (sceneOptionFlags) {
+      switch (sceneFinishMode) {
         case FLAG_SCENE_BLACK_WHEN_FINISHED:
+          sceneIsLastForegroundFrame = false;
+          sceneIsLastBackgroundFrame = false;
           if (mySerum.frame32) memset(mySerum.frame32, 0, 32 * mySerum.width32);
           if (mySerum.frame64) memset(mySerum.frame64, 0, 64 * mySerum.width64);
           break;
 
         case FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED:
+          sceneIsLastForegroundFrame = false;
+          sceneIsLastBackgroundFrame = false;
           if (lastfound < MAX_NUMBER_FRAMES &&
               FrameHasRenderableContent(lastfound)) {
             Serum_ColorizeWithMetadatav2(lastFrame);
@@ -5261,6 +5317,10 @@ uint32_t Serum_RenderScene(void) {
           }
           if (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) {
             sceneIsLastBackgroundFrame = true;
+            sceneIsLastForegroundFrame = false;
+          } else {
+            sceneIsLastForegroundFrame = true;
+            sceneIsLastBackgroundFrame = false;
           }
           break;
       }
@@ -5493,6 +5553,7 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
     StopV2ColorRotations();
   }
   ConfigureSceneEndHold(sceneId, sceneInterruptable, sceneOptionFlags);
+  sceneIsLastForegroundFrame = false;
   sceneIsLastBackgroundFrame = false;
   sceneCurrentFrame = 0;
   sceneNextFrameAtMs = 0;
