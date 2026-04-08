@@ -164,6 +164,8 @@ uint8_t sceneFrame[256 * 64] = {0};
 uint8_t lastFrame[256 * 64] = {0};
 uint32_t lastFrameId = 0;  // last frame ID identified
 uint16_t sceneBackgroundFrame[256 * 64] = {0};
+uint16_t sceneBackgroundWidth = 0;
+uint16_t sceneBackgroundHeight = 0;
 bool monochromeMode = false;
 bool monochromePaletteMode = false;
 bool showStatusMessages = false;
@@ -1225,6 +1227,8 @@ void Serum_free(void) {
   sceneEndHoldDurationMs = 0;
   sceneNextFrameAtMs = 0;
   sceneIsLastForegroundFrame = false;
+  sceneBackgroundWidth = 0;
+  sceneBackgroundHeight = 0;
   monochromeMode = false;
   monochromePaletteMode = false;
   monochromePaletteV2Length = 0;
@@ -1495,6 +1499,26 @@ static uint32_t BuildCurrentFrameChangedFlags(void) {
     changedFlags |= FLAG_RETURNED_V2_ROTATED64;
   }
   return changedFlags;
+}
+
+static inline uint16_t GetSceneBackgroundPixel(uint16_t x, uint16_t y,
+                                               uint16_t targetWidth,
+                                               uint16_t targetHeight) {
+  if (sceneBackgroundWidth == 0 || sceneBackgroundHeight == 0 ||
+      targetWidth == 0 || targetHeight == 0) {
+    return 0;
+  }
+
+  if (sceneBackgroundWidth == targetWidth &&
+      sceneBackgroundHeight == targetHeight) {
+    return sceneBackgroundFrame[(uint32_t)y * targetWidth + x];
+  }
+
+  const uint32_t sourceX =
+      (uint32_t)x * sceneBackgroundWidth / targetWidth;
+  const uint32_t sourceY =
+      (uint32_t)y * sceneBackgroundHeight / targetHeight;
+  return sceneBackgroundFrame[sourceY * sceneBackgroundWidth + sourceX];
 }
 
 uint32_t max(uint32_t v1, uint32_t v2) {
@@ -3702,6 +3726,10 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     if (applySceneBackground)
       memcpy(sceneBackgroundFrame, pSceneBackgroundFrame,
              g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
+    if (applySceneBackground) {
+      sceneBackgroundWidth = g_serumData.fwidth;
+      sceneBackgroundHeight = g_serumData.fheight;
+    }
     memset(isdynapix, 0, g_serumData.fheight * g_serumData.fwidth);
     for (tj = 0; tj < g_serumData.fheight; tj++) {
       for (ti = 0; ti < g_serumData.fwidth; ti++) {
@@ -3710,7 +3738,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             (frameBackgroundMask[tk] > 0)) {
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
-              pfr[tk] = sceneBackgroundFrame[tk];
+              pfr[tk] = GetSceneBackgroundPixel(ti, tj, g_serumData.fwidth,
+                                               g_serumData.fheight);
             } else if (!suppressFrameBackgroundImage) {
               pfr[tk] = frameBackground[tk];
               if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
@@ -3728,7 +3757,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             if (isdynapix[tk] == 0) {
               if (blackOutStaticContent && hasBackground && (frame[tk] > 0) &&
                   (frameBackgroundMask[tk] > 0)) {
-                pfr[tk] = sceneBackgroundFrame[tk];
+                pfr[tk] = GetSceneBackgroundPixel(ti, tj, g_serumData.fwidth,
+                                                 g_serumData.fheight);
               } else {
                 pfr[tk] = frameColors[tk];
                 if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
@@ -3813,6 +3843,10 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
       memcpy(sceneBackgroundFrame, pSceneBackgroundFrame,
              g_serumData.fwidth_extra * g_serumData.fheight_extra *
                  sizeof(uint16_t));
+    if (applySceneBackground) {
+      sceneBackgroundWidth = g_serumData.fwidth_extra;
+      sceneBackgroundHeight = g_serumData.fheight_extra;
+    }
     memset(isdynapix, 0, g_serumData.fheight_extra * g_serumData.fwidth_extra);
     for (tj = 0; tj < g_serumData.fheight_extra; tj++) {
       for (ti = 0; ti < g_serumData.fwidth_extra; ti++) {
@@ -3827,7 +3861,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             (frameBackgroundMaskExtra[tk] > 0)) {
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
-              pfr[tk] = sceneBackgroundFrame[tk];
+              pfr[tk] = GetSceneBackgroundPixel(ti, tj,
+                                               g_serumData.fwidth_extra,
+                                               g_serumData.fheight_extra);
             } else if (!suppressFrameBackgroundImage) {
               pfr[tk] = frameBackgroundExtra[tk];
               if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
@@ -3846,7 +3882,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             if (isdynapix[tk] == 0) {
               if (blackOutStaticContent && hasBackground && (frame[tl] > 0) &&
                   (frameBackgroundMaskExtra[tk] > 0)) {
-                pfr[tk] = sceneBackgroundFrame[tk];
+                pfr[tk] = GetSceneBackgroundPixel(ti, tj,
+                                                 g_serumData.fwidth_extra,
+                                                 g_serumData.fheight_extra);
               } else {
                 pfr[tk] = frameColorsExtra[tk];
                 if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
@@ -5354,7 +5392,7 @@ uint32_t Serum_ApplyRotationsv2(void) {
 
   uint32_t sizeframe;
   uint32_t now = GetMonotonicTimeMs();
-  if (mySerum.frame32) {
+  if (mySerum.frame32 && (mySerum.flags & FLAG_RETURNED_32P_FRAME_OK)) {
     sizeframe = 32 * mySerum.width32;
     if (mySerum.modifiedelements32)
       memset(mySerum.modifiedelements32, 0, sizeframe);
@@ -5387,7 +5425,7 @@ uint32_t Serum_ApplyRotationsv2(void) {
       }
     }
   }
-  if (mySerum.frame64) {
+  if (mySerum.frame64 && (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK)) {
     sizeframe = 64 * mySerum.width64;
     if (mySerum.modifiedelements64)
       memset(mySerum.modifiedelements64, 0, sizeframe);

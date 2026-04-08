@@ -351,6 +351,17 @@ Background placeholder policy:
 - When true, frame-level background images are treated as placeholders and existing output pixel is kept in masked background areas.
 - This is used when a background scene is active so the scene background can continue while foreground content changes.
 
+Mixed-resolution background scenes:
+- `applySceneBackground` caches the already-rendered scene background together
+  with its source dimensions.
+- If a background scene and the current foreground are rendered on different
+  planes because fallback selected the original-resolution foreground, the
+  cached scene background is sampled into the target plane instead of being
+  reused by raw flat-buffer index.
+- This preserves correct background-scene composition for `64p` scene /
+  `32p` fallback foreground and the inverse `32p` scene / `64p` fallback
+  foreground case.
+
 Critical-trigger fast rejection:
 - While a non-interruptable scene (or its end-hold) is active, normal incoming
   frames are not always sent through full `Identify_Frame(...)`.
