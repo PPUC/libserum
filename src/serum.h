@@ -25,8 +25,12 @@ enum {
   FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED = 2,
   // run scene as background
   FLAG_SCENE_AS_BACKGROUND = 4,
+  // keep only dynamic zones, sprites and shadows in the foreground
   FLAG_SCENE_ONLY_DYNAMIC_CONTENT = 8,
   FLAG_SCENE_RESUME_IF_RETRIGGERED = 16,
+  // with background scenes, keep only max-brightness non-dynamic pixels in
+  // the foreground
+  FLAG_SCENE_REPLACE_NONMAX_CONTENT = 32,
 };
 
 enum  // returned by Serum_Load in *SerumVersion

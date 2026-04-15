@@ -391,6 +391,9 @@ Flags (from `serum.h`):
 - `4`: run scene as background
 - `8`: only dynamic content in foreground over background scene
 - `16`: resume interrupted scene if retriggered within 8s
+- `32`: with background scenes, replace any non-dynamic pixel whose source
+  brightness is below the maximum input value (`nocolors - 1`) with the
+  background scene, so only maximum-brightness foreground pixels stay visible
 
 Finished-scene default behavior:
 - Foreground scenes with flag `0` leave the last rendered scene frame visible

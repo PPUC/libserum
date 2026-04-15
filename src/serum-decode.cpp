@@ -1514,10 +1514,8 @@ static inline uint16_t GetSceneBackgroundPixel(uint16_t x, uint16_t y,
     return sceneBackgroundFrame[(uint32_t)y * targetWidth + x];
   }
 
-  const uint32_t sourceX =
-      (uint32_t)x * sceneBackgroundWidth / targetWidth;
-  const uint32_t sourceY =
-      (uint32_t)y * sceneBackgroundHeight / targetHeight;
+  const uint32_t sourceX = (uint32_t)x * sceneBackgroundWidth / targetWidth;
+  const uint32_t sourceY = (uint32_t)y * sceneBackgroundHeight / targetHeight;
   return sceneBackgroundFrame[sourceY * sceneBackgroundWidth + sourceX];
 }
 
@@ -3661,6 +3659,7 @@ void CheckDynaShadow(uint16_t* pfr, const uint8_t* shadowDirByLayer,
 void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                       bool applySceneBackground = false,
                       bool blackOutStaticContent = false,
+                      bool replaceNonMaxContent = false,
                       bool suppressFrameBackgroundImage = false) {
   uint16_t tj, ti;
   // Generate the colorized version of a frame once identified in the crom
@@ -3679,6 +3678,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
       isextrarequested && (!isoriginalfallbackrequested || isextra);
   const bool renderOriginal =
       (isoriginalrequested || (isoriginalfallbackrequested && !isextra));
+  const uint8_t maxInputValue =
+      g_serumData.nocolors > 0 ? (uint8_t)(g_serumData.nocolors - 1) : 0;
   if (((mySerum.frame32 && g_serumData.fheight == 32) ||
        (mySerum.frame64 && g_serumData.fheight == 64)) &&
       renderOriginal) {
@@ -3739,7 +3740,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
               pfr[tk] = GetSceneBackgroundPixel(ti, tj, g_serumData.fwidth,
-                                               g_serumData.fheight);
+                                                g_serumData.fheight);
             } else if (!suppressFrameBackgroundImage) {
               pfr[tk] = frameBackground[tk];
               if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
@@ -3755,10 +3756,13 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         } else {
           if (!frameHasDynamic || frameDynaActive[tk] == 0) {
             if (isdynapix[tk] == 0) {
-              if (blackOutStaticContent && hasBackground && (frame[tk] > 0) &&
-                  (frameBackgroundMask[tk] > 0)) {
+              const bool replaceStaticPixel =
+                  hasBackground && (frameBackgroundMask[tk] > 0) &&
+                  ((blackOutStaticContent && (frame[tk] > 0)) ||
+                   (replaceNonMaxContent && (frame[tk] < maxInputValue)));
+              if (replaceStaticPixel) {
                 pfr[tk] = GetSceneBackgroundPixel(ti, tj, g_serumData.fwidth,
-                                                 g_serumData.fheight);
+                                                  g_serumData.fheight);
               } else {
                 pfr[tk] = frameColors[tk];
                 if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
@@ -3861,9 +3865,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             (frameBackgroundMaskExtra[tk] > 0)) {
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
-              pfr[tk] = GetSceneBackgroundPixel(ti, tj,
-                                               g_serumData.fwidth_extra,
-                                               g_serumData.fheight_extra);
+              pfr[tk] = GetSceneBackgroundPixel(
+                  ti, tj, g_serumData.fwidth_extra, g_serumData.fheight_extra);
             } else if (!suppressFrameBackgroundImage) {
               pfr[tk] = frameBackgroundExtra[tk];
               if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
@@ -3880,11 +3883,14 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         } else {
           if (!frameHasDynamicExtra || frameDynaExtraActive[tk] == 0) {
             if (isdynapix[tk] == 0) {
-              if (blackOutStaticContent && hasBackground && (frame[tl] > 0) &&
-                  (frameBackgroundMaskExtra[tk] > 0)) {
-                pfr[tk] = GetSceneBackgroundPixel(ti, tj,
-                                                 g_serumData.fwidth_extra,
-                                                 g_serumData.fheight_extra);
+              const bool replaceStaticPixel =
+                  hasBackground && (frameBackgroundMaskExtra[tk] > 0) &&
+                  ((blackOutStaticContent && (frame[tl] > 0)) ||
+                   (replaceNonMaxContent && (frame[tl] < maxInputValue)));
+              if (replaceStaticPixel) {
+                pfr[tk] =
+                    GetSceneBackgroundPixel(ti, tj, g_serumData.fwidth_extra,
+                                            g_serumData.fheight_extra);
               } else {
                 pfr[tk] = frameColorsExtra[tk];
                 if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
@@ -4835,15 +4841,19 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
           profStart = std::chrono::steady_clock::now();
         }
         if (!sceneIsLastBackgroundFrame && !backgroundScenePrimedThisCall) {
-          Colorize_Framev2(frame, lastfound, false, false,
+          Colorize_Framev2(frame, lastfound, false, false, false,
                            suppressPlaceholderBackground);
           DebugHashCurrentOutputFrame(lastfound, false);
         }
         if ((isBackgroundSceneRequested) || sceneIsLastBackgroundFrame) {
-          Colorize_Framev2(
-              lastFrame, lastFrameId, true,
+          const bool onlyDynamicForeground =
               (sceneOptionFlags & FLAG_SCENE_ONLY_DYNAMIC_CONTENT) ==
-                  FLAG_SCENE_ONLY_DYNAMIC_CONTENT);
+              FLAG_SCENE_ONLY_DYNAMIC_CONTENT;
+          const bool replaceNonMaxForeground =
+              (sceneOptionFlags & FLAG_SCENE_REPLACE_NONMAX_CONTENT) ==
+              FLAG_SCENE_REPLACE_NONMAX_CONTENT;
+          Colorize_Framev2(lastFrame, lastFrameId, true, onlyDynamicForeground,
+                           replaceNonMaxForeground);
           DebugHashCurrentOutputFrame(lastFrameId, false);
         }
         if (profileNow) {
