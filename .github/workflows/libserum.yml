@@ -182,8 +182,14 @@ jobs:
       - if: (matrix.platform == 'win' && matrix.arch == 'x64')
         name: Prepare debug symbols (win x64)
         run: |
+          shopt -s nullglob
+          pdb_files=(build/Release/*.pdb)
+          if (( ${#pdb_files[@]} == 0 )); then
+            echo "No PDB files found in build/Release"
+            exit 1
+          fi
           mkdir tmp-pdb
-          cp build/Release/*.pdb tmp-pdb/
+          cp "${pdb_files[@]}" tmp-pdb/
           cd tmp-pdb && 7z a -r ../libserum-${{ needs.version.outputs.tag }}-${{ matrix.platform }}-${{ matrix.arch }}-pdb.zip *
       - if: (matrix.platform == 'win-mingw')
         name: Prepare artifacts (win-mingw)
