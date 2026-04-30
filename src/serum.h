@@ -184,6 +184,7 @@ typedef uint32_t (*Serum_ColorizeFunc)(uint8_t* frame);
 typedef uint32_t (*Serum_RotateFunc)(void);
 typedef const char* (*Serum_GetVersionFunc)(void);
 typedef const char* (*Serum_GetMinorVersionFunc)(void);
+typedef const char* (*Serum_GetLastErrorMessageFunc)(void);
 typedef void (*Serum_SetLogCallbackFunc)(Serum_LogCallback callback,
                                          const void* userData);
 typedef void (*Serum_SetIgnoreUnknownFramesTimeoutFunc)(uint16_t milliseconds);

@@ -130,6 +130,16 @@ SERUM_API const char* Serum_GetVersion(void);
  */
 SERUM_API const char* Serum_GetMinorVersion(void);
 
+/** @brief Get the last fatal runtime error message
+ *
+ * Returns the most recent top-level exception/fatal error captured by the DLL.
+ * The returned pointer is owned by libserum and remains valid until the next
+ * API call that updates the stored error state.
+ *
+ * @return Empty string if no fatal error has been recorded
+ */
+SERUM_API const char* Serum_GetLastErrorMessage(void);
+
 /** @brief Parse a scene description file in CSV format
  *
  * @param csv_filename: Path to the CSV file containing scene descriptions

@@ -507,6 +507,18 @@ v6 snapshot policy:
 ## Logging
 - Central callback configured by `Serum_SetLogCallback`.
 - `serum-decode.cpp` and `SceneGenerator.cpp` both use callback-based `Log(...)`.
+- Windows DLL API-boundary crash diagnostics:
+  - On MSVC Windows builds, exported `libserum` API entrypoints catch both C++
+    exceptions and Windows structured exceptions (`SEH`) at the DLL boundary.
+  - Fatal API-boundary failures are recorded in a process-global message buffer
+    exposed through `Serum_GetLastErrorMessage()`.
+  - Those fatal diagnostics are emitted through the configured log callback and
+    also mirrored to `stderr` and `OutputDebugStringA`, so crash reasons remain
+    visible even when the host does not install a log callback.
+  - Structured-exception diagnostics include the Windows exception code, a
+    short reason string, and the reported fault address; access violations also
+    include whether the fault happened on read/write/execute and the target
+    address when available.
 - Successful load logging includes Serum runtime version and, for `cROMc`
   loads, the concentrate version.
 - Under `SERUM_DEBUG_SCENE_VERBOSE=1`, `SceneGenerator::parseCSV(...)` logs a

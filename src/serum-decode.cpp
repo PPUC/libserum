@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -34,6 +35,7 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 #define strcasecmp _stricmp
+#include <windows.h>
 #else
 
 #if not defined(__STDC_LIB_EXT1__)
@@ -67,6 +69,7 @@ int strcat_s(char* dest, size_t destsz, const char* src) {
 
 Serum_LogCallback logCallback = nullptr;
 const void* logUserData = nullptr;
+static char g_lastErrorMessage[512] = {0};
 
 void Log(const char* format, ...) {
   if (!logCallback) {
@@ -78,6 +81,148 @@ void Log(const char* format, ...) {
   (*(logCallback))(format, args, logUserData);
   va_end(args);
 }
+
+static void ClearLastErrorMessage() { g_lastErrorMessage[0] = '\0'; }
+
+static void SetLastErrorMessage(const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  vsnprintf(g_lastErrorMessage, sizeof(g_lastErrorMessage), format, args);
+  va_end(args);
+}
+
+static void EmitFatalDiagnostic(const char* message) {
+  Log("%s", message);
+  std::fputs(message, stderr);
+  std::fputc('\n', stderr);
+#if defined(_WIN32) || defined(_WIN64)
+  OutputDebugStringA(message);
+  OutputDebugStringA("\n");
+#endif
+}
+
+static void ReportCppException(const char* apiName, const char* what) {
+  SetLastErrorMessage("libserum fatal error in %s: %s", apiName, what);
+  EmitFatalDiagnostic(g_lastErrorMessage);
+}
+
+static void ReportUnknownCppException(const char* apiName) {
+  SetLastErrorMessage("libserum fatal error in %s: unknown C++ exception",
+                      apiName);
+  EmitFatalDiagnostic(g_lastErrorMessage);
+}
+
+#if defined(_WIN32) || defined(_WIN64)
+static const char* DescribeWindowsExceptionCode(DWORD code) {
+  switch (code) {
+    case EXCEPTION_ACCESS_VIOLATION:
+      return "access violation";
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+      return "array bounds exceeded";
+    case EXCEPTION_BREAKPOINT:
+      return "breakpoint";
+    case EXCEPTION_DATATYPE_MISALIGNMENT:
+      return "datatype misalignment";
+    case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+      return "floating point divide by zero";
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+      return "illegal instruction";
+    case EXCEPTION_IN_PAGE_ERROR:
+      return "in-page error";
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+      return "integer divide by zero";
+    case EXCEPTION_STACK_OVERFLOW:
+      return "stack overflow";
+    default:
+      return "structured exception";
+  }
+}
+
+static void ReportStructuredException(const char* apiName,
+                                      EXCEPTION_POINTERS* exceptionInfo) {
+  const DWORD code = exceptionInfo && exceptionInfo->ExceptionRecord
+                         ? exceptionInfo->ExceptionRecord->ExceptionCode
+                         : 0;
+  const void* faultAddress =
+      exceptionInfo && exceptionInfo->ExceptionRecord
+          ? exceptionInfo->ExceptionRecord->ExceptionAddress
+          : nullptr;
+
+  if (code == EXCEPTION_ACCESS_VIOLATION && exceptionInfo != nullptr &&
+      exceptionInfo->ExceptionRecord != nullptr &&
+      exceptionInfo->ExceptionRecord->NumberParameters >= 2) {
+    const ULONG_PTR accessType =
+        exceptionInfo->ExceptionRecord->ExceptionInformation[0];
+    const void* accessAddress = reinterpret_cast<const void*>(
+        exceptionInfo->ExceptionRecord->ExceptionInformation[1]);
+    const char* operation = "accessing";
+    if (accessType == 0) {
+      operation = "reading";
+    } else if (accessType == 1) {
+      operation = "writing";
+    } else if (accessType == 8) {
+      operation = "executing";
+    }
+    SetLastErrorMessage(
+        "libserum fatal error in %s: %s (0x%08lx) while %s address %p at %p",
+        apiName, DescribeWindowsExceptionCode(code),
+        static_cast<unsigned long>(code), operation, accessAddress,
+        faultAddress);
+  } else {
+    SetLastErrorMessage("libserum fatal error in %s: %s (0x%08lx) at %p",
+                        apiName, DescribeWindowsExceptionCode(code),
+                        static_cast<unsigned long>(code), faultAddress);
+  }
+
+  EmitFatalDiagnostic(g_lastErrorMessage);
+}
+
+static LONG WINAPI
+SerumUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
+  ReportStructuredException("unhandled Windows exception", exceptionInfo);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void EnsureWindowsCrashHandlerInstalled() {
+  static std::once_flag installed;
+  std::call_once(installed, []() {
+    SetUnhandledExceptionFilter(SerumUnhandledExceptionFilter);
+  });
+}
+#endif
+
+#if defined(_WIN32) || defined(_WIN64)
+#define SERUM_API_GUARD_START(apiName)  \
+  ClearLastErrorMessage();              \
+  EnsureWindowsCrashHandlerInstalled(); \
+  try {
+#else
+#define SERUM_API_GUARD_START(apiName) \
+  ClearLastErrorMessage();             \
+  try {
+#endif
+
+#define SERUM_API_GUARD_END(apiName, failureValue) \
+  }                                                \
+  catch (const std::exception& e) {                \
+    ReportCppException(apiName, e.what());         \
+    return failureValue;                           \
+  }                                                \
+  catch (...) {                                    \
+    ReportUnknownCppException(apiName);            \
+    return failureValue;                           \
+  }
+
+#define SERUM_API_GUARD_END_VOID(apiName)  \
+  }                                        \
+  catch (const std::exception& e) {        \
+    ReportCppException(apiName, e.what()); \
+    return;                                \
+  }                                        \
+  catch (...) {                            \
+    ReportUnknownCppException(apiName);    \
+    return;                                \
+  }
 
 static bool IsEnvFlagEnabled(const char* name) {
   const char* value = std::getenv(name);
@@ -1069,9 +1214,11 @@ static void DebugLogSpriteCheckResult(uint32_t frameId, uint8_t nspr) {
 
 SERUM_API void Serum_SetLogCallback(Serum_LogCallback callback,
                                     const void* userData) {
+  SERUM_API_GUARD_START("Serum_SetLogCallback")
   g_serumData.SetLogCallback(callback, userData);
   logCallback = callback;
   logUserData = userData;
+  SERUM_API_GUARD_END_VOID("Serum_SetLogCallback")
 }
 
 #if defined(_WIN32) || defined(_WIN64) || defined(__APPLE__) || \
@@ -1237,13 +1384,24 @@ void Serum_free(void) {
   isoriginalfallbackrequested = false;
   g_sceneResumeState.clear();
   g_criticalTriggerMaskShapes.clear();
+  ClearLastErrorMessage();
 
   g_serumData.sceneGenerator->Reset();
 }
 
-SERUM_API const char* Serum_GetVersion() { return SERUM_VERSION; }
+SERUM_API const char* Serum_GetVersion() {
+  SERUM_API_GUARD_START("Serum_GetVersion")
+  return SERUM_VERSION;
+  SERUM_API_GUARD_END("Serum_GetVersion", "")
+}
 
-SERUM_API const char* Serum_GetMinorVersion() { return SERUM_MINOR_VERSION; }
+SERUM_API const char* Serum_GetMinorVersion() {
+  SERUM_API_GUARD_START("Serum_GetMinorVersion")
+  return SERUM_MINOR_VERSION;
+  SERUM_API_GUARD_END("Serum_GetMinorVersion", "")
+}
+
+SERUM_API const char* Serum_GetLastErrorMessage() { return g_lastErrorMessage; }
 
 void CRC32encode(void)  // initiating the CRC table, must be called at startup
 {
@@ -2280,6 +2438,7 @@ Serum_Frame_Struc* Serum_LoadFilev1(const char* const filename,
 SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
                                         const char* const romname,
                                         uint8_t flags) {
+  SERUM_API_GUARD_START("Serum_Load")
   const bool realMachine = is_real_machine();
   const bool forceLoadFlags = (flags & FLAG_REQUEST_FORCE) != 0;
   uint8_t runtimeFlags = flags | (realMachine ? FLAG_REQUEST_64P_FRAMES : 0);
@@ -2612,9 +2771,14 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   }
 
   return result;
+  SERUM_API_GUARD_END("Serum_Load", nullptr)
 }
 
-SERUM_API void Serum_Dispose(void) { Serum_free(); }
+SERUM_API void Serum_Dispose(void) {
+  SERUM_API_GUARD_START("Serum_Dispose")
+  Serum_free();
+  SERUM_API_GUARD_END_VOID("Serum_Dispose")
+}
 
 static void BuildFrameLookupVectors(void) {
   uint32_t numSceneFrames = 0;
@@ -4163,19 +4327,26 @@ void Copy_Frame_Palette(uint32_t nofr) {
 }
 
 SERUM_API void Serum_SetIgnoreUnknownFramesTimeout(uint16_t milliseconds) {
+  SERUM_API_GUARD_START("Serum_SetIgnoreUnknownFramesTimeout")
   ignoreUnknownFramesTimeout = milliseconds;
+  SERUM_API_GUARD_END_VOID("Serum_SetIgnoreUnknownFramesTimeout")
 }
 
 SERUM_API void Serum_SetMaximumUnknownFramesToSkip(uint8_t maximum) {
+  SERUM_API_GUARD_START("Serum_SetMaximumUnknownFramesToSkip")
   maxFramesToSkip = maximum;
+  SERUM_API_GUARD_END_VOID("Serum_SetMaximumUnknownFramesToSkip")
 }
 
 SERUM_API void Serum_SetGenerateCRomC(bool generate) {
+  SERUM_API_GUARD_START("Serum_SetGenerateCRomC")
   generateCRomC = generate;
+  SERUM_API_GUARD_END_VOID("Serum_SetGenerateCRomC")
 }
 
 SERUM_API void Serum_SetStandardPalette(const uint8_t* palette,
                                         const int bitDepth) {
+  SERUM_API_GUARD_START("Serum_SetStandardPalette")
   int palette_length = (1 << bitDepth) * 3;
   assert(palette_length < PALETTE_SIZE);
 
@@ -4183,6 +4354,7 @@ SERUM_API void Serum_SetStandardPalette(const uint8_t* palette,
     memcpy(standardPalette, palette, palette_length);
     standardPaletteLength = palette_length;
   }
+  SERUM_API_GUARD_END_VOID("Serum_SetStandardPalette")
 }
 
 uint32_t Calc_Next_Rotationv1(uint32_t now) {
@@ -5106,6 +5278,7 @@ Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
 }
 
 SERUM_API uint32_t Serum_Colorize(uint8_t* frame) {
+  SERUM_API_GUARD_START("Serum_Colorize")
   // return IDENTIFY_NO_FRAME if no new frame detected
   // return 0 if new frame with no rotation detected
   // return > 0 if new frame with rotations detected, the value is the delay
@@ -5114,6 +5287,7 @@ SERUM_API uint32_t Serum_Colorize(uint8_t* frame) {
     return Serum_ColorizeWithMetadatav2(frame);
   else
     return Serum_ColorizeWithMetadatav1(frame);
+  SERUM_API_GUARD_END("Serum_Colorize", IDENTIFY_NO_FRAME)
 }
 
 uint32_t Serum_ApplyRotationsv1(void) {
@@ -5488,23 +5662,42 @@ uint32_t Serum_ApplyRotationsv2(void) {
 }
 
 SERUM_API uint32_t Serum_Rotate(void) {
+  SERUM_API_GUARD_START("Serum_Rotate")
   if (g_serumData.SerumVersion == SERUM_V2) {
     return Serum_ApplyRotationsv2();
   } else {
     return Serum_ApplyRotationsv1();
   }
   return 0;
+  SERUM_API_GUARD_END("Serum_Rotate", 0)
 }
 
-SERUM_API void Serum_DisableColorization() { enabled = false; }
+SERUM_API void Serum_DisableColorization() {
+  SERUM_API_GUARD_START("Serum_DisableColorization")
+  enabled = false;
+  SERUM_API_GUARD_END_VOID("Serum_DisableColorization")
+}
 
-SERUM_API void Serum_EnableColorization() { enabled = true; }
+SERUM_API void Serum_EnableColorization() {
+  SERUM_API_GUARD_START("Serum_EnableColorization")
+  enabled = true;
+  SERUM_API_GUARD_END_VOID("Serum_EnableColorization")
+}
 
-SERUM_API void Serum_DisablePupTriggers(void) { keepTriggersInternal = true; }
+SERUM_API void Serum_DisablePupTriggers(void) {
+  SERUM_API_GUARD_START("Serum_DisablePupTriggers")
+  keepTriggersInternal = true;
+  SERUM_API_GUARD_END_VOID("Serum_DisablePupTriggers")
+}
 
-SERUM_API void Serum_EnablePupTrigers(void) { keepTriggersInternal = false; }
+SERUM_API void Serum_EnablePupTrigers(void) {
+  SERUM_API_GUARD_START("Serum_EnablePupTrigers")
+  keepTriggersInternal = false;
+  SERUM_API_GUARD_END_VOID("Serum_EnablePupTrigers")
+}
 
 SERUM_API bool Serum_GetRuntimeMetadata(Serum_Runtime_Metadata* metadata) {
+  SERUM_API_GUARD_START("Serum_GetRuntimeMetadata")
   if (metadata == nullptr) {
     return false;
   }
@@ -5521,37 +5714,47 @@ SERUM_API bool Serum_GetRuntimeMetadata(Serum_Runtime_Metadata* metadata) {
   metadata->rotationtimer = mySerum.rotationtimer;
   metadata->featureFlags = BuildRuntimeFeatureFlags(mySerum.frameID);
   return true;
+  SERUM_API_GUARD_END("Serum_GetRuntimeMetadata", false)
 }
 
 SERUM_API bool Serum_Scene_ParseCSV(const char* const csv_filename) {
+  SERUM_API_GUARD_START("Serum_Scene_ParseCSV")
   if (!g_serumData.sceneGenerator) return false;
   return g_serumData.sceneGenerator->parseCSV(csv_filename);
+  SERUM_API_GUARD_END("Serum_Scene_ParseCSV", false)
 }
 
 SERUM_API bool Serum_Scene_GenerateDump(const char* const dump_filename,
                                         int id) {
+  SERUM_API_GUARD_START("Serum_Scene_GenerateDump")
   if (!g_serumData.sceneGenerator) return false;
   return g_serumData.sceneGenerator->generateDump(dump_filename, id);
+  SERUM_API_GUARD_END("Serum_Scene_GenerateDump", false)
 }
 
 SERUM_API bool Serum_Scene_GetInfo(uint16_t sceneId, uint16_t* frameCount,
                                    uint16_t* durationPerFrame,
                                    bool* interruptable, bool* startImmediately,
                                    uint8_t* repeat, uint8_t* sceneOptions) {
+  SERUM_API_GUARD_START("Serum_Scene_GetInfo")
   if (!g_serumData.sceneGenerator) return false;
   return g_serumData.sceneGenerator->getSceneInfo(
       sceneId, *frameCount, *durationPerFrame, *interruptable,
       *startImmediately, *repeat, *sceneOptions);
+  SERUM_API_GUARD_END("Serum_Scene_GetInfo", false)
 }
 
 SERUM_API bool Serum_Scene_GenerateFrame(uint16_t sceneId, uint16_t frameIndex,
                                          uint8_t* buffer, int group) {
+  SERUM_API_GUARD_START("Serum_Scene_GenerateFrame")
   if (!g_serumData.sceneGenerator) return false;
   return (0xffff == g_serumData.sceneGenerator->generateFrame(
                         sceneId, frameIndex, buffer, group, true));
+  SERUM_API_GUARD_END("Serum_Scene_GenerateFrame", false)
 }
 
 SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
+  SERUM_API_GUARD_START("Serum_Scene_Trigger")
   if (!g_serumData.sceneGenerator || g_serumData.SerumVersion != SERUM_V2) {
     return 0;
   }
@@ -5634,22 +5837,31 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
 
   mySerum.rotationtimer = sceneDurationPerFrame;
   return (mySerum.rotationtimer & 0xffff) | FLAG_RETURNED_V2_SCENE;
+  SERUM_API_GUARD_END("Serum_Scene_Trigger", 0)
 }
 
 SERUM_API void Serum_Scene_SetDepth(uint8_t depth) {
+  SERUM_API_GUARD_START("Serum_Scene_SetDepth")
   if (g_serumData.sceneGenerator) g_serumData.sceneGenerator->setDepth(depth);
+  SERUM_API_GUARD_END_VOID("Serum_Scene_SetDepth")
 }
 
 SERUM_API int Serum_Scene_GetDepth(void) {
+  SERUM_API_GUARD_START("Serum_Scene_GetDepth")
   if (!g_serumData.sceneGenerator) return 0;
   return g_serumData.sceneGenerator->getDepth();
+  SERUM_API_GUARD_END("Serum_Scene_GetDepth", 0)
 }
 
 SERUM_API bool Serum_Scene_IsActive(void) {
+  SERUM_API_GUARD_START("Serum_Scene_IsActive")
   if (!g_serumData.sceneGenerator) return false;
   return g_serumData.sceneGenerator->isActive();
+  SERUM_API_GUARD_END("Serum_Scene_IsActive", false)
 }
 
 SERUM_API void Serum_Scene_Reset(void) {
+  SERUM_API_GUARD_START("Serum_Scene_Reset")
   if (g_serumData.sceneGenerator) g_serumData.sceneGenerator->Reset();
+  SERUM_API_GUARD_END_VOID("Serum_Scene_Reset")
 }
