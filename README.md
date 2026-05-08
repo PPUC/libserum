@@ -148,14 +148,14 @@ Positions `4` to `10` are optional. If not provided, the default is `0`.
 #### Windows (x64)
 
 ```shell
-cmake -G "Visual Studio 17 2022" -DPLATFORM=win -DARCH=x64 -B build
+cmake -G "Visual Studio 18 2026" -DPLATFORM=win -DARCH=x64 -B build
 cmake --build build --config Release
 ```
 
 #### Windows (x86)
 
 ```shell
-cmake -G "Visual Studio 17 2022" -A Win32 -DPLATFORM=win -DARCH=x86 -B build
+cmake -G "Visual Studio 18 2026" -A Win32 -DPLATFORM=win -DARCH=x86 -B build
 cmake --build build --config Release
 ```
 
