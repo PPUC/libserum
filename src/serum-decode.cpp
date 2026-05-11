@@ -177,14 +177,15 @@ const uint32_t MAX_FRAME_HEIGHT = 64;
 
 const uint32_t MAX_NUMBER_FRAMES = 0x7fffffff;
 
-const uint16_t greyscale_4[4] = {
-    0x0000,  // Black (0, 0, 0)
-    0x528A,  // Dark grey (~1/3 intensity)
-    0xA514,  // Light grey (~2/3 intensity)
-    0xFFFF   // White (31, 63, 31)
+const uint16_t monochrome_4_map[4] = {
+    0,  // black
+    5,  // ~1/3 intensity
+    10, // ~2/3 intensity
+    15  // full intensity
 };
 
-const uint16_t greyscale_16[16] = {
+uint8_t standardPaletteV2Length = 0;
+uint16_t standardPaletteV2[16] = {  // default greyscale
     0x0000,  // Black (0, 0, 0)
     0x1082,  // 1/15
     0x2104,  // 2/15
@@ -4177,7 +4178,14 @@ SERUM_API void Serum_SetStandardPalette(const uint8_t* palette,
     memcpy(standardPalette, palette, palette_length);
     standardPaletteLength = palette_length;
   }
+  
+  standardPaletteV2Length = 1 << bitDepth;
+  for (int i = 0; i < standardPaletteV2Length; i++)
+	standardPaletteV2[i] = ((palette[i*3] >> 3) << 11) | ((palette[(i*3)+1] >> 2) << 5) | (palette[(i*3)+2] >> 3);
+  
 }
+
+
 
 uint32_t Calc_Next_Rotationv1(uint32_t now) {
   uint32_t nextrot = 0xffffffff;
@@ -5055,9 +5063,12 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
             monochromeFrame[y * g_serumData.fwidth + x] =
                 monochromePaletteV2[src];
           } else if (g_serumData.nocolors < 16) {
-            monochromeFrame[y * g_serumData.fwidth + x] = greyscale_4[src];
+			  if (standardPaletteLength == 0 || standardPaletteV2Length == 16)
+				monochromeFrame[y * g_serumData.fwidth + x] = standardPaletteV2[monochrome_4_map[src]];
+			  else
+				monochromeFrame[y * g_serumData.fwidth + x] = standardPaletteV2[src];
           } else {
-            monochromeFrame[y * g_serumData.fwidth + x] = greyscale_16[src];
+            monochromeFrame[y * g_serumData.fwidth + x] = standardPaletteV2[src];
           }
         }
       }
