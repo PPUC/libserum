@@ -4529,7 +4529,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
     if ((monochromeMode || monochromePaletteMode) &&
         IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
-		if(knownFrameId > g_serumData.nframes) {
+		if(lastFrameId == IDENTIFY_NO_FRAME) {
 			frameID = IDENTIFY_NO_FRAME;
 		}
     }
