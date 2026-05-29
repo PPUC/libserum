@@ -4407,12 +4407,18 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
     // (accidentally). Black frames in-game should be shown. In monochrome
     // settings mode, they should not end the monochrome mode.
     if (!IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
-      monochromeMode = (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
+      monochromeMode =
+          (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
       monochromePaletteMode = false;
       if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
         g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
     } else {
-      g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
+      if (monochromeMode)
+        g_serumData.triggerIDs[lastfound][0] = MONOCHROME_TRIGGER_ID;
+      else if (monochromePaletteMode)
+        g_serumData.triggerIDs[lastfound][0] = MONOCHROME_PALETTE_TRIGGER_ID;
+      else
+        g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
     }
 
     lastframe_found = now;
@@ -4726,7 +4732,12 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
         g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
     } else {
-      g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
+      if (monochromeMode)
+        g_serumData.triggerIDs[lastfound][0] = MONOCHROME_TRIGGER_ID;
+      else if (monochromePaletteMode)
+        g_serumData.triggerIDs[lastfound][0] = MONOCHROME_PALETTE_TRIGGER_ID;
+      else
+        g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
     }
 
     if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
@@ -4820,8 +4831,8 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       Log("Serum debug trigger candidate: inputCrc=%u frameId=%u "
           "triggerId=%u "
           "lastTriggerId=%u",
-          g_debugCurrentInputCrc, frameID,
-          g_serumData.triggerIDs[lastfound][0], lastTriggerID);
+          g_debugCurrentInputCrc, frameID, g_serumData.triggerIDs[lastfound][0],
+          lastTriggerID);
     }
     if (!sceneFrameRequested) {
       memcpy(lastFrame, frame, g_serumData.fwidth * g_serumData.fheight);
@@ -4842,15 +4853,15 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
         MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
         return IDENTIFY_SAME_FRAME;
       } else if (sceneIsLastBackgroundFrame &&
-                  (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
-                      FLAG_SCENE_AS_BACKGROUND &&
-                  lastTriggerID < MONOCHROME_TRIGGER_ID &&
-                  matchedTriggerId == lastTriggerID) {
+                 (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
+                     FLAG_SCENE_AS_BACKGROUND &&
+                 lastTriggerID < MONOCHROME_TRIGGER_ID &&
+                 matchedTriggerId == lastTriggerID) {
         // New frame has the same Trigger ID, continuing an already running.
       } else if (sceneIsLastForegroundFrame &&
-                  lastTriggerID < MONOCHROME_TRIGGER_ID &&
-                  matchedTriggerId == lastTriggerID &&
-                  ShouldSuppressFinishedSceneRetrigger(matchedTriggerId)) {
+                 lastTriggerID < MONOCHROME_TRIGGER_ID &&
+                 matchedTriggerId == lastTriggerID &&
+                 ShouldSuppressFinishedSceneRetrigger(matchedTriggerId)) {
         // Keep the last visible scene frame instead of immediately
         // retriggering the same scene on the next matching normal frame.
         if (g_profileDynamicHotPaths) {
@@ -4862,8 +4873,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
         if (sceneFrameCount > 0 &&
             (sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
                 FLAG_SCENE_RESUME_IF_RETRIGGERED &&
-            lastTriggerID < 0xffffffff &&
-            sceneCurrentFrame < sceneFrameCount) {
+            lastTriggerID < 0xffffffff && sceneCurrentFrame < sceneFrameCount) {
           g_sceneResumeState[lastTriggerID] = {sceneCurrentFrame, now};
         }
 
@@ -4887,7 +4897,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
         // trigger
         if (!monochromeMode &&
             (g_serumData.triggerIDs[lastfound][0] != lastTriggerID ||
-              lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT))) {
+             lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT))) {
           lastTriggerID = mySerum.triggerID =
               g_serumData.triggerIDs[lastfound][0];
           lasttriggerTimestamp = now;
@@ -4902,7 +4912,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                 "sceneGeneratorActive=%s triggerValid=%s",
                 lastTriggerID,
                 (g_serumData.sceneGenerator &&
-                  g_serumData.sceneGenerator->isActive())
+                 g_serumData.sceneGenerator->isActive())
                     ? "true"
                     : "false",
                 lastTriggerID < 0xffffffff ? "true" : "false");
@@ -4910,11 +4920,10 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
 
           if (g_serumData.sceneGenerator->isActive() &&
               lastTriggerID < 0xffffffff) {
-            const bool hasSceneInfo =
-                g_serumData.sceneGenerator->getSceneInfo(
-                    lastTriggerID, sceneFrameCount, sceneDurationPerFrame,
-                    sceneInterruptable, sceneStartImmediately,
-                    sceneRepeatCount, sceneOptionFlags);
+            const bool hasSceneInfo = g_serumData.sceneGenerator->getSceneInfo(
+                lastTriggerID, sceneFrameCount, sceneDurationPerFrame,
+                sceneInterruptable, sceneStartImmediately, sceneRepeatCount,
+                sceneOptionFlags);
             if (DebugTraceAllInputsEnabled()) {
               Log("Serum debug trigger scene-info: triggerId=%u found=%s "
                   "frameCount=%u duration=%u interruptable=%s "
@@ -4926,11 +4935,10 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                   sceneOptionFlags);
             }
             if (hasSceneInfo) {
-              DebugLogSceneEvent("trigger",
-                                  static_cast<uint16_t>(lastTriggerID), 0,
-                                  sceneFrameCount, sceneDurationPerFrame,
-                                  sceneOptionFlags, sceneInterruptable,
-                                  sceneStartImmediately, sceneRepeatCount);
+              DebugLogSceneEvent(
+                  "trigger", static_cast<uint16_t>(lastTriggerID), 0,
+                  sceneFrameCount, sceneDurationPerFrame, sceneOptionFlags,
+                  sceneInterruptable, sceneStartImmediately, sceneRepeatCount);
               const bool sceneIsBackground =
                   (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
                   FLAG_SCENE_AS_BACKGROUND;
@@ -4964,10 +4972,10 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
               }
               if (sceneStartImmediately) {
                 DebugLogSceneEvent("start-immediate",
-                                    static_cast<uint16_t>(lastTriggerID), 0,
-                                    sceneFrameCount, sceneDurationPerFrame,
-                                    sceneOptionFlags, sceneInterruptable,
-                                    sceneStartImmediately, sceneRepeatCount);
+                                   static_cast<uint16_t>(lastTriggerID), 0,
+                                   sceneFrameCount, sceneDurationPerFrame,
+                                   sceneOptionFlags, sceneInterruptable,
+                                   sceneStartImmediately, sceneRepeatCount);
                 uint32_t sceneRotationResult = Serum_RenderScene();
                 if (sceneRotationResult & FLAG_RETURNED_V2_SCENE) {
                   MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
@@ -4975,10 +4983,10 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                 }
               } else if (sceneIsBackground) {
                 DebugLogSceneEvent("prime-background",
-                                    static_cast<uint16_t>(lastTriggerID), 0,
-                                    sceneFrameCount, sceneDurationPerFrame,
-                                    sceneOptionFlags, sceneInterruptable,
-                                    sceneStartImmediately, sceneRepeatCount);
+                                   static_cast<uint16_t>(lastTriggerID), 0,
+                                   sceneFrameCount, sceneDurationPerFrame,
+                                   sceneOptionFlags, sceneInterruptable,
+                                   sceneStartImmediately, sceneRepeatCount);
                 uint32_t sceneRotationResult = Serum_RenderScene();
                 if (sceneRotationResult & FLAG_RETURNED_V2_SCENE) {
                   backgroundScenePrimedThisCall = true;
@@ -4992,12 +5000,12 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       }
     }
 
-    bool isBackgroundScene = (sceneFrameCount > 0 &&
-                              (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
-                                  FLAG_SCENE_AS_BACKGROUND);
+    bool isBackgroundScene =
+        (sceneFrameCount > 0 && (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
+                                    FLAG_SCENE_AS_BACKGROUND);
     bool suppressPlaceholderBackground = isBackgroundScene &&
-                                          !sceneFrameRequested &&
-                                          !backgroundScenePrimedThisCall;
+                                         !sceneFrameRequested &&
+                                         !backgroundScenePrimedThisCall;
     bool isBackgroundSceneRequested =
         isBackgroundScene &&
         (sceneFrameRequested || backgroundScenePrimedThisCall);
@@ -5007,13 +5015,12 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
         wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
     memset(nosprite, 255, MAX_SPRITES_PER_FRAME);
 
-    bool isspr =
-        (sceneFrameRequested && !isBackgroundSceneRequested)
-            ? false
-            : Check_Spritesv2(
-                  isBackgroundSceneRequested ? lastFrame : frame,
-                  isBackgroundSceneRequested ? lastFrameId : lastfound,
-                  nosprite, &nspr, frx, fry, spx, spy, wid, hei);
+    bool isspr = (sceneFrameRequested && !isBackgroundSceneRequested)
+                     ? false
+                     : Check_Spritesv2(
+                           isBackgroundSceneRequested ? lastFrame : frame,
+                           isBackgroundSceneRequested ? lastFrameId : lastfound,
+                           nosprite, &nspr, frx, fry, spx, spy, wid, hei);
     if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
         FrameHasRenderableContent(lastfound)) {
       const bool profileNow = g_profileDynamicHotPaths;
@@ -5023,7 +5030,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       }
       if (!sceneIsLastBackgroundFrame && !backgroundScenePrimedThisCall) {
         Colorize_Framev2(frame, lastfound, false, false, false,
-                          suppressPlaceholderBackground);
+                         suppressPlaceholderBackground);
         DebugHashCurrentOutputFrame(lastfound, false);
       }
       if ((isBackgroundSceneRequested) || sceneIsLastBackgroundFrame) {
@@ -5034,7 +5041,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
             (sceneOptionFlags & FLAG_SCENE_REPLACE_NONMAX_CONTENT) ==
             FLAG_SCENE_REPLACE_NONMAX_CONTENT;
         Colorize_Framev2(lastFrame, lastFrameId, true, onlyDynamicForeground,
-                          replaceNonMaxForeground);
+                         replaceNonMaxForeground);
         DebugHashCurrentOutputFrame(lastFrameId, false);
       }
       if (profileNow) {
@@ -5057,18 +5064,15 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
           ti++;
         }
         if (g_debugStageHashes &&
-            DebugTraceMatches(
-                g_debugCurrentInputCrc,
-                isBackgroundSceneRequested ? lastFrameId : lastfound)) {
+            DebugTraceMatches(g_debugCurrentInputCrc, isBackgroundSceneRequested
+                                                          ? lastFrameId
+                                                          : lastfound)) {
           uint64_t spriteHash = DebugHashBytesFNV1a64(
-              ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) &&
-                mySerum.frame32)
+              ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) && mySerum.frame32)
                   ? static_cast<const void*>(mySerum.frame32)
                   : static_cast<const void*>(mySerum.frame64),
-              ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) &&
-                mySerum.frame32)
-                  ? static_cast<size_t>(mySerum.width32) * 32 *
-                        sizeof(uint16_t)
+              ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) && mySerum.frame32)
+                  ? static_cast<size_t>(mySerum.width32) * 32 * sizeof(uint16_t)
                   : static_cast<size_t>(mySerum.width64) * 64 *
                         sizeof(uint16_t));
           Log("Serum debug stage hash: frameId=%u inputCrc=%u "
@@ -5090,7 +5094,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       bool allowParallelRotations =
           (sceneFrameCount == 0) ||
           ((sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
-            FLAG_SCENE_AS_BACKGROUND);
+           FLAG_SCENE_AS_BACKGROUND);
       if (!sceneFrameRequested && allowParallelRotations) {
         uint16_t *pcr32, *pcr64;
         if (g_serumData.fheight == 32) {
@@ -5105,11 +5109,10 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
 
         if (mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) {
           memcpy(mySerum.rotations32, pcr32,
-                  MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
+                 MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
           for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
             if (mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION] == 0 ||
-                mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1] ==
-                    0) {
+                mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1] == 0) {
               colorrotnexttime32[ti] = 0;
               continue;
             }
@@ -5138,11 +5141,10 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
         }
         if (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) {
           memcpy(mySerum.rotations64, pcr64,
-                  MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
+                 MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
           for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
             if (mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION] == 0 ||
-                mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1] ==
-                    0) {
+                mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1] == 0) {
               colorrotnexttime64[ti] = 0;
               continue;
             }
@@ -5189,11 +5191,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
           g_serumData.sceneGenerator->getAutoStartSceneInfo(
               sceneFrameCount, sceneDurationPerFrame, sceneInterruptable,
               sceneStartImmediately, sceneRepeatCount, sceneOptionFlags)) {
-        ConfigureSceneEndHold(
-            g_serumData.sceneGenerator->getAutoStartSceneId(),
-            sceneInterruptable, sceneOptionFlags);
-        mySerum.rotationtimer =
-            g_serumData.sceneGenerator->getAutoStartTimer();
+        ConfigureSceneEndHold(g_serumData.sceneGenerator->getAutoStartSceneId(),
+                              sceneInterruptable, sceneOptionFlags);
+        mySerum.rotationtimer = g_serumData.sceneGenerator->getAutoStartTimer();
         rotationIsScene = true;
       }
 
@@ -5203,7 +5203,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
 
       MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
       return (uint32_t)mySerum.rotationtimer |
-              (rotationIsScene ? FLAG_RETURNED_V2_SCENE : 0);
+             (rotationIsScene ? FLAG_RETURNED_V2_SCENE : 0);
     }
   }
 
