@@ -4725,6 +4725,8 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       }
       if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
         g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
+    } else {
+      g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
     }
 
     if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
