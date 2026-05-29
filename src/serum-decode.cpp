@@ -4710,498 +4710,494 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    if (frameID != IDENTIFY_NO_FRAME) {
-      if (!IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
-        uint32_t triggerId = g_serumData.triggerIDs[lastfound][0];
-        monochromeMode = (triggerId == MONOCHROME_TRIGGER_ID);
-        monochromePaletteMode = false;
-        if (triggerId == MONOCHROME_PALETTE_TRIGGER_ID) {
-          monochromePaletteMode = CaptureMonochromePaletteFromFrameV2(lastfound);
-          monochromeMode = false;
-        }
-      } else {
-        g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
+    if (!IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
+      uint32_t triggerId = g_serumData.triggerIDs[lastfound][0];
+      monochromeMode = (triggerId == MONOCHROME_TRIGGER_ID);
+      monochromePaletteMode = false;
+      if (triggerId == MONOCHROME_PALETTE_TRIGGER_ID) {
+        monochromePaletteMode = CaptureMonochromePaletteFromFrameV2(lastfound);
+        monochromeMode = false;
       }
+    }
 
-      if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
-        g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
+    if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
+      g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
 
-      if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
-          !sceneFrameRequested &&
-          (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
-          !sceneInterruptable) {
-        if (DebugTraceMatches(g_debugCurrentInputCrc, lastfound)) {
-          Log("Serum debug v2 gate: inputCrc=%u frameId=%u "
-              "gate=scene-noninterruptable currentFrame=%u sceneFrameCount=%u "
-              "endHoldUntil=%u bypass=%s",
-              g_debugCurrentInputCrc, lastfound, sceneCurrentFrame,
-              sceneFrameCount, sceneEndHoldUntilMs,
-              g_debugBypassSceneGate ? "true" : "false");
-        }
-        if (!g_debugBypassSceneGate &&
-            !IsCriticalMonochromeTriggerFrame(lastfound)) {
-          if (keepTriggersInternal ||
-              mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
-            mySerum.triggerID = 0xffffffff;
-          // Scene is active and not interruptable
-          if (g_profileDynamicHotPaths && !sceneFrameRequested) {
-            ++g_profileNoFrameReturns;
-          }
-          MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
-          return IDENTIFY_NO_FRAME;
-        }
-        if (IsCriticalMonochromeTriggerFrame(lastfound)) {
-          DebugLogSceneEvent(
-              "stop-critical-monochrome-trigger",
-              static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame,
-              sceneFrameCount, sceneDurationPerFrame, sceneOptionFlags,
-              sceneInterruptable, sceneStartImmediately, sceneRepeatCount);
-          sceneFrameCount = 0;
-          sceneIsLastForegroundFrame = false;
-          sceneIsLastBackgroundFrame = false;
-          sceneEndHoldUntilMs = 0;
-          sceneEndHoldDurationMs = 0;
-          sceneNextFrameAtMs = 0;
-          mySerum.rotationtimer = 0;
-          ForceNormalFrameRefreshAfterSceneEnd();
-        }
+    if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
+        !sceneFrameRequested &&
+        (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
+        !sceneInterruptable) {
+      if (DebugTraceMatches(g_debugCurrentInputCrc, lastfound)) {
+        Log("Serum debug v2 gate: inputCrc=%u frameId=%u "
+            "gate=scene-noninterruptable currentFrame=%u sceneFrameCount=%u "
+            "endHoldUntil=%u bypass=%s",
+            g_debugCurrentInputCrc, lastfound, sceneCurrentFrame,
+            sceneFrameCount, sceneEndHoldUntilMs,
+            g_debugBypassSceneGate ? "true" : "false");
       }
-
-      // frame identified
-      lastframe_found = now;
-      if (maxFramesToSkip) {
-        framesSkippedCounter = 0;
-      }
-
-      if (frameID == IDENTIFY_SAME_FRAME) {
-        if (cromloaded && enabled && lastfound < g_serumData.nframes &&
-            DebugIdentifyVerboseEnabled() &&
-            DebugTraceMatchesInputCrc(g_debugCurrentInputCrc)) {
-          Log("Serum debug identify same-frame: inputCrc=%u lastfound=%u "
-              "sceneRequested=%s triggerId=%u",
-              g_debugCurrentInputCrc, lastfound,
-              sceneFrameRequested ? "true" : "false",
-              g_serumData.triggerIDs[lastfound][0]);
-        }
-        if (cromloaded && enabled && DebugTraceAllInputsEnabled()) {
-          Log("Serum debug input result: api=v2 inputCrc=%u result=same-frame "
-              "lastfound=%u sceneRequested=%s",
-              g_debugCurrentInputCrc, lastfound,
-              sceneFrameRequested ? "true" : "false");
-        }
+      if (!g_debugBypassSceneGate &&
+          !IsCriticalMonochromeTriggerFrame(lastfound)) {
         if (keepTriggersInternal ||
             mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
           mySerum.triggerID = 0xffffffff;
+        // Scene is active and not interruptable
         if (g_profileDynamicHotPaths && !sceneFrameRequested) {
+          ++g_profileNoFrameReturns;
+        }
+        MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
+        return IDENTIFY_NO_FRAME;
+      }
+      if (IsCriticalMonochromeTriggerFrame(lastfound)) {
+        DebugLogSceneEvent(
+            "stop-critical-monochrome-trigger",
+            static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame,
+            sceneFrameCount, sceneDurationPerFrame, sceneOptionFlags,
+            sceneInterruptable, sceneStartImmediately, sceneRepeatCount);
+        sceneFrameCount = 0;
+        sceneIsLastForegroundFrame = false;
+        sceneIsLastBackgroundFrame = false;
+        sceneEndHoldUntilMs = 0;
+        sceneEndHoldDurationMs = 0;
+        sceneNextFrameAtMs = 0;
+        mySerum.rotationtimer = 0;
+        ForceNormalFrameRefreshAfterSceneEnd();
+      }
+    }
+
+    // frame identified
+    lastframe_found = now;
+    if (maxFramesToSkip) {
+      framesSkippedCounter = 0;
+    }
+
+    if (frameID == IDENTIFY_SAME_FRAME) {
+      if (cromloaded && enabled && lastfound < g_serumData.nframes &&
+          DebugIdentifyVerboseEnabled() &&
+          DebugTraceMatchesInputCrc(g_debugCurrentInputCrc)) {
+        Log("Serum debug identify same-frame: inputCrc=%u lastfound=%u "
+            "sceneRequested=%s triggerId=%u",
+            g_debugCurrentInputCrc, lastfound,
+            sceneFrameRequested ? "true" : "false",
+            g_serumData.triggerIDs[lastfound][0]);
+      }
+      if (cromloaded && enabled && DebugTraceAllInputsEnabled()) {
+        Log("Serum debug input result: api=v2 inputCrc=%u result=same-frame "
+            "lastfound=%u sceneRequested=%s",
+            g_debugCurrentInputCrc, lastfound,
+            sceneFrameRequested ? "true" : "false");
+      }
+      if (keepTriggersInternal ||
+          mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
+        mySerum.triggerID = 0xffffffff;
+      if (g_profileDynamicHotPaths && !sceneFrameRequested) {
+        ++g_profileSameFrameReturns;
+      }
+      MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
+      return IDENTIFY_SAME_FRAME;
+    }
+
+    mySerum.frameID = frameID;
+    if (DebugTraceAllInputsEnabled()) {
+      Log("Serum debug input result: api=v2 inputCrc=%u result=frame "
+          "frameId=%u sceneRequested=%s",
+          g_debugCurrentInputCrc, frameID,
+          sceneFrameRequested ? "true" : "false");
+    }
+    if (DebugIdentifyVerboseEnabled() &&
+        DebugTraceMatches(g_debugCurrentInputCrc, frameID)) {
+      Log("Serum debug identify result: inputCrc=%u frameId=%u "
+          "sceneRequested=%s triggerId=%u",
+          g_debugCurrentInputCrc, frameID,
+          sceneFrameRequested ? "true" : "false",
+          g_serumData.triggerIDs[lastfound][0]);
+    } else if (DebugTraceAllInputsEnabled() && !sceneFrameRequested) {
+      Log("Serum debug trigger candidate: inputCrc=%u frameId=%u "
+          "triggerId=%u "
+          "lastTriggerId=%u",
+          g_debugCurrentInputCrc, frameID,
+          g_serumData.triggerIDs[lastfound][0], lastTriggerID);
+    }
+    if (!sceneFrameRequested) {
+      memcpy(lastFrame, frame, g_serumData.fwidth * g_serumData.fheight);
+      lastFrameId = frameID;
+      const uint32_t matchedTriggerId = g_serumData.triggerIDs[lastfound][0];
+
+      if (sceneFrameCount > 0 &&
+          (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
+              FLAG_SCENE_AS_BACKGROUND &&
+          lastTriggerID < MONOCHROME_TRIGGER_ID &&
+          matchedTriggerId == lastTriggerID) {
+        // New frame has the same Trigger ID, continuing an already running
+        // seamless looped scene.
+        // Wait for the next rotation to have a smooth transition.
+        if (g_profileDynamicHotPaths) {
           ++g_profileSameFrameReturns;
         }
         MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
         return IDENTIFY_SAME_FRAME;
-      }
-
-      mySerum.frameID = frameID;
-      if (DebugTraceAllInputsEnabled()) {
-        Log("Serum debug input result: api=v2 inputCrc=%u result=frame "
-            "frameId=%u sceneRequested=%s",
-            g_debugCurrentInputCrc, frameID,
-            sceneFrameRequested ? "true" : "false");
-      }
-      if (DebugIdentifyVerboseEnabled() &&
-          DebugTraceMatches(g_debugCurrentInputCrc, frameID)) {
-        Log("Serum debug identify result: inputCrc=%u frameId=%u "
-            "sceneRequested=%s triggerId=%u",
-            g_debugCurrentInputCrc, frameID,
-            sceneFrameRequested ? "true" : "false",
-            g_serumData.triggerIDs[lastfound][0]);
-      } else if (DebugTraceAllInputsEnabled() && !sceneFrameRequested) {
-        Log("Serum debug trigger candidate: inputCrc=%u frameId=%u "
-            "triggerId=%u "
-            "lastTriggerId=%u",
-            g_debugCurrentInputCrc, frameID,
-            g_serumData.triggerIDs[lastfound][0], lastTriggerID);
-      }
-      if (!sceneFrameRequested) {
-        memcpy(lastFrame, frame, g_serumData.fwidth * g_serumData.fheight);
-        lastFrameId = frameID;
-        const uint32_t matchedTriggerId = g_serumData.triggerIDs[lastfound][0];
-
+      } else if (sceneIsLastBackgroundFrame &&
+                  (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
+                      FLAG_SCENE_AS_BACKGROUND &&
+                  lastTriggerID < MONOCHROME_TRIGGER_ID &&
+                  matchedTriggerId == lastTriggerID) {
+        // New frame has the same Trigger ID, continuing an already running.
+      } else if (sceneIsLastForegroundFrame &&
+                  lastTriggerID < MONOCHROME_TRIGGER_ID &&
+                  matchedTriggerId == lastTriggerID &&
+                  ShouldSuppressFinishedSceneRetrigger(matchedTriggerId)) {
+        // Keep the last visible scene frame instead of immediately
+        // retriggering the same scene on the next matching normal frame.
+        if (g_profileDynamicHotPaths) {
+          ++g_profileSameFrameReturns;
+        }
+        MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
+        return IDENTIFY_SAME_FRAME;
+      } else {
         if (sceneFrameCount > 0 &&
-            (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
-                FLAG_SCENE_AS_BACKGROUND &&
-            lastTriggerID < MONOCHROME_TRIGGER_ID &&
-            matchedTriggerId == lastTriggerID) {
-          // New frame has the same Trigger ID, continuing an already running
-          // seamless looped scene.
-          // Wait for the next rotation to have a smooth transition.
-          if (g_profileDynamicHotPaths) {
-            ++g_profileSameFrameReturns;
-          }
-          MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
-          return IDENTIFY_SAME_FRAME;
-        } else if (sceneIsLastBackgroundFrame &&
-                   (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
-                       FLAG_SCENE_AS_BACKGROUND &&
-                   lastTriggerID < MONOCHROME_TRIGGER_ID &&
-                   matchedTriggerId == lastTriggerID) {
-          // New frame has the same Trigger ID, continuing an already running.
-        } else if (sceneIsLastForegroundFrame &&
-                   lastTriggerID < MONOCHROME_TRIGGER_ID &&
-                   matchedTriggerId == lastTriggerID &&
-                   ShouldSuppressFinishedSceneRetrigger(matchedTriggerId)) {
-          // Keep the last visible scene frame instead of immediately
-          // retriggering the same scene on the next matching normal frame.
-          if (g_profileDynamicHotPaths) {
-            ++g_profileSameFrameReturns;
-          }
-          MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
-          return IDENTIFY_SAME_FRAME;
-        } else {
-          if (sceneFrameCount > 0 &&
-              (sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
-                  FLAG_SCENE_RESUME_IF_RETRIGGERED &&
-              lastTriggerID < 0xffffffff &&
-              sceneCurrentFrame < sceneFrameCount) {
-            g_sceneResumeState[lastTriggerID] = {sceneCurrentFrame, now};
+            (sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
+                FLAG_SCENE_RESUME_IF_RETRIGGERED &&
+            lastTriggerID < 0xffffffff &&
+            sceneCurrentFrame < sceneFrameCount) {
+          g_sceneResumeState[lastTriggerID] = {sceneCurrentFrame, now};
+        }
+
+        // stop any scene
+        if (sceneFrameCount > 0 || sceneEndHoldUntilMs > 0) {
+          DebugLogSceneEvent(
+              "stop-normal-frame", static_cast<uint16_t>(lastTriggerID),
+              sceneCurrentFrame, sceneFrameCount, sceneDurationPerFrame,
+              sceneOptionFlags, sceneInterruptable, sceneStartImmediately,
+              sceneRepeatCount);
+        }
+        sceneFrameCount = 0;
+        sceneIsLastForegroundFrame = false;
+        sceneIsLastBackgroundFrame = false;
+        sceneEndHoldUntilMs = 0;
+        sceneEndHoldDurationMs = 0;
+        sceneNextFrameAtMs = 0;
+        mySerum.rotationtimer = 0;
+
+        // lastfound is set by Identify_Frame, check if we have a new PUP
+        // trigger
+        if (!monochromeMode &&
+            (g_serumData.triggerIDs[lastfound][0] != lastTriggerID ||
+              lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT))) {
+          lastTriggerID = mySerum.triggerID =
+              g_serumData.triggerIDs[lastfound][0];
+          lasttriggerTimestamp = now;
+          if (DebugTraceAllInputsEnabled()) {
+            Log("Serum debug trigger commit: inputCrc=%u frameId=%u "
+                "triggerId=%u",
+                g_debugCurrentInputCrc, lastfound, lastTriggerID);
           }
 
-          // stop any scene
-          if (sceneFrameCount > 0 || sceneEndHoldUntilMs > 0) {
-            DebugLogSceneEvent(
-                "stop-normal-frame", static_cast<uint16_t>(lastTriggerID),
-                sceneCurrentFrame, sceneFrameCount, sceneDurationPerFrame,
-                sceneOptionFlags, sceneInterruptable, sceneStartImmediately,
-                sceneRepeatCount);
+          if (DebugTraceAllInputsEnabled()) {
+            Log("Serum debug trigger scene-gate: triggerId=%u "
+                "sceneGeneratorActive=%s triggerValid=%s",
+                lastTriggerID,
+                (g_serumData.sceneGenerator &&
+                  g_serumData.sceneGenerator->isActive())
+                    ? "true"
+                    : "false",
+                lastTriggerID < 0xffffffff ? "true" : "false");
           }
-          sceneFrameCount = 0;
-          sceneIsLastForegroundFrame = false;
-          sceneIsLastBackgroundFrame = false;
-          sceneEndHoldUntilMs = 0;
-          sceneEndHoldDurationMs = 0;
-          sceneNextFrameAtMs = 0;
-          mySerum.rotationtimer = 0;
 
-          // lastfound is set by Identify_Frame, check if we have a new PUP
-          // trigger
-          if (!monochromeMode &&
-              (g_serumData.triggerIDs[lastfound][0] != lastTriggerID ||
-               lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT))) {
-            lastTriggerID = mySerum.triggerID =
-                g_serumData.triggerIDs[lastfound][0];
-            lasttriggerTimestamp = now;
+          if (g_serumData.sceneGenerator->isActive() &&
+              lastTriggerID < 0xffffffff) {
+            const bool hasSceneInfo =
+                g_serumData.sceneGenerator->getSceneInfo(
+                    lastTriggerID, sceneFrameCount, sceneDurationPerFrame,
+                    sceneInterruptable, sceneStartImmediately,
+                    sceneRepeatCount, sceneOptionFlags);
             if (DebugTraceAllInputsEnabled()) {
-              Log("Serum debug trigger commit: inputCrc=%u frameId=%u "
-                  "triggerId=%u",
-                  g_debugCurrentInputCrc, lastfound, lastTriggerID);
+              Log("Serum debug trigger scene-info: triggerId=%u found=%s "
+                  "frameCount=%u duration=%u interruptable=%s "
+                  "startImmediately=%s repeat=%u options=%u",
+                  lastTriggerID, hasSceneInfo ? "true" : "false",
+                  sceneFrameCount, sceneDurationPerFrame,
+                  sceneInterruptable ? "true" : "false",
+                  sceneStartImmediately ? "true" : "false", sceneRepeatCount,
+                  sceneOptionFlags);
             }
-
-            if (DebugTraceAllInputsEnabled()) {
-              Log("Serum debug trigger scene-gate: triggerId=%u "
-                  "sceneGeneratorActive=%s triggerValid=%s",
-                  lastTriggerID,
-                  (g_serumData.sceneGenerator &&
-                   g_serumData.sceneGenerator->isActive())
-                      ? "true"
-                      : "false",
-                  lastTriggerID < 0xffffffff ? "true" : "false");
-            }
-
-            if (g_serumData.sceneGenerator->isActive() &&
-                lastTriggerID < 0xffffffff) {
-              const bool hasSceneInfo =
-                  g_serumData.sceneGenerator->getSceneInfo(
-                      lastTriggerID, sceneFrameCount, sceneDurationPerFrame,
-                      sceneInterruptable, sceneStartImmediately,
-                      sceneRepeatCount, sceneOptionFlags);
-              if (DebugTraceAllInputsEnabled()) {
-                Log("Serum debug trigger scene-info: triggerId=%u found=%s "
-                    "frameCount=%u duration=%u interruptable=%s "
-                    "startImmediately=%s repeat=%u options=%u",
-                    lastTriggerID, hasSceneInfo ? "true" : "false",
-                    sceneFrameCount, sceneDurationPerFrame,
-                    sceneInterruptable ? "true" : "false",
-                    sceneStartImmediately ? "true" : "false", sceneRepeatCount,
-                    sceneOptionFlags);
+            if (hasSceneInfo) {
+              DebugLogSceneEvent("trigger",
+                                  static_cast<uint16_t>(lastTriggerID), 0,
+                                  sceneFrameCount, sceneDurationPerFrame,
+                                  sceneOptionFlags, sceneInterruptable,
+                                  sceneStartImmediately, sceneRepeatCount);
+              const bool sceneIsBackground =
+                  (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
+                  FLAG_SCENE_AS_BACKGROUND;
+              if (sceneIsBackground) {
+                sceneStartImmediately = false;
+              } else {
+                // Foreground scenes and color rotations are mutually
+                // exclusive.
+                StopV2ColorRotations();
               }
-              if (hasSceneInfo) {
-                DebugLogSceneEvent("trigger",
-                                   static_cast<uint16_t>(lastTriggerID), 0,
-                                   sceneFrameCount, sceneDurationPerFrame,
-                                   sceneOptionFlags, sceneInterruptable,
-                                   sceneStartImmediately, sceneRepeatCount);
-                const bool sceneIsBackground =
-                    (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
-                    FLAG_SCENE_AS_BACKGROUND;
-                if (sceneIsBackground) {
-                  sceneStartImmediately = false;
-                } else {
-                  // Foreground scenes and color rotations are mutually
-                  // exclusive.
-                  StopV2ColorRotations();
-                }
-                ConfigureSceneEndHold(lastTriggerID, sceneInterruptable,
-                                      sceneOptionFlags);
-                // Log(DMDUtil_LogLevel_DEBUG, "Serum: trigger ID %lu found in
-                // scenes, frame count=%d, duration=%dms",
-                //     m_pSerum->triggerID, sceneFrameCount,
-                //     sceneDurationPerFrame);
-                sceneCurrentFrame = 0;
-                if ((sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
-                    FLAG_SCENE_RESUME_IF_RETRIGGERED) {
-                  auto it = g_sceneResumeState.find(lastTriggerID);
-                  if (it != g_sceneResumeState.end()) {
-                    if ((now - it->second.timestampMs) <=
-                            SCENE_RESUME_WINDOW_MS &&
-                        it->second.nextFrame < sceneFrameCount) {
-                      sceneCurrentFrame = it->second.nextFrame;
-                    }
-                    g_sceneResumeState.erase(it);
+              ConfigureSceneEndHold(lastTriggerID, sceneInterruptable,
+                                    sceneOptionFlags);
+              // Log(DMDUtil_LogLevel_DEBUG, "Serum: trigger ID %lu found in
+              // scenes, frame count=%d, duration=%dms",
+              //     m_pSerum->triggerID, sceneFrameCount,
+              //     sceneDurationPerFrame);
+              sceneCurrentFrame = 0;
+              if ((sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
+                  FLAG_SCENE_RESUME_IF_RETRIGGERED) {
+                auto it = g_sceneResumeState.find(lastTriggerID);
+                if (it != g_sceneResumeState.end()) {
+                  if ((now - it->second.timestampMs) <=
+                          SCENE_RESUME_WINDOW_MS &&
+                      it->second.nextFrame < sceneFrameCount) {
+                    sceneCurrentFrame = it->second.nextFrame;
                   }
-                } else {
-                  g_sceneResumeState.erase(lastTriggerID);
+                  g_sceneResumeState.erase(it);
                 }
-                if (sceneStartImmediately) {
-                  DebugLogSceneEvent("start-immediate",
-                                     static_cast<uint16_t>(lastTriggerID), 0,
-                                     sceneFrameCount, sceneDurationPerFrame,
-                                     sceneOptionFlags, sceneInterruptable,
-                                     sceneStartImmediately, sceneRepeatCount);
-                  uint32_t sceneRotationResult = Serum_RenderScene();
-                  if (sceneRotationResult & FLAG_RETURNED_V2_SCENE) {
-                    MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
-                    return sceneRotationResult;
-                  }
-                } else if (sceneIsBackground) {
-                  DebugLogSceneEvent("prime-background",
-                                     static_cast<uint16_t>(lastTriggerID), 0,
-                                     sceneFrameCount, sceneDurationPerFrame,
-                                     sceneOptionFlags, sceneInterruptable,
-                                     sceneStartImmediately, sceneRepeatCount);
-                  uint32_t sceneRotationResult = Serum_RenderScene();
-                  if (sceneRotationResult & FLAG_RETURNED_V2_SCENE) {
-                    backgroundScenePrimedThisCall = true;
-                  }
-                }
-                mySerum.rotationtimer = sceneDurationPerFrame;
-                rotationIsScene = true;
+              } else {
+                g_sceneResumeState.erase(lastTriggerID);
               }
+              if (sceneStartImmediately) {
+                DebugLogSceneEvent("start-immediate",
+                                    static_cast<uint16_t>(lastTriggerID), 0,
+                                    sceneFrameCount, sceneDurationPerFrame,
+                                    sceneOptionFlags, sceneInterruptable,
+                                    sceneStartImmediately, sceneRepeatCount);
+                uint32_t sceneRotationResult = Serum_RenderScene();
+                if (sceneRotationResult & FLAG_RETURNED_V2_SCENE) {
+                  MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
+                  return sceneRotationResult;
+                }
+              } else if (sceneIsBackground) {
+                DebugLogSceneEvent("prime-background",
+                                    static_cast<uint16_t>(lastTriggerID), 0,
+                                    sceneFrameCount, sceneDurationPerFrame,
+                                    sceneOptionFlags, sceneInterruptable,
+                                    sceneStartImmediately, sceneRepeatCount);
+                uint32_t sceneRotationResult = Serum_RenderScene();
+                if (sceneRotationResult & FLAG_RETURNED_V2_SCENE) {
+                  backgroundScenePrimedThisCall = true;
+                }
+              }
+              mySerum.rotationtimer = sceneDurationPerFrame;
+              rotationIsScene = true;
             }
           }
         }
       }
+    }
 
-      bool isBackgroundScene = (sceneFrameCount > 0 &&
-                                (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
-                                    FLAG_SCENE_AS_BACKGROUND);
-      bool suppressPlaceholderBackground = isBackgroundScene &&
-                                           !sceneFrameRequested &&
-                                           !backgroundScenePrimedThisCall;
-      bool isBackgroundSceneRequested =
-          isBackgroundScene &&
-          (sceneFrameRequested || backgroundScenePrimedThisCall);
-      uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
-      uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
-          spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
-          wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
-      memset(nosprite, 255, MAX_SPRITES_PER_FRAME);
+    bool isBackgroundScene = (sceneFrameCount > 0 &&
+                              (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
+                                  FLAG_SCENE_AS_BACKGROUND);
+    bool suppressPlaceholderBackground = isBackgroundScene &&
+                                          !sceneFrameRequested &&
+                                          !backgroundScenePrimedThisCall;
+    bool isBackgroundSceneRequested =
+        isBackgroundScene &&
+        (sceneFrameRequested || backgroundScenePrimedThisCall);
+    uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
+    uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
+        spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
+        wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
+    memset(nosprite, 255, MAX_SPRITES_PER_FRAME);
 
-      bool isspr =
-          (sceneFrameRequested && !isBackgroundSceneRequested)
-              ? false
-              : Check_Spritesv2(
-                    isBackgroundSceneRequested ? lastFrame : frame,
-                    isBackgroundSceneRequested ? lastFrameId : lastfound,
-                    nosprite, &nspr, frx, fry, spx, spy, wid, hei);
-      if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
-          FrameHasRenderableContent(lastfound)) {
-        const bool profileNow = g_profileDynamicHotPaths;
-        std::chrono::steady_clock::time_point profStart;
+    bool isspr =
+        (sceneFrameRequested && !isBackgroundSceneRequested)
+            ? false
+            : Check_Spritesv2(
+                  isBackgroundSceneRequested ? lastFrame : frame,
+                  isBackgroundSceneRequested ? lastFrameId : lastfound,
+                  nosprite, &nspr, frx, fry, spx, spy, wid, hei);
+    if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
+        FrameHasRenderableContent(lastfound)) {
+      const bool profileNow = g_profileDynamicHotPaths;
+      std::chrono::steady_clock::time_point profStart;
+      if (profileNow) {
+        profStart = std::chrono::steady_clock::now();
+      }
+      if (!sceneIsLastBackgroundFrame && !backgroundScenePrimedThisCall) {
+        Colorize_Framev2(frame, lastfound, false, false, false,
+                          suppressPlaceholderBackground);
+        DebugHashCurrentOutputFrame(lastfound, false);
+      }
+      if ((isBackgroundSceneRequested) || sceneIsLastBackgroundFrame) {
+        const bool onlyDynamicForeground =
+            (sceneOptionFlags & FLAG_SCENE_ONLY_DYNAMIC_CONTENT) ==
+            FLAG_SCENE_ONLY_DYNAMIC_CONTENT;
+        const bool replaceNonMaxForeground =
+            (sceneOptionFlags & FLAG_SCENE_REPLACE_NONMAX_CONTENT) ==
+            FLAG_SCENE_REPLACE_NONMAX_CONTENT;
+        Colorize_Framev2(lastFrame, lastFrameId, true, onlyDynamicForeground,
+                          replaceNonMaxForeground);
+        DebugHashCurrentOutputFrame(lastFrameId, false);
+      }
+      if (profileNow) {
+        g_profileColorizeFrameV2Ns +=
+            (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - profStart)
+                .count();
+      }
+      if (isspr) {
+        std::chrono::steady_clock::time_point spriteStart;
         if (profileNow) {
-          profStart = std::chrono::steady_clock::now();
+          spriteStart = std::chrono::steady_clock::now();
         }
-        if (!sceneIsLastBackgroundFrame && !backgroundScenePrimedThisCall) {
-          Colorize_Framev2(frame, lastfound, false, false, false,
-                           suppressPlaceholderBackground);
-          DebugHashCurrentOutputFrame(lastfound, false);
+        uint8_t ti = 0;
+        while (ti < nspr) {
+          Colorize_Spritev2(
+              isBackgroundSceneRequested ? lastFrame : frame, nosprite[ti],
+              frx[ti], fry[ti], spx[ti], spy[ti], wid[ti], hei[ti],
+              isBackgroundSceneRequested ? lastFrameId : lastfound);
+          ti++;
         }
-        if ((isBackgroundSceneRequested) || sceneIsLastBackgroundFrame) {
-          const bool onlyDynamicForeground =
-              (sceneOptionFlags & FLAG_SCENE_ONLY_DYNAMIC_CONTENT) ==
-              FLAG_SCENE_ONLY_DYNAMIC_CONTENT;
-          const bool replaceNonMaxForeground =
-              (sceneOptionFlags & FLAG_SCENE_REPLACE_NONMAX_CONTENT) ==
-              FLAG_SCENE_REPLACE_NONMAX_CONTENT;
-          Colorize_Framev2(lastFrame, lastFrameId, true, onlyDynamicForeground,
-                           replaceNonMaxForeground);
-          DebugHashCurrentOutputFrame(lastFrameId, false);
+        if (g_debugStageHashes &&
+            DebugTraceMatches(
+                g_debugCurrentInputCrc,
+                isBackgroundSceneRequested ? lastFrameId : lastfound)) {
+          uint64_t spriteHash = DebugHashBytesFNV1a64(
+              ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) &&
+                mySerum.frame32)
+                  ? static_cast<const void*>(mySerum.frame32)
+                  : static_cast<const void*>(mySerum.frame64),
+              ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) &&
+                mySerum.frame32)
+                  ? static_cast<size_t>(mySerum.width32) * 32 *
+                        sizeof(uint16_t)
+                  : static_cast<size_t>(mySerum.width64) * 64 *
+                        sizeof(uint16_t));
+          Log("Serum debug stage hash: frameId=%u inputCrc=%u "
+              "stage=post-sprites "
+              "hash=%llu sprites=%u",
+              isBackgroundSceneRequested ? lastFrameId : lastfound,
+              g_debugCurrentInputCrc,
+              static_cast<unsigned long long>(spriteHash), nspr);
         }
         if (profileNow) {
-          g_profileColorizeFrameV2Ns +=
+          g_profileColorizeSpriteV2Ns +=
               (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
-                  std::chrono::steady_clock::now() - profStart)
+                  std::chrono::steady_clock::now() - spriteStart)
                   .count();
         }
-        if (isspr) {
-          std::chrono::steady_clock::time_point spriteStart;
-          if (profileNow) {
-            spriteStart = std::chrono::steady_clock::now();
-          }
-          uint8_t ti = 0;
-          while (ti < nspr) {
-            Colorize_Spritev2(
-                isBackgroundSceneRequested ? lastFrame : frame, nosprite[ti],
-                frx[ti], fry[ti], spx[ti], spy[ti], wid[ti], hei[ti],
-                isBackgroundSceneRequested ? lastFrameId : lastfound);
-            ti++;
-          }
-          if (g_debugStageHashes &&
-              DebugTraceMatches(
-                  g_debugCurrentInputCrc,
-                  isBackgroundSceneRequested ? lastFrameId : lastfound)) {
-            uint64_t spriteHash = DebugHashBytesFNV1a64(
-                ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) &&
-                 mySerum.frame32)
-                    ? static_cast<const void*>(mySerum.frame32)
-                    : static_cast<const void*>(mySerum.frame64),
-                ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) &&
-                 mySerum.frame32)
-                    ? static_cast<size_t>(mySerum.width32) * 32 *
-                          sizeof(uint16_t)
-                    : static_cast<size_t>(mySerum.width64) * 64 *
-                          sizeof(uint16_t));
-            Log("Serum debug stage hash: frameId=%u inputCrc=%u "
-                "stage=post-sprites "
-                "hash=%llu sprites=%u",
-                isBackgroundSceneRequested ? lastFrameId : lastfound,
-                g_debugCurrentInputCrc,
-                static_cast<unsigned long long>(spriteHash), nspr);
-          }
-          if (profileNow) {
-            g_profileColorizeSpriteV2Ns +=
-                (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - spriteStart)
-                    .count();
-          }
-        }
-        FinishProfileRenderedFrameOperationMaybe();
-
-        bool allowParallelRotations =
-            (sceneFrameCount == 0) ||
-            ((sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
-             FLAG_SCENE_AS_BACKGROUND);
-        if (!sceneFrameRequested && allowParallelRotations) {
-          uint16_t *pcr32, *pcr64;
-          if (g_serumData.fheight == 32) {
-            pcr32 = g_serumData.colorrotations_v2[lastfound];
-            pcr64 = g_serumData.colorrotations_v2_extra[lastfound];
-          } else {
-            pcr32 = g_serumData.colorrotations_v2_extra[lastfound];
-            pcr64 = g_serumData.colorrotations_v2[lastfound];
-          }
-
-          bool isRotation = false;
-
-          if (mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) {
-            memcpy(mySerum.rotations32, pcr32,
-                   MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
-            for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
-              if (mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION] == 0 ||
-                  mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1] ==
-                      0) {
-                colorrotnexttime32[ti] = 0;
-                continue;
-              }
-              // Reset the timer if the previous frame had this rotation
-              // inactive or if the last init time is more than a new rotation
-              // away. Otherwise, we keep the already running timings for
-              // subsequent frames like blinking PUSH START or GAME OVER.
-              if (colorshiftinittime32[ti] +
-                      mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1] <=
-                  now) {
-                colorshiftinittime32[ti] = now;
-                colorrotnexttime32[ti] =
-                    colorshiftinittime32[ti] +
-                    mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1];
-              }
-
-              if (colorrotnexttime32[ti] <= now)
-                colorrotnexttime32[ti] =
-                    colorshiftinittime32[ti] +
-                    mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1];
-
-              isRotation = true;
-            }
-          } else {
-            ResetRotationPlane32();
-          }
-          if (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) {
-            memcpy(mySerum.rotations64, pcr64,
-                   MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
-            for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
-              if (mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION] == 0 ||
-                  mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1] ==
-                      0) {
-                colorrotnexttime64[ti] = 0;
-                continue;
-              }
-              // Reset the timer if the previous frame had this rotation
-              // inactive or if the last init time is more than a new rotation
-              // away. Otherwise, we keep the already running timings for
-              // subsequent frames like blinking PUSH START or GAME OVER.
-              if (colorshiftinittime64[ti] +
-                      mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1] <=
-                  now) {
-                colorshiftinittime64[ti] = now;
-                colorrotnexttime64[ti] =
-                    colorshiftinittime64[ti] +
-                    mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1];
-              }
-
-              if (colorrotnexttime64[ti] <= now)
-                colorrotnexttime64[ti] =
-                    colorshiftinittime64[ti] +
-                    mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1];
-
-              isRotation = true;
-            }
-          } else {
-            ResetRotationPlane64();
-          }
-
-          uint32_t rotationTimer = isRotation ? Calc_Next_Rotationv2(now) : 0;
-          if (rotationIsScene && mySerum.rotationtimer > 0) {
-            if (rotationTimer == 0) {
-              // Scene timer only.
-            } else {
-              mySerum.rotationtimer =
-                  std::min(mySerum.rotationtimer, rotationTimer);
-            }
-          } else {
-            mySerum.rotationtimer = rotationTimer;
-          }
-        }
-
-        if (0 == mySerum.rotationtimer &&
-            g_serumData.sceneGenerator->isActive() && !sceneFrameRequested &&
-            sceneEndHoldUntilMs == 0 && sceneCurrentFrame >= sceneFrameCount &&
-            g_serumData.sceneGenerator->getAutoStartSceneInfo(
-                sceneFrameCount, sceneDurationPerFrame, sceneInterruptable,
-                sceneStartImmediately, sceneRepeatCount, sceneOptionFlags)) {
-          ConfigureSceneEndHold(
-              g_serumData.sceneGenerator->getAutoStartSceneId(),
-              sceneInterruptable, sceneOptionFlags);
-          mySerum.rotationtimer =
-              g_serumData.sceneGenerator->getAutoStartTimer();
-          rotationIsScene = true;
-        }
-
-        if (keepTriggersInternal ||
-            mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
-          mySerum.triggerID = 0xffffffff;
-
-        MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
-        return (uint32_t)mySerum.rotationtimer |
-               (rotationIsScene ? FLAG_RETURNED_V2_SCENE : 0);
       }
+      FinishProfileRenderedFrameOperationMaybe();
+
+      bool allowParallelRotations =
+          (sceneFrameCount == 0) ||
+          ((sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==
+            FLAG_SCENE_AS_BACKGROUND);
+      if (!sceneFrameRequested && allowParallelRotations) {
+        uint16_t *pcr32, *pcr64;
+        if (g_serumData.fheight == 32) {
+          pcr32 = g_serumData.colorrotations_v2[lastfound];
+          pcr64 = g_serumData.colorrotations_v2_extra[lastfound];
+        } else {
+          pcr32 = g_serumData.colorrotations_v2_extra[lastfound];
+          pcr64 = g_serumData.colorrotations_v2[lastfound];
+        }
+
+        bool isRotation = false;
+
+        if (mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) {
+          memcpy(mySerum.rotations32, pcr32,
+                  MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
+          for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
+            if (mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION] == 0 ||
+                mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1] ==
+                    0) {
+              colorrotnexttime32[ti] = 0;
+              continue;
+            }
+            // Reset the timer if the previous frame had this rotation
+            // inactive or if the last init time is more than a new rotation
+            // away. Otherwise, we keep the already running timings for
+            // subsequent frames like blinking PUSH START or GAME OVER.
+            if (colorshiftinittime32[ti] +
+                    mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1] <=
+                now) {
+              colorshiftinittime32[ti] = now;
+              colorrotnexttime32[ti] =
+                  colorshiftinittime32[ti] +
+                  mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1];
+            }
+
+            if (colorrotnexttime32[ti] <= now)
+              colorrotnexttime32[ti] =
+                  colorshiftinittime32[ti] +
+                  mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1];
+
+            isRotation = true;
+          }
+        } else {
+          ResetRotationPlane32();
+        }
+        if (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) {
+          memcpy(mySerum.rotations64, pcr64,
+                  MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * 2);
+          for (uint8_t ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
+            if (mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION] == 0 ||
+                mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1] ==
+                    0) {
+              colorrotnexttime64[ti] = 0;
+              continue;
+            }
+            // Reset the timer if the previous frame had this rotation
+            // inactive or if the last init time is more than a new rotation
+            // away. Otherwise, we keep the already running timings for
+            // subsequent frames like blinking PUSH START or GAME OVER.
+            if (colorshiftinittime64[ti] +
+                    mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1] <=
+                now) {
+              colorshiftinittime64[ti] = now;
+              colorrotnexttime64[ti] =
+                  colorshiftinittime64[ti] +
+                  mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1];
+            }
+
+            if (colorrotnexttime64[ti] <= now)
+              colorrotnexttime64[ti] =
+                  colorshiftinittime64[ti] +
+                  mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1];
+
+            isRotation = true;
+          }
+        } else {
+          ResetRotationPlane64();
+        }
+
+        uint32_t rotationTimer = isRotation ? Calc_Next_Rotationv2(now) : 0;
+        if (rotationIsScene && mySerum.rotationtimer > 0) {
+          if (rotationTimer == 0) {
+            // Scene timer only.
+          } else {
+            mySerum.rotationtimer =
+                std::min(mySerum.rotationtimer, rotationTimer);
+          }
+        } else {
+          mySerum.rotationtimer = rotationTimer;
+        }
+      }
+
+      if (0 == mySerum.rotationtimer &&
+          g_serumData.sceneGenerator->isActive() && !sceneFrameRequested &&
+          sceneEndHoldUntilMs == 0 && sceneCurrentFrame >= sceneFrameCount &&
+          g_serumData.sceneGenerator->getAutoStartSceneInfo(
+              sceneFrameCount, sceneDurationPerFrame, sceneInterruptable,
+              sceneStartImmediately, sceneRepeatCount, sceneOptionFlags)) {
+        ConfigureSceneEndHold(
+            g_serumData.sceneGenerator->getAutoStartSceneId(),
+            sceneInterruptable, sceneOptionFlags);
+        mySerum.rotationtimer =
+            g_serumData.sceneGenerator->getAutoStartTimer();
+        rotationIsScene = true;
+      }
+
+      if (keepTriggersInternal ||
+          mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
+        mySerum.triggerID = 0xffffffff;
+
+      MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
+      return (uint32_t)mySerum.rotationtimer |
+              (rotationIsScene ? FLAG_RETURNED_V2_SCENE : 0);
     }
   }
 
