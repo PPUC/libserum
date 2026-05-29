@@ -4407,7 +4407,7 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
     // (accidentally). Black frames in-game should be shown. In monochrome
     // settings mode, they should not end the monochrome mode.
     if (!IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
-      monochromeMode = (triggerId == MONOCHROME_TRIGGER_ID);
+      monochromeMode = (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
       monochromePaletteMode = false;
       if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
         g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
