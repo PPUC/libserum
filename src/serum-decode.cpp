@@ -4716,11 +4716,14 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    // Ignore any triggers for full black frames as they appear in-game and in
-    // monochrome settings mode and we don't know what authors did with them
-    // (accidentally). Black frames in-game should be shown. In monochrome
-    // settings mode, they should not end the monochrome mode.
-    if (!IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
+    // Black frames can distort a monochrome stream. Example: flashing text in
+    // a WPC settings menu. This could trigger a random black frame in the
+    // project, if this black frame doesn't have the appropriate monochrome
+    // trigger, it would end the monochrome stream and stay stuck on a black
+    // frame until a frame in the project is detected again. The code below
+    // takes care of that.
+    if (!IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight) ||
+        (!monochromeMode && !monochromePaletteMode)) {
       monochromeMode =
           (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
       monochromePaletteMode = false;
