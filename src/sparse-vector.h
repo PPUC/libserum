@@ -337,6 +337,7 @@ class SparseVector {
 
     // Fast path for dense/small ID spaces (frame IDs, sprite IDs, etc).
     // This avoids hash lookup overhead in operator[] hot loops.
+    // Assumes packedIds is sorted (enforced at load/creation time).
     packedDenseIndexById.clear();
     const uint32_t maxPackedId = packedIds.back();
     if (maxPackedId <= 1000000 &&
@@ -347,6 +348,71 @@ class SparseVector {
         packedDenseIndexById[packedIds[i]] = i;
       }
     }
+  }
+
+  // Repair corrupted/unsorted packedIds after deserialization.
+  // This runs once at load time, not on every hot-path access.
+  void repairCorruptedPackedData() {
+    if (packedIds.empty() || packedOffsets.size() != packedIds.size() ||
+        packedSizes.size() != packedIds.size()) {
+      return;
+    }
+
+    // Check if already sorted
+    bool needsSort = false;
+    for (size_t i = 1; i < packedIds.size(); ++i) {
+      if (packedIds[i] < packedIds[i - 1]) {
+        needsSort = true;
+        break;
+      }
+    }
+    if (!needsSort) {
+      return;  // Already sorted, no repair needed
+    }
+
+    // Rebuild sorted structures to match ID ordering
+    std::vector<uint32_t> indexOrder(packedIds.size());
+    for (size_t i = 0; i < packedIds.size(); ++i) {
+      indexOrder[i] = static_cast<uint32_t>(i);
+    }
+
+    std::sort(indexOrder.begin(), indexOrder.end(),
+              [this](uint32_t a, uint32_t b) {
+                return packedIds[a] < packedIds[b];
+              });
+
+    // Rebuild packed data in sorted order
+    std::vector<uint32_t> newIds;
+    std::vector<uint32_t> newOffsets;
+    std::vector<uint32_t> newSizes;
+    std::vector<uint8_t> newBlob;
+
+    newIds.reserve(packedIds.size());
+    newOffsets.reserve(packedOffsets.size());
+    newSizes.reserve(packedSizes.size());
+    newBlob.reserve(packedBlob.size());
+
+    uint32_t offset = 0;
+    for (uint32_t idx : indexOrder) {
+      newIds.push_back(packedIds[idx]);
+      const uint32_t oldOffset = packedOffsets[idx];
+      const uint32_t size = packedSizes[idx];
+
+      if (oldOffset <= packedBlob.size() && size <= packedBlob.size() - oldOffset) {
+        newOffsets.push_back(offset);
+        newSizes.push_back(size);
+        newBlob.insert(newBlob.end(), packedBlob.begin() + oldOffset,
+                       packedBlob.begin() + oldOffset + size);
+        offset += size;
+      }
+    }
+
+    packedIds = std::move(newIds);
+    packedOffsets = std::move(newOffsets);
+    packedSizes = std::move(newSizes);
+    packedBlob = std::move(newBlob);
+    packedIndexById.clear();
+    packedDenseIndexById.clear();
   }
 
   static uint64_t hashPayload(const uint8_t *bytes, size_t size) {
@@ -957,7 +1023,13 @@ class SparseVector {
   template <class Archive>
   void serialize(Archive &ar) {
     if constexpr (Archive::is_saving::value) {
-      if (!useIndex && packedIds.empty() && !data.empty()) {
+      // Ensure packedIds is built and sorted before serialization.
+      // If packedIds was modified by set()/setParent()/etc, it must be sorted for load-time compatibility.
+      if (!useIndex && data.empty() && !packedIds.empty()) {
+        // packedIds already exists; verify and repair if needed
+        repairCorruptedPackedData();
+      } else if (!useIndex && packedIds.empty() && !data.empty()) {
+        // Build from data map (ensures sorted order)
         buildPackedFromData();
       }
 
@@ -985,6 +1057,8 @@ class SparseVector {
       clearPacked();
       if (!useIndex) {
         ar(packedIds, packedOffsets, packedSizes, packedBlob);
+        // Repair any corruption/unsorted data from file ONCE at load time
+        repairCorruptedPackedData();
         ensurePackedIndex();
       }
     }
