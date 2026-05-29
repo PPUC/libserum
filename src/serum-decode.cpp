@@ -4717,11 +4717,10 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     if (IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
       g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
     } else {
-      monochromeMode =
-          (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
+      uint32_t triggerId = g_serumData.triggerIDs[lastfound][0];
+      monochromeMode = (triggerId == MONOCHROME_TRIGGER_ID);
       monochromePaletteMode = false;
-      if (g_serumData.triggerIDs[lastfound][0] ==
-          MONOCHROME_PALETTE_TRIGGER_ID) {
+      if (triggerId == MONOCHROME_PALETTE_TRIGGER_ID) {
         monochromePaletteMode = CaptureMonochromePaletteFromFrameV2(lastfound);
         monochromeMode = false;
       }
