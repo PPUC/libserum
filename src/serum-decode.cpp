@@ -4714,7 +4714,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     // monochrome settings mode and we don't know what authors did with them
     // (accidentally). Black frames in-game should be shown. In monochrome
     // settings mode, they should not end the monochrome mode.
-    if (!IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
+    if (IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
+      g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
+    } else {
       monochromeMode =
           (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
       monochromePaletteMode = false;
@@ -4725,8 +4727,6 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       }
       if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
         g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
-    } else {
-      //g_serumData.triggerIDs[lastfound][0] = MONOCHROME_TRIGGER_ID;
     }
 
     if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
