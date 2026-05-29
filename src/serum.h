@@ -25,8 +25,12 @@ enum {
   FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED = 2,
   // run scene as background
   FLAG_SCENE_AS_BACKGROUND = 4,
+  // keep only dynamic zones, sprites and shadows in the foreground
   FLAG_SCENE_ONLY_DYNAMIC_CONTENT = 8,
   FLAG_SCENE_RESUME_IF_RETRIGGERED = 16,
+  // with background scenes, keep only max-brightness non-dynamic pixels in
+  // the foreground
+  FLAG_SCENE_REPLACE_NONMAX_CONTENT = 32,
 };
 
 enum  // returned by Serum_Load in *SerumVersion
@@ -180,6 +184,7 @@ typedef uint32_t (*Serum_ColorizeFunc)(uint8_t* frame);
 typedef uint32_t (*Serum_RotateFunc)(void);
 typedef const char* (*Serum_GetVersionFunc)(void);
 typedef const char* (*Serum_GetMinorVersionFunc)(void);
+typedef const char* (*Serum_GetLastErrorMessageFunc)(void);
 typedef void (*Serum_SetLogCallbackFunc)(Serum_LogCallback callback,
                                          const void* userData);
 typedef void (*Serum_SetIgnoreUnknownFramesTimeoutFunc)(uint16_t milliseconds);
