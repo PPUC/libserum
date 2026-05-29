@@ -4402,108 +4402,109 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    if ((monochromeMode || monochromePaletteMode) &&
-        IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
-      frameID = IDENTIFY_NO_FRAME;
-    }
-    if (frameID != IDENTIFY_NO_FRAME) {
-      uint32_t triggerId = g_serumData.triggerIDs[lastfound][0];
+    // Ignore any triggers for full black frames as they appear in-game and in
+    // monochrome settings mode and we don't know what authors did with them
+    // (accidentally). Black frames in-game should be shown. In monochrome
+    // settings mode, they should not end the monochrome mode.
+    if (!IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
       monochromeMode = (triggerId == MONOCHROME_TRIGGER_ID);
       monochromePaletteMode = false;
       if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
         g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
+    } else {
+      g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
+    }
 
-      lastframe_found = now;
-      if (maxFramesToSkip) {
-        framesSkippedCounter = 0;
+    lastframe_found = now;
+    if (maxFramesToSkip) {
+      framesSkippedCounter = 0;
+    }
+
+    if (frameID == IDENTIFY_SAME_FRAME) {
+      if (cromloaded && enabled && lastfound < g_serumData.nframes &&
+          DebugIdentifyVerboseEnabled() &&
+          DebugTraceMatchesInputCrc(g_debugCurrentInputCrc)) {
+        Log("Serum debug identify same-frame: inputCrc=%u lastfound=%u "
+            "sceneRequested=%s triggerId=%u",
+            g_debugCurrentInputCrc, lastfound, "false",
+            g_serumData.triggerIDs[lastfound][0]);
+      }
+      if (cromloaded && enabled && DebugTraceAllInputsEnabled()) {
+        Log("Serum debug input result: api=v1 inputCrc=%u result=same-frame "
+            "lastfound=%u",
+            g_debugCurrentInputCrc, lastfound);
+      }
+      if (keepTriggersInternal ||
+          mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
+        mySerum.triggerID = 0xffffffff;
+      return IDENTIFY_SAME_FRAME;
+    }
+
+    mySerum.frameID = frameID;
+    mySerum.rotationtimer = 0;
+    if (DebugTraceAllInputsEnabled()) {
+      Log("Serum debug input result: api=v1 inputCrc=%u result=frame "
+          "frameId=%u",
+          g_debugCurrentInputCrc, frameID);
+    }
+
+    uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
+    uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
+        spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
+        wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
+    memset(nosprite, 255, MAX_SPRITES_PER_FRAME);
+
+    bool isspr = Check_Spritesv1(frame, (uint32_t)lastfound, nosprite, &nspr,
+                                 frx, fry, spx, spy, wid, hei);
+    if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
+        FrameHasRenderableContent(lastfound)) {
+      Colorize_Framev1(frame, lastfound);
+      Copy_Frame_Palette(lastfound);
+      {
+        uint32_t ti = 0;
+        while (ti < nspr) {
+          Colorize_Spritev1(nosprite[ti], frx[ti], fry[ti], spx[ti], spy[ti],
+                            wid[ti], hei[ti]);
+          ti++;
+        }
+      }
+      memcpy(mySerum.rotations, g_serumData.colorrotations[lastfound],
+             MAX_COLOR_ROTATIONS * 3);
+      for (uint32_t ti = 0; ti < MAX_COLOR_ROTATIONS; ti++) {
+        if (mySerum.rotations[ti * 3] == 255) {
+          colorrotnexttime[ti] = 0;
+          continue;
+        }
+        // Reset the timer if the previous frame had this rotation inactive or
+        // if the last init time is more than a new rotation away. Otherwise,
+        // we keep the already running timings for subsequent frames like
+        // blinking PUSH START or GAME OVER.
+        if ((colorshiftinittime[ti] + mySerum.rotations[ti * 3 + 2] * 10) <=
+            now) {
+          colorshiftinittime[ti] = now;
+          colorrotnexttime[ti] =
+              colorshiftinittime[ti] + mySerum.rotations[ti * 3 + 2] * 10;
+        }
+
+        if (colorrotnexttime[ti] <= now)
+          colorrotnexttime[ti] =
+              colorshiftinittime[ti] + mySerum.rotations[ti * 3 + 2] * 10;
       }
 
-      if (frameID == IDENTIFY_SAME_FRAME) {
-        if (cromloaded && enabled && lastfound < g_serumData.nframes &&
-            DebugIdentifyVerboseEnabled() &&
-            DebugTraceMatchesInputCrc(g_debugCurrentInputCrc)) {
-          Log("Serum debug identify same-frame: inputCrc=%u lastfound=%u "
-              "sceneRequested=%s triggerId=%u",
-              g_debugCurrentInputCrc, lastfound, "false",
-              g_serumData.triggerIDs[lastfound][0]);
-        }
-        if (cromloaded && enabled && DebugTraceAllInputsEnabled()) {
-          Log("Serum debug input result: api=v1 inputCrc=%u result=same-frame "
-              "lastfound=%u",
-              g_debugCurrentInputCrc, lastfound);
-        }
-        if (keepTriggersInternal ||
-            mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
-          mySerum.triggerID = 0xffffffff;
-        return IDENTIFY_SAME_FRAME;
+      mySerum.rotationtimer = Calc_Next_Rotationv1(now);
+
+      if (g_serumData.triggerIDs[lastfound][0] != lastTriggerID ||
+          lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT)) {
+        lastTriggerID = mySerum.triggerID =
+            g_serumData.triggerIDs[lastfound][0];
+        lasttriggerTimestamp = now;
       }
 
-      mySerum.frameID = frameID;
-      mySerum.rotationtimer = 0;
-      if (DebugTraceAllInputsEnabled()) {
-        Log("Serum debug input result: api=v1 inputCrc=%u result=frame "
-            "frameId=%u",
-            g_debugCurrentInputCrc, frameID);
-      }
+      if (keepTriggersInternal ||
+          mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
+        mySerum.triggerID = 0xffffffff;
 
-      uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
-      uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
-          spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
-          wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
-      memset(nosprite, 255, MAX_SPRITES_PER_FRAME);
-
-      bool isspr = Check_Spritesv1(frame, (uint32_t)lastfound, nosprite, &nspr,
-                                   frx, fry, spx, spy, wid, hei);
-      if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
-          FrameHasRenderableContent(lastfound)) {
-        Colorize_Framev1(frame, lastfound);
-        Copy_Frame_Palette(lastfound);
-        {
-          uint32_t ti = 0;
-          while (ti < nspr) {
-            Colorize_Spritev1(nosprite[ti], frx[ti], fry[ti], spx[ti], spy[ti],
-                              wid[ti], hei[ti]);
-            ti++;
-          }
-        }
-        memcpy(mySerum.rotations, g_serumData.colorrotations[lastfound],
-               MAX_COLOR_ROTATIONS * 3);
-        for (uint32_t ti = 0; ti < MAX_COLOR_ROTATIONS; ti++) {
-          if (mySerum.rotations[ti * 3] == 255) {
-            colorrotnexttime[ti] = 0;
-            continue;
-          }
-          // Reset the timer if the previous frame had this rotation inactive or
-          // if the last init time is more than a new rotation away. Otherwise,
-          // we keep the already running timings for subsequent frames like
-          // blinking PUSH START or GAME OVER.
-          if ((colorshiftinittime[ti] + mySerum.rotations[ti * 3 + 2] * 10) <=
-              now) {
-            colorshiftinittime[ti] = now;
-            colorrotnexttime[ti] =
-                colorshiftinittime[ti] + mySerum.rotations[ti * 3 + 2] * 10;
-          }
-
-          if (colorrotnexttime[ti] <= now)
-            colorrotnexttime[ti] =
-                colorshiftinittime[ti] + mySerum.rotations[ti * 3 + 2] * 10;
-        }
-
-        mySerum.rotationtimer = Calc_Next_Rotationv1(now);
-
-        if (g_serumData.triggerIDs[lastfound][0] != lastTriggerID ||
-            lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT)) {
-          lastTriggerID = mySerum.triggerID =
-              g_serumData.triggerIDs[lastfound][0];
-          lasttriggerTimestamp = now;
-        }
-
-        if (keepTriggersInternal ||
-            mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
-          mySerum.triggerID = 0xffffffff;
-
-        return mySerum.rotationtimer;
-      }
+      return mySerum.rotationtimer;
     }
   }
 
@@ -4709,60 +4710,63 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    if ((monochromeMode || monochromePaletteMode) &&
-        IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
-      frameID = IDENTIFY_NO_FRAME;
-    }
-    if (frameID != IDENTIFY_NO_FRAME) {
-      uint32_t triggerId = g_serumData.triggerIDs[lastfound][0];
-      monochromeMode = (triggerId == MONOCHROME_TRIGGER_ID);
+    // Ignore any triggers for full black frames as they appear in-game and in
+    // monochrome settings mode and we don't know what authors did with them
+    // (accidentally). Black frames in-game should be shown. In monochrome
+    // settings mode, they should not end the monochrome mode.
+    if (!IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
+      monochromeMode =
+          (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
       monochromePaletteMode = false;
-      if (triggerId == MONOCHROME_PALETTE_TRIGGER_ID) {
+      if (g_serumData.triggerIDs[lastfound][0] ==
+          MONOCHROME_PALETTE_TRIGGER_ID) {
         monochromePaletteMode = CaptureMonochromePaletteFromFrameV2(lastfound);
         monochromeMode = false;
       }
       if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
         g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
+    } else {
+      g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
+    }
 
-      if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
-          !sceneFrameRequested &&
-          (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
-          !sceneInterruptable) {
-        if (DebugTraceMatches(g_debugCurrentInputCrc, lastfound)) {
-          Log("Serum debug v2 gate: inputCrc=%u frameId=%u "
-              "gate=scene-noninterruptable currentFrame=%u sceneFrameCount=%u "
-              "endHoldUntil=%u bypass=%s",
-              g_debugCurrentInputCrc, lastfound, sceneCurrentFrame,
-              sceneFrameCount, sceneEndHoldUntilMs,
-              g_debugBypassSceneGate ? "true" : "false");
+    if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
+        !sceneFrameRequested &&
+        (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
+        !sceneInterruptable) {
+      if (DebugTraceMatches(g_debugCurrentInputCrc, lastfound)) {
+        Log("Serum debug v2 gate: inputCrc=%u frameId=%u "
+            "gate=scene-noninterruptable currentFrame=%u sceneFrameCount=%u "
+            "endHoldUntil=%u bypass=%s",
+            g_debugCurrentInputCrc, lastfound, sceneCurrentFrame,
+            sceneFrameCount, sceneEndHoldUntilMs,
+            g_debugBypassSceneGate ? "true" : "false");
+      }
+      if (!g_debugBypassSceneGate &&
+          !IsCriticalMonochromeTriggerFrame(lastfound)) {
+        if (keepTriggersInternal ||
+            mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
+          mySerum.triggerID = 0xffffffff;
+        // Scene is active and not interruptable
+        if (g_profileDynamicHotPaths && !sceneFrameRequested) {
+          ++g_profileNoFrameReturns;
         }
-        if (!g_debugBypassSceneGate &&
-            !IsCriticalMonochromeTriggerFrame(lastfound)) {
-          if (keepTriggersInternal ||
-              mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
-            mySerum.triggerID = 0xffffffff;
-          // Scene is active and not interruptable
-          if (g_profileDynamicHotPaths && !sceneFrameRequested) {
-            ++g_profileNoFrameReturns;
-          }
-          MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
-          return IDENTIFY_NO_FRAME;
-        }
-        if (IsCriticalMonochromeTriggerFrame(lastfound)) {
-          DebugLogSceneEvent(
-              "stop-critical-monochrome-trigger",
-              static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame,
-              sceneFrameCount, sceneDurationPerFrame, sceneOptionFlags,
-              sceneInterruptable, sceneStartImmediately, sceneRepeatCount);
-          sceneFrameCount = 0;
-          sceneIsLastForegroundFrame = false;
-          sceneIsLastBackgroundFrame = false;
-          sceneEndHoldUntilMs = 0;
-          sceneEndHoldDurationMs = 0;
-          sceneNextFrameAtMs = 0;
-          mySerum.rotationtimer = 0;
-          ForceNormalFrameRefreshAfterSceneEnd();
-        }
+        MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
+        return IDENTIFY_NO_FRAME;
+      }
+      if (IsCriticalMonochromeTriggerFrame(lastfound)) {
+        DebugLogSceneEvent(
+            "stop-critical-monochrome-trigger",
+            static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame,
+            sceneFrameCount, sceneDurationPerFrame, sceneOptionFlags,
+            sceneInterruptable, sceneStartImmediately, sceneRepeatCount);
+        sceneFrameCount = 0;
+        sceneIsLastForegroundFrame = false;
+        sceneIsLastBackgroundFrame = false;
+        sceneEndHoldUntilMs = 0;
+        sceneEndHoldDurationMs = 0;
+        sceneNextFrameAtMs = 0;
+        mySerum.rotationtimer = 0;
+        ForceNormalFrameRefreshAfterSceneEnd();
       }
 
       // frame identified
