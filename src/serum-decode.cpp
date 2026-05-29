@@ -4530,6 +4530,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
     if ((monochromeMode || monochromePaletteMode) &&
         IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
+          g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
           bypassMonochromeCheck = true;
     }
     if (frameID != IDENTIFY_NO_FRAME) {
