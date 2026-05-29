@@ -4710,58 +4710,60 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    // Ignore any triggers for full black frames as they appear in-game and in
-    // monochrome settings mode and we don't know what authors did with them
-    // (accidentally). Black frames in-game should be shown. In monochrome
-    // settings mode, they should not end the monochrome mode.
-    uint32_t triggerId = g_serumData.triggerIDs[lastfound][0];
-    monochromeMode = (triggerId == MONOCHROME_TRIGGER_ID);
-    monochromePaletteMode = false;
-    if (triggerId == MONOCHROME_PALETTE_TRIGGER_ID) {
-      monochromePaletteMode = CaptureMonochromePaletteFromFrameV2(lastfound);
-      monochromeMode = false;
+    if ((monochromeMode || monochromePaletteMode) &&
+        IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
+      frameID = IDENTIFY_NO_FRAME;
     }
-    if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
-      g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
+    if (frameID != IDENTIFY_NO_FRAME) {
+      uint32_t triggerId = g_serumData.triggerIDs[lastfound][0];
+      monochromeMode = (triggerId == MONOCHROME_TRIGGER_ID);
+      monochromePaletteMode = false;
+      if (triggerId == MONOCHROME_PALETTE_TRIGGER_ID) {
+        monochromePaletteMode = CaptureMonochromePaletteFromFrameV2(lastfound);
+        monochromeMode = false;
+      }
+      if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
+        g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
 
-    if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
-        !sceneFrameRequested &&
-        (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
-        !sceneInterruptable) {
-      if (DebugTraceMatches(g_debugCurrentInputCrc, lastfound)) {
-        Log("Serum debug v2 gate: inputCrc=%u frameId=%u "
-            "gate=scene-noninterruptable currentFrame=%u sceneFrameCount=%u "
-            "endHoldUntil=%u bypass=%s",
-            g_debugCurrentInputCrc, lastfound, sceneCurrentFrame,
-            sceneFrameCount, sceneEndHoldUntilMs,
-            g_debugBypassSceneGate ? "true" : "false");
-      }
-      if (!g_debugBypassSceneGate &&
-          !IsCriticalMonochromeTriggerFrame(lastfound)) {
-        if (keepTriggersInternal ||
-            mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
-          mySerum.triggerID = 0xffffffff;
-        // Scene is active and not interruptable
-        if (g_profileDynamicHotPaths && !sceneFrameRequested) {
-          ++g_profileNoFrameReturns;
+      if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
+          !sceneFrameRequested &&
+          (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
+          !sceneInterruptable) {
+        if (DebugTraceMatches(g_debugCurrentInputCrc, lastfound)) {
+          Log("Serum debug v2 gate: inputCrc=%u frameId=%u "
+              "gate=scene-noninterruptable currentFrame=%u sceneFrameCount=%u "
+              "endHoldUntil=%u bypass=%s",
+              g_debugCurrentInputCrc, lastfound, sceneCurrentFrame,
+              sceneFrameCount, sceneEndHoldUntilMs,
+              g_debugBypassSceneGate ? "true" : "false");
         }
-        MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
-        return IDENTIFY_NO_FRAME;
-      }
-      if (IsCriticalMonochromeTriggerFrame(lastfound)) {
-        DebugLogSceneEvent(
-            "stop-critical-monochrome-trigger",
-            static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame,
-            sceneFrameCount, sceneDurationPerFrame, sceneOptionFlags,
-            sceneInterruptable, sceneStartImmediately, sceneRepeatCount);
-        sceneFrameCount = 0;
-        sceneIsLastForegroundFrame = false;
-        sceneIsLastBackgroundFrame = false;
-        sceneEndHoldUntilMs = 0;
-        sceneEndHoldDurationMs = 0;
-        sceneNextFrameAtMs = 0;
-        mySerum.rotationtimer = 0;
-        ForceNormalFrameRefreshAfterSceneEnd();
+        if (!g_debugBypassSceneGate &&
+            !IsCriticalMonochromeTriggerFrame(lastfound)) {
+          if (keepTriggersInternal ||
+              mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
+            mySerum.triggerID = 0xffffffff;
+          // Scene is active and not interruptable
+          if (g_profileDynamicHotPaths && !sceneFrameRequested) {
+            ++g_profileNoFrameReturns;
+          }
+          MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
+          return IDENTIFY_NO_FRAME;
+        }
+        if (IsCriticalMonochromeTriggerFrame(lastfound)) {
+          DebugLogSceneEvent(
+              "stop-critical-monochrome-trigger",
+              static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame,
+              sceneFrameCount, sceneDurationPerFrame, sceneOptionFlags,
+              sceneInterruptable, sceneStartImmediately, sceneRepeatCount);
+          sceneFrameCount = 0;
+          sceneIsLastForegroundFrame = false;
+          sceneIsLastBackgroundFrame = false;
+          sceneEndHoldUntilMs = 0;
+          sceneEndHoldDurationMs = 0;
+          sceneNextFrameAtMs = 0;
+          mySerum.rotationtimer = 0;
+          ForceNormalFrameRefreshAfterSceneEnd();
+        }
       }
 
       // frame identified
