@@ -4527,12 +4527,12 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    if ((monochromeMode || monochromePaletteMode) &&
-        IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
-      if (lastfound != IDENTIFY_NO_FRAME) {
-        frameID = IDENTIFY_NO_FRAME;
-      }
-    }
+    //if ((monochromeMode || monochromePaletteMode) &&
+    //    IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
+    //  if (lastfound != IDENTIFY_NO_FRAME) {
+    //    frameID = IDENTIFY_NO_FRAME;
+    //  }
+    //}
     if (frameID != IDENTIFY_NO_FRAME) {
       uint32_t triggerId = g_serumData.triggerIDs[lastfound][0];
       monochromeMode = (triggerId == MONOCHROME_TRIGGER_ID);
