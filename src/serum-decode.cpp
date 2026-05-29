@@ -166,6 +166,7 @@ uint32_t lastFrameId = 0;  // last frame ID identified
 uint16_t sceneBackgroundFrame[256 * 64] = {0};
 uint16_t sceneBackgroundWidth = 0;
 uint16_t sceneBackgroundHeight = 0;
+bool bypassMonochromeCheck = false;
 bool monochromeMode = false;
 bool monochromePaletteMode = false;
 bool showStatusMessages = false;
@@ -4527,19 +4528,20 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    //if ((monochromeMode || monochromePaletteMode) &&
-    //    IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
-    //  if (lastfound != IDENTIFY_NO_FRAME) {
-    //    frameID = IDENTIFY_NO_FRAME;
-    //  }
-    //}
+    if ((monochromeMode || monochromePaletteMode) &&
+        IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
+          bypassMonochromeCheck = true;
+    }
     if (frameID != IDENTIFY_NO_FRAME) {
       uint32_t triggerId = g_serumData.triggerIDs[lastfound][0];
-      monochromeMode = (triggerId == MONOCHROME_TRIGGER_ID);
-      monochromePaletteMode = false;
-      if (triggerId == MONOCHROME_PALETTE_TRIGGER_ID) {
-        monochromePaletteMode = CaptureMonochromePaletteFromFrameV2(lastfound);
-        monochromeMode = false;
+      if (!bypassMonochromeCheck) {
+        monochromeMode = (triggerId == MONOCHROME_TRIGGER_ID);
+        monochromePaletteMode = false;
+        if (triggerId == MONOCHROME_PALETTE_TRIGGER_ID) {
+          monochromePaletteMode = CaptureMonochromePaletteFromFrameV2(lastfound);
+          monochromeMode = false;
+        }
+        bypassMonochromeCheck = false;
       }
       if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
         g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
