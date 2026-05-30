@@ -55,6 +55,10 @@ Behavior:
 - Value packing preserves exact values for packed modes (no nonzero->1 normalization).
 - Packed vectors can still be modified at runtime (`set()`); mutable map storage is restored lazily when needed.
 - Runtime lookup uses dense index fast-path when IDs are dense.
+- Packed sparse vectors track packed-index readiness separately from the
+  optional dense index. Sparse high-ID vectors may intentionally use only the
+  hash index, and runtime reads must not rebuild that hash index on every
+  access just because no dense index was allocated.
 - Compressed sparse vectors keep a tiny bounded decoded cache (6 entries, LRU
   replacement) in addition to the last/second hot-entry cache, reducing decode
   churn for alternating IDs without large RAM growth.
