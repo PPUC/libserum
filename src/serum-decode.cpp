@@ -4408,11 +4408,10 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
     // trigger, it would end the monochrome stream and stay stuck on a black
     // frame until a frame in the project is detected again. The code below
     // takes care of that.
-    if ((!monochromeMode && !monochromePaletteMode) ||
+    if (!monochromeMode ||
         !IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
       monochromeMode =
           (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
-      monochromePaletteMode = false;
     }
 
     if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
