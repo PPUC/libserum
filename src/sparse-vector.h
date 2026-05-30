@@ -329,6 +329,8 @@ class SparseVector {
         !packedDenseIndexById.empty()) {
       return;
     }
+
+    // Build hash index from packedIds (assumed to be pre-sorted from save/load)
     packedIndexById.clear();
     packedIndexById.reserve(packedIds.size());
     for (uint32_t i = 0; i < packedIds.size(); ++i) {
@@ -338,15 +340,111 @@ class SparseVector {
     // Fast path for dense/small ID spaces (frame IDs, sprite IDs, etc).
     // This avoids hash lookup overhead in operator[] hot loops.
     packedDenseIndexById.clear();
-    const uint32_t maxPackedId = packedIds.back();
-    if (maxPackedId <= 1000000 &&
-        maxPackedId <= static_cast<uint32_t>(packedIds.size() * 8)) {
+
+    // Find actual maximum ID
+    uint32_t maxPackedId = 0;
+    for (uint32_t i = 0; i < packedIds.size(); ++i) {
+      if (packedIds[i] > maxPackedId) {
+        maxPackedId = packedIds[i];
+      }
+    }
+
+    // Safety check: if max ID seems unreasonable, it indicates data corruption
+    // Typical frame/sprite IDs should be < 100000 for most archives
+    // but we allow up to 1000000 for safety, and ratio check prevents huge allocations
+    const uint32_t kMaxReasonableId = 1000000;
+    const uint32_t kMaxRatioAllocation = 8;  // max(id) <= count * 8
+
+    if (maxPackedId <= kMaxReasonableId &&
+        maxPackedId <= static_cast<uint32_t>(packedIds.size() * kMaxRatioAllocation)) {
       packedDenseIndexById.assign(static_cast<size_t>(maxPackedId) + 1,
                                   UINT32_MAX);
       for (uint32_t i = 0; i < packedIds.size(); ++i) {
-        packedDenseIndexById[packedIds[i]] = i;
+        const uint32_t id = packedIds[i];
+        // Bounds check to prevent out-of-bounds write
+        if (id < packedDenseIndexById.size()) {
+          packedDenseIndexById[id] = i;
+        }
       }
     }
+  }
+
+  // Repair corrupted/unsorted packedIds by rebuilding in sorted order.
+  // Called at save time to prevent corruption from being persisted to disk,
+  // and at load time for v5 backward compatibility. Sorted packedIds is a
+  // critical invariant for correct heap indexing.
+  void repairCorruptedPackedData() {
+    if (packedIds.empty() || packedOffsets.size() != packedIds.size() ||
+        packedSizes.size() != packedIds.size()) {
+      return;
+    }
+
+    // Check if already sorted
+    bool needsSort = false;
+    for (size_t i = 1; i < packedIds.size(); ++i) {
+      if (packedIds[i] < packedIds[i - 1]) {
+        needsSort = true;
+        break;
+      }
+    }
+    if (!needsSort) {
+      return;  // Already sorted, no repair needed
+    }
+
+    // Log that repair is happening (this indicates corrupted data from file or runtime modification)
+    if (profileLabel) {
+      extern void Log(const char *fmt, ...);
+      Log("WARNING: SparseVector '%s' has unsorted packedIds, repairing before use. "
+          "This may indicate corrupted cROMc data or internal bug. "
+          "Count=%zu firstId=%u lastId=%u",
+          profileLabel, packedIds.size(),
+          packedIds.empty() ? 0 : packedIds.front(),
+          packedIds.empty() ? 0 : packedIds.back());
+    }
+
+    // Rebuild sorted structures to match ID ordering
+    std::vector<uint32_t> indexOrder(packedIds.size());
+    for (size_t i = 0; i < packedIds.size(); ++i) {
+      indexOrder[i] = static_cast<uint32_t>(i);
+    }
+
+    std::sort(indexOrder.begin(), indexOrder.end(),
+              [this](uint32_t a, uint32_t b) {
+                return packedIds[a] < packedIds[b];
+              });
+
+    // Rebuild packed data in sorted order
+    std::vector<uint32_t> newIds;
+    std::vector<uint32_t> newOffsets;
+    std::vector<uint32_t> newSizes;
+    std::vector<uint8_t> newBlob;
+
+    newIds.reserve(packedIds.size());
+    newOffsets.reserve(packedOffsets.size());
+    newSizes.reserve(packedSizes.size());
+    newBlob.reserve(packedBlob.size());
+
+    uint32_t offset = 0;
+    for (uint32_t idx : indexOrder) {
+      newIds.push_back(packedIds[idx]);
+      const uint32_t oldOffset = packedOffsets[idx];
+      const uint32_t size = packedSizes[idx];
+
+      if (oldOffset <= packedBlob.size() && size <= packedBlob.size() - oldOffset) {
+        newOffsets.push_back(offset);
+        newSizes.push_back(size);
+        newBlob.insert(newBlob.end(), packedBlob.begin() + oldOffset,
+                       packedBlob.begin() + oldOffset + size);
+        offset += size;
+      }
+    }
+
+    packedIds = std::move(newIds);
+    packedOffsets = std::move(newOffsets);
+    packedSizes = std::move(newSizes);
+    packedBlob = std::move(newBlob);
+    packedIndexById.clear();
+    packedDenseIndexById.clear();
   }
 
   static uint64_t hashPayload(const uint8_t *bytes, size_t size) {
@@ -957,8 +1055,16 @@ class SparseVector {
   template <class Archive>
   void serialize(Archive &ar) {
     if constexpr (Archive::is_saving::value) {
-      if (!useIndex && packedIds.empty() && !data.empty()) {
-        buildPackedFromData();
+      // CRITICAL: Ensure packedIds is built and sorted before serialization.
+      // This prevents corrupted unsorted data from being written to disk.
+      if (!useIndex) {
+        if (!packedIds.empty()) {
+          // packedIds exists; verify it's sorted before write
+          repairCorruptedPackedData();
+        } else if (!data.empty()) {
+          // Build from data map (ensures sorted order)
+          buildPackedFromData();
+        }
       }
 
       ar(index, noData, elementSize, useIndex, useCompression,
@@ -985,6 +1091,8 @@ class SparseVector {
       clearPacked();
       if (!useIndex) {
         ar(packedIds, packedOffsets, packedSizes, packedBlob);
+        // v6 cROMc files are guaranteed to have sorted packedIds from save-time enforcement.
+        // Only ensure indices are built, don't repair (saves RAM on resource-constrained devices).
         ensurePackedIndex();
       }
     }

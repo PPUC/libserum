@@ -139,6 +139,10 @@ Format of a PUP scene line:
    8 - replace static content with background scene, only dynamic zones,
        sprites and shadows stay in the foreground
   16 - continue scene at previous frame when interrupted for less than 8s
+  32 - with flag 4, replace any non-dynamic pixel whose source brightness is
+       lower than the maximum input value with the background scene
+       this means values 0..2 for a 2-bit ROM and 0..14 for a 4-bit ROM are
+       replaced, while only maximum-brightness pixels stay in the foreground
 ```
 
 Positions `4` to `10` are optional. If not provided, the default is `0`.
@@ -148,14 +152,14 @@ Positions `4` to `10` are optional. If not provided, the default is `0`.
 #### Windows (x64)
 
 ```shell
-cmake -G "Visual Studio 17 2022" -DPLATFORM=win -DARCH=x64 -B build
+cmake -G "Visual Studio 18 2026" -DPLATFORM=win -DARCH=x64 -B build
 cmake --build build --config Release
 ```
 
 #### Windows (x86)
 
 ```shell
-cmake -G "Visual Studio 17 2022" -A Win32 -DPLATFORM=win -DARCH=x86 -B build
+cmake -G "Visual Studio 18 2026" -A Win32 -DPLATFORM=win -DARCH=x86 -B build
 cmake --build build --config Release
 ```
 
