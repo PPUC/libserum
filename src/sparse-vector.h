@@ -369,8 +369,10 @@ class SparseVector {
     }
   }
 
-  // Repair corrupted/unsorted packedIds after deserialization.
-  // This runs once at load time, not on every hot-path access.
+  // Repair corrupted/unsorted packedIds by rebuilding in sorted order.
+  // Called at save time to prevent corruption from being persisted to disk,
+  // and at load time for v5 backward compatibility. Sorted packedIds is a
+  // critical invariant for correct heap indexing.
   void repairCorruptedPackedData() {
     if (packedIds.empty() || packedOffsets.size() != packedIds.size() ||
         packedSizes.size() != packedIds.size()) {
