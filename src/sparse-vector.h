@@ -330,6 +330,69 @@ class SparseVector {
       return;
     }
 
+    // CRITICAL: Validate packedIds is sorted before building index.
+    // Runtime modifications (set(), setParent()) can break sort order.
+    // If unsorted, repair before proceeding to prevent corrupt unordered_map.
+    bool needsSort = false;
+    for (size_t i = 1; i < packedIds.size(); ++i) {
+      if (packedIds[i] < packedIds[i - 1]) {
+        needsSort = true;
+        break;
+      }
+    }
+    if (needsSort) {
+      // Cannot call non-const function from const function, so repair in-place
+      // Rebuild sorted structures to match ID ordering
+      std::vector<uint32_t> indexOrder(packedIds.size());
+      for (size_t i = 0; i < packedIds.size(); ++i) {
+        indexOrder[i] = static_cast<uint32_t>(i);
+      }
+
+      std::sort(indexOrder.begin(), indexOrder.end(),
+                [this](uint32_t a, uint32_t b) {
+                  return packedIds[a] < packedIds[b];
+                });
+
+      // Rebuild packed data in sorted order
+      std::vector<uint32_t> newIds;
+      std::vector<uint32_t> newOffsets;
+      std::vector<uint32_t> newSizes;
+      std::vector<uint8_t> newBlob;
+
+      newIds.reserve(packedIds.size());
+      newOffsets.reserve(packedOffsets.size());
+      newSizes.reserve(packedSizes.size());
+      newBlob.reserve(packedBlob.size());
+
+      uint32_t offset = 0;
+      for (uint32_t idx : indexOrder) {
+        newIds.push_back(packedIds[idx]);
+        const uint32_t oldOffset = packedOffsets[idx];
+        const uint32_t size = packedSizes[idx];
+
+        if (oldOffset <= packedBlob.size() && size <= packedBlob.size() - oldOffset) {
+          newOffsets.push_back(offset);
+          newSizes.push_back(size);
+          newBlob.insert(newBlob.end(), packedBlob.begin() + oldOffset,
+                         packedBlob.begin() + oldOffset + size);
+          offset += size;
+        }
+      }
+
+      // Cast away const to repair corrupted data before use
+      const_cast<std::vector<uint32_t>&>(packedIds) = std::move(newIds);
+      const_cast<std::vector<uint32_t>&>(packedOffsets) = std::move(newOffsets);
+      const_cast<std::vector<uint32_t>&>(packedSizes) = std::move(newSizes);
+      const_cast<std::vector<uint8_t>&>(packedBlob) = std::move(newBlob);
+
+      if (profileLabel) {
+        extern void Log(const char *fmt, ...);
+        Log("WARNING: SparseVector '%s' has unsorted packedIds at runtime, repairing in-place. "
+            "This indicates runtime data corruption from set/setParent operations.",
+            profileLabel);
+      }
+    }
+
     // Clear hash map - this can crash if map is corrupted from heap corruption
     // To prevent crashes from leftover corruption, rebuild completely
     packedIndexById.clear();
