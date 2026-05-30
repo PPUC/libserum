@@ -330,71 +330,7 @@ class SparseVector {
       return;
     }
 
-    // CRITICAL: Validate packedIds is sorted before building index.
-    // Runtime modifications (set(), setParent()) can break sort order.
-    // If unsorted, repair before proceeding to prevent corrupt unordered_map.
-    bool needsSort = false;
-    for (size_t i = 1; i < packedIds.size(); ++i) {
-      if (packedIds[i] < packedIds[i - 1]) {
-        needsSort = true;
-        break;
-      }
-    }
-    if (needsSort) {
-      // Cannot call non-const function from const function, so repair in-place
-      // Rebuild sorted structures to match ID ordering
-      std::vector<uint32_t> indexOrder(packedIds.size());
-      for (size_t i = 0; i < packedIds.size(); ++i) {
-        indexOrder[i] = static_cast<uint32_t>(i);
-      }
-
-      std::sort(indexOrder.begin(), indexOrder.end(),
-                [this](uint32_t a, uint32_t b) {
-                  return packedIds[a] < packedIds[b];
-                });
-
-      // Rebuild packed data in sorted order
-      std::vector<uint32_t> newIds;
-      std::vector<uint32_t> newOffsets;
-      std::vector<uint32_t> newSizes;
-      std::vector<uint8_t> newBlob;
-
-      newIds.reserve(packedIds.size());
-      newOffsets.reserve(packedOffsets.size());
-      newSizes.reserve(packedSizes.size());
-      newBlob.reserve(packedBlob.size());
-
-      uint32_t offset = 0;
-      for (uint32_t idx : indexOrder) {
-        newIds.push_back(packedIds[idx]);
-        const uint32_t oldOffset = packedOffsets[idx];
-        const uint32_t size = packedSizes[idx];
-
-        if (oldOffset <= packedBlob.size() && size <= packedBlob.size() - oldOffset) {
-          newOffsets.push_back(offset);
-          newSizes.push_back(size);
-          newBlob.insert(newBlob.end(), packedBlob.begin() + oldOffset,
-                         packedBlob.begin() + oldOffset + size);
-          offset += size;
-        }
-      }
-
-      // Cast away const to repair corrupted data before use
-      const_cast<std::vector<uint32_t>&>(packedIds) = std::move(newIds);
-      const_cast<std::vector<uint32_t>&>(packedOffsets) = std::move(newOffsets);
-      const_cast<std::vector<uint32_t>&>(packedSizes) = std::move(newSizes);
-      const_cast<std::vector<uint8_t>&>(packedBlob) = std::move(newBlob);
-
-      if (profileLabel) {
-        extern void Log(const char *fmt, ...);
-        Log("WARNING: SparseVector '%s' has unsorted packedIds at runtime, repairing in-place. "
-            "This indicates runtime data corruption from set/setParent operations.",
-            profileLabel);
-      }
-    }
-
-    // Clear hash map - this can crash if map is corrupted from heap corruption
-    // To prevent crashes from leftover corruption, rebuild completely
+    // Build hash index from packedIds (assumed to be pre-sorted from save/load)
     packedIndexById.clear();
     packedIndexById.reserve(packedIds.size());
     for (uint32_t i = 0; i < packedIds.size(); ++i) {
@@ -405,7 +341,7 @@ class SparseVector {
     // This avoids hash lookup overhead in operator[] hot loops.
     packedDenseIndexById.clear();
 
-    // Find actual maximum to be safe, in case data is corrupted/unsorted
+    // Find actual maximum ID
     uint32_t maxPackedId = 0;
     for (uint32_t i = 0; i < packedIds.size(); ++i) {
       if (packedIds[i] > maxPackedId) {
@@ -413,7 +349,7 @@ class SparseVector {
       }
     }
 
-    // Safety check: if max ID seems unreasonable, it indicates corrupted data
+    // Safety check: if max ID seems unreasonable, it indicates data corruption
     // Typical frame/sprite IDs should be < 100000 for most archives
     // but we allow up to 1000000 for safety, and ratio check prevents huge allocations
     const uint32_t kMaxReasonableId = 1000000;
@@ -425,7 +361,7 @@ class SparseVector {
                                   UINT32_MAX);
       for (uint32_t i = 0; i < packedIds.size(); ++i) {
         const uint32_t id = packedIds[i];
-        // Bounds check to prevent out-of-bounds write from corrupted data
+        // Bounds check to prevent out-of-bounds write
         if (id < packedDenseIndexById.size()) {
           packedDenseIndexById[id] = i;
         }
@@ -1153,8 +1089,8 @@ class SparseVector {
       clearPacked();
       if (!useIndex) {
         ar(packedIds, packedOffsets, packedSizes, packedBlob);
-        // Repair any corruption/unsorted data from file ONCE at load time
-        repairCorruptedPackedData();
+        // v6 cROMc files are guaranteed to have sorted packedIds from save-time enforcement.
+        // Only ensure indices are built, don't repair (saves RAM on resource-constrained devices).
         ensurePackedIndex();
       }
     }
