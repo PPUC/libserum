@@ -359,6 +359,10 @@ Background placeholder policy:
 - `Colorize_Framev2` supports `suppressFrameBackgroundImage`.
 - When true, frame-level background images are treated as placeholders and existing output pixel is kept in masked background areas.
 - This is used when a background scene is active so the scene background can continue while foreground content changes.
+- With background-scene flag `32`, dynamic-zone pixels whose selected dynamic
+  palette color is black (`0`) are treated as background-scene holes when a
+  frame background mask covers that pixel. Dynamic shadows are not replaced by
+  this rule.
 
 Mixed-resolution background scenes:
 - `applySceneBackground` caches the already-rendered scene background together
@@ -400,9 +404,9 @@ Flags (from `serum.h`):
 - `4`: run scene as background
 - `8`: only dynamic content in foreground over background scene
 - `16`: resume interrupted scene if retriggered within 8s
-- `32`: with background scenes, replace any non-dynamic pixel whose source
-  brightness is below the maximum input value (`nocolors - 1`) with the
-  background scene, so only maximum-brightness foreground pixels stay visible
+- `32`: with background scenes, replace dynamic-zone pixels whose selected
+  dynamic color is black with the background scene when covered by the frame
+  background mask. Dynamic shadows are not replaced by this rule.
 
 Finished-scene default behavior:
 - Foreground scenes with flag `0` leave the last rendered scene frame visible

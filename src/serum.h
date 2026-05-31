@@ -28,9 +28,9 @@ enum {
   // keep only dynamic zones, sprites and shadows in the foreground
   FLAG_SCENE_ONLY_DYNAMIC_CONTENT = 8,
   FLAG_SCENE_RESUME_IF_RETRIGGERED = 16,
-  // with background scenes, keep only max-brightness non-dynamic pixels in
-  // the foreground
-  FLAG_SCENE_REPLACE_NONMAX_CONTENT = 32,
+  // with background scenes, dynamic-zone pixels that resolve to black let the
+  // background scene show through; dynamic shadows do not.
+  FLAG_SCENE_REPLACE_DYNAMIC_BLACK = 32,
 };
 
 enum  // returned by Serum_Load in *SerumVersion
