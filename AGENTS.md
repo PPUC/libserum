@@ -362,7 +362,8 @@ Background placeholder policy:
 - With background-scene flag `32`, dynamic-zone pixels whose selected dynamic
   palette color is black (`0`) are treated as background-scene holes when a
   frame background mask covers that pixel. These blacked-out dynamic pixels do
-  not generate dynamic shadows.
+  not generate dynamic shadows, and the rule does not replace an already-written
+  dynamic shadow pixel.
 
 Mixed-resolution background scenes:
 - `applySceneBackground` caches the already-rendered scene background together
@@ -407,7 +408,8 @@ Flags (from `serum.h`):
 - `32`: with background scenes, replace dynamic-zone pixels whose selected
   dynamic color is black with the background scene when covered by the frame
   background mask. These blacked-out dynamic pixels do not generate dynamic
-  shadows.
+  shadows, and the rule does not replace an already-written dynamic shadow
+  pixel.
 
 Finished-scene default behavior:
 - Foreground scenes with flag `0` leave the last rendered scene frame visible

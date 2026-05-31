@@ -3950,7 +3950,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                   frameDynaColors[dynacouche * g_serumData.nocolors +
                                   frame[tk]];
               if (replaceDynamicBlackContent && dynamicColor == 0 &&
-                  hasBackground && frameBackgroundMask[tk] > 0) {
+                  isdynapix[tk] == 0 && hasBackground &&
+                  frameBackgroundMask[tk] > 0) {
                 if (applySceneBackground) {
                   pfr[tk] = GetSceneBackgroundPixel(ti, tj, g_serumData.fwidth,
                                                     g_serumData.fheight);
@@ -4101,7 +4102,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                   frameDynaColorsExtra[dynacouche * g_serumData.nocolors +
                                        frame[tl]];
               if (replaceDynamicBlackContent && dynamicColor == 0 &&
-                  hasBackground && frameBackgroundMaskExtra[tk] > 0) {
+                  isdynapix[tk] == 0 && hasBackground &&
+                  frameBackgroundMaskExtra[tk] > 0) {
                 if (applySceneBackground) {
                   pfr[tk] =
                       GetSceneBackgroundPixel(ti, tj, g_serumData.fwidth_extra,
