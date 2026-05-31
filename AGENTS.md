@@ -30,6 +30,11 @@ Main global runtime state (in `serum-decode.cpp`):
 - Current output: `mySerum` (`Serum_Frame_Struc`).
 - Scene playback state: `sceneFrameCount`, `sceneCurrentFrame`, duration/flags/repeat, etc.
 - Identification state: `lastfound`, `lastfound_normal`, `lastfound_scene`, CRC tracking.
+- Public C API entrypoints are serialized through a recursive runtime mutex
+  because this state is process-global and scene rendering may re-enter
+  colorization internally. `Serum_Rotate()` must not run concurrently with
+  `Serum_Colorize()` while shared output buffers, flags, widths, rotation
+  tables, or scene state are being updated.
 - Scene lookup acceleration:
   - `g_serumData.frameIsScene`: frame ID -> scene/non-scene marker.
   - `g_serumData.sceneFramesBySignature`: `(mask,shape,hash)` -> matching scene frame IDs.
