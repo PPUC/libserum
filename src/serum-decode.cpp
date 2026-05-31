@@ -3946,10 +3946,6 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             const uint8_t dynacouche = frameDyna[tk];
             bool dynamicBlackReplacedByBackground = false;
             if (frame[tk] > 0) {
-              CheckDynaShadow(pfr, frameShadowDir, frameShadowColor, dynacouche,
-                              isdynapix, ti, tj, g_serumData.fwidth,
-                              g_serumData.fheight);
-              isdynapix[tk] = 1;
               const uint16_t dynamicColor =
                   frameDynaColors[dynacouche * g_serumData.nocolors +
                                   frame[tk]];
@@ -3969,6 +3965,12 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                                 prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
                   dynamicBlackReplacedByBackground = true;
                 }
+              }
+              if (!dynamicBlackReplacedByBackground) {
+                CheckDynaShadow(pfr, frameShadowDir, frameShadowColor,
+                                dynacouche, isdynapix, ti, tj,
+                                g_serumData.fwidth, g_serumData.fheight);
+                isdynapix[tk] = 1;
               }
               if (!dynamicBlackReplacedByBackground) pfr[tk] = dynamicColor;
             } else if (isdynapix[tk] == 0)
@@ -4095,11 +4097,6 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             const uint8_t dynacouche = frameDynaExtra[tk];
             bool dynamicBlackReplacedByBackground = false;
             if (frame[tl] > 0) {
-              CheckDynaShadow(pfr, frameShadowDirExtra, frameShadowColorExtra,
-                              dynacouche, isdynapix, ti, tj,
-                              g_serumData.fwidth_extra,
-                              g_serumData.fheight_extra);
-              isdynapix[tk] = 1;
               const uint16_t dynamicColor =
                   frameDynaColorsExtra[dynacouche * g_serumData.nocolors +
                                        frame[tl]];
@@ -4121,6 +4118,13 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                   }
                   dynamicBlackReplacedByBackground = true;
                 }
+              }
+              if (!dynamicBlackReplacedByBackground) {
+                CheckDynaShadow(pfr, frameShadowDirExtra, frameShadowColorExtra,
+                                dynacouche, isdynapix, ti, tj,
+                                g_serumData.fwidth_extra,
+                                g_serumData.fheight_extra);
+                isdynapix[tk] = 1;
               }
               if (!dynamicBlackReplacedByBackground) pfr[tk] = dynamicColor;
             } else if (isdynapix[tk] == 0)

@@ -29,7 +29,7 @@ enum {
   FLAG_SCENE_ONLY_DYNAMIC_CONTENT = 8,
   FLAG_SCENE_RESUME_IF_RETRIGGERED = 16,
   // with background scenes, dynamic-zone pixels that resolve to black let the
-  // background scene show through; dynamic shadows do not.
+  // background scene show through and do not generate dynamic shadows.
   FLAG_SCENE_REPLACE_DYNAMIC_BLACK = 32,
 };
 

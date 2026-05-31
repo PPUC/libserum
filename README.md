@@ -140,7 +140,8 @@ Format of a PUP scene line:
        sprites and shadows stay in the foreground
   16 - continue scene at previous frame when interrupted for less than 8s
   32 - with flag 4, replace dynamic-zone pixels whose selected dynamic color is
-       black with the background scene; dynamic shadows are not replaced
+       black with the background scene; these pixels do not generate dynamic
+       shadows
 ```
 
 Positions `4` to `10` are optional. If not provided, the default is `0`.
