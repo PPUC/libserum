@@ -195,14 +195,18 @@ static void EnsureWindowsCrashHandlerInstalled() {
 }
 #endif
 
+static std::recursive_mutex g_serumApiMutex;
+
 #if defined(_WIN32) || defined(_WIN64)
-#define SERUM_API_GUARD_START(apiName)  \
-  ClearLastErrorMessage();              \
-  EnsureWindowsCrashHandlerInstalled(); \
+#define SERUM_API_GUARD_START(apiName)                                 \
+  ClearLastErrorMessage();                                             \
+  EnsureWindowsCrashHandlerInstalled();                                \
+  std::lock_guard<std::recursive_mutex> serumApiLock(g_serumApiMutex); \
   try {
 #else
-#define SERUM_API_GUARD_START(apiName) \
-  ClearLastErrorMessage();             \
+#define SERUM_API_GUARD_START(apiName)                                 \
+  ClearLastErrorMessage();                                             \
+  std::lock_guard<std::recursive_mutex> serumApiLock(g_serumApiMutex); \
   try {
 #endif
 
@@ -5269,12 +5273,14 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
 
 SERUM_API uint32_t
 Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
+  SERUM_API_GUARD_START("Serum_ColorizeWithMetadatav2")
   BeginProfileFrameOperation();
   const uint32_t result = Serum_ColorizeWithMetadatav2Internal(
       frame, sceneFrameRequested, IDENTIFY_NO_FRAME);
   EndProfileFrameOperation();
   MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
   return result;
+  SERUM_API_GUARD_END("Serum_ColorizeWithMetadatav2", IDENTIFY_NO_FRAME)
 }
 
 SERUM_API uint32_t Serum_Colorize(uint8_t* frame) {
