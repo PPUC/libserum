@@ -979,6 +979,16 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
       return false;
     }
 
+    if (concentrateFileVersion == 6) {
+      Log("The cROMc version of %s is an older development version and a newer "
+          "stable version is available. If you have a cROM or cRZ file next to "
+          "the cROMc file, delete the cROMc file and restart. An updated cROMc "
+          "will be generated. If not, download a newer version of the cROMc.",
+          filename);
+      fclose(fp);
+      return false;
+    }
+
     if (concentrateFileVersion > SERUM_CONCENTRATE_VERSION) {
       Log("The cROMc version of %s is newer than the maximum supported by this "
           "version of libserum. Get a newer version of libserum.",
