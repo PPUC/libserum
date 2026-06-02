@@ -4464,7 +4464,7 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
     // trigger, it would end the monochrome stream and stay stuck on a black
     // frame until a frame in the project is detected again. The code below
     // takes care of that.
-    if (!monochromeMode ||
+    if ((!monochromeMode && !monochromePaletteMode) ||
         !IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
       monochromeMode =
           (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
@@ -4568,7 +4568,7 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
 
   mySerum.triggerID = 0xffffffff;
 
-  if (monochromeMode ||
+  if (monochromeMode || monochromePaletteMode ||
       (ignoreUnknownFramesTimeout &&
        (now - lastframe_found) >= ignoreUnknownFramesTimeout) ||
       (maxFramesToSkip && (frameID == IDENTIFY_NO_FRAME) &&
@@ -4717,7 +4717,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   uint32_t frameID = IDENTIFY_NO_FRAME;
   const bool fastRejectNonInterruptableScene =
       !sceneFrameRequested && knownFrameId >= g_serumData.nframes &&
-      !monochromeMode && g_serumData.sceneGenerator->isActive() &&
+      (!monochromeMode && !monochromePaletteMode) && g_serumData.sceneGenerator->isActive() &&
       (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
       !sceneInterruptable;
   if (fastRejectNonInterruptableScene) {
@@ -4788,7 +4788,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
       g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
 
-    if (!monochromeMode && g_serumData.sceneGenerator->isActive() &&
+    if ((!monochromeMode && !monochromePaletteMode) && g_serumData.sceneGenerator->isActive() &&
         !sceneFrameRequested &&
         (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
         !sceneInterruptable) {
@@ -4943,7 +4943,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
 
         // lastfound is set by Identify_Frame, check if we have a new PUP
         // trigger
-        if (!monochromeMode &&
+        if ((!monochromeMode && !monochromePaletteMode) &&
             (g_serumData.triggerIDs[lastfound][0] != lastTriggerID ||
              lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT))) {
           lastTriggerID = mySerum.triggerID =
@@ -5268,6 +5268,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
        (now - lastframe_found) >= ignoreUnknownFramesTimeout) ||
       (maxFramesToSkip && (frameID == IDENTIFY_NO_FRAME) &&
        (++framesSkippedCounter >= maxFramesToSkip))) {
+    // Apply monochrome to original resolution
     uint16_t* monochromeFrame = nullptr;
     if (g_serumData.fheight == 32 && mySerum.frame32) {
       monochromeFrame = mySerum.frame32;
@@ -5296,6 +5297,38 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
             monochromeFrame[y * g_serumData.fwidth + x] = greyscale_4[src];
           } else {
             monochromeFrame[y * g_serumData.fwidth + x] = greyscale_16[src];
+          }
+        }
+      }
+    }
+    // Apply monochrome to extra resolution (HD) if available
+    uint16_t* monochromeFrameExtra = nullptr;
+    if (g_serumData.fheight_extra > 0) {
+      if (g_serumData.fheight_extra == 32 && mySerum.frame32) {
+        monochromeFrameExtra = mySerum.frame32;
+        mySerum.flags |= FLAG_RETURNED_32P_FRAME_OK;
+        mySerum.width32 = g_serumData.fwidth_extra;
+      } else if (g_serumData.fheight_extra == 64 && mySerum.frame64) {
+        monochromeFrameExtra = mySerum.frame64;
+        mySerum.flags |= FLAG_RETURNED_64P_FRAME_OK;
+        mySerum.width64 = g_serumData.fwidth_extra;
+      }
+    }
+    if (monochromeFrameExtra && g_serumData.fwidth_extra > 0 && g_serumData.fheight_extra > 0) {
+      // Scale from original frame to extra resolution
+      for (uint16_t y = 0; y < g_serumData.fheight_extra; y++) {
+        for (uint16_t x = 0; x < g_serumData.fwidth_extra; x++) {
+          uint16_t srcX = (x * g_serumData.fwidth) / g_serumData.fwidth_extra;
+          uint16_t srcY = (y * g_serumData.fheight) / g_serumData.fheight_extra;
+          uint8_t src = frame[srcY * g_serumData.fwidth + srcX];
+          if (monochromePaletteMode && monochromePaletteV2Length > 0 &&
+              src < monochromePaletteV2Length) {
+            monochromeFrameExtra[y * g_serumData.fwidth_extra + x] =
+                monochromePaletteV2[src];
+          } else if (g_serumData.nocolors < 16) {
+            monochromeFrameExtra[y * g_serumData.fwidth_extra + x] = greyscale_4[src];
+          } else {
+            monochromeFrameExtra[y * g_serumData.fwidth_extra + x] = greyscale_16[src];
           }
         }
       }
