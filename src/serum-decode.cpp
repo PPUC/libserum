@@ -1612,12 +1612,12 @@ static bool PreferExtraOnlyModeRequested(const uint8_t flags) {
 
 static bool Allocate32OutputPlane(const uint8_t runtimeFlags) {
   return (runtimeFlags & FLAG_REQUEST_32P_FRAMES) != 0 ||
-         (isoriginalfallbackrequested && g_serumData.fheight == 64);
+         (isoriginalfallbackrequested && g_serumData.fheight == 32);
 }
 
 static bool Allocate64OutputPlane(const uint8_t runtimeFlags) {
   return (runtimeFlags & FLAG_REQUEST_64P_FRAMES) != 0 ||
-         (isoriginalfallbackrequested && g_serumData.fheight == 32);
+         (isoriginalfallbackrequested && g_serumData.fheight == 64);
 }
 
 static void ConfigureRequestedOutputMode(const uint8_t runtimeFlags) {
