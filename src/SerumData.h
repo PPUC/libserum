@@ -129,6 +129,7 @@ class SerumData {
   bool LoadFromBuffer(const uint8_t *data, size_t size, const uint8_t flags);
   void BuildPackingSidecarsAndNormalize();
   void BuildSpriteRuntimeSidecars();
+
   void BuildCriticalTriggerLookup();
   void DebugLogSpriteDynamicSidecarState(const char *stage, uint32_t spriteId);
   void DebugLogPackingSidecarsStorageSizes();
@@ -153,6 +154,10 @@ class SerumData {
   uint32_t nsprites;
   uint16_t nbackgrounds;
   bool is256x64;
+  // SERUM_SCALING_* selector for original -> extra resolution upscaling.
+  // Persisted from concentrate version 8 on; older archives default to
+  // SERUM_SCALING_SCALE2X, which is the look the stack has always produced.
+  uint8_t scalingAlgorithm = SERUM_SCALING_SCALE2X;
 
   // Vector data
   SparseVector<uint32_t> hashcodes;
@@ -503,6 +508,21 @@ class SerumData {
       if (sceneGenerator) {
         sceneGenerator->setSceneData(std::move(loadedScenes));
         sceneGenerator->setDepth(nocolors == 16 ? 4 : 2);
+      }
+    }
+
+    if constexpr (Archive::is_saving::value) {
+      if (concentrateFileVersion >= 8) {
+        ar(scalingAlgorithm);
+      }
+    } else {
+      if (concentrateFileVersion >= 8) {
+        ar(scalingAlgorithm);
+        if (scalingAlgorithm > SERUM_SCALING_LINE_DOUBLING) {
+          scalingAlgorithm = SERUM_SCALING_SCALE2X;
+        }
+      } else {
+        scalingAlgorithm = SERUM_SCALING_SCALE2X;
       }
     }
   }

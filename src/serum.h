@@ -40,6 +40,23 @@ enum  // returned by Serum_Load in *SerumVersion
   SERUM_V2 = 2
 };
 
+// Algorithm used whenever original-resolution content has to be scaled up to
+// the extra resolution (e.g. 128x32 source content rendered into a 256x64
+// output): the whole colorized frame when a frame has no 64p content, and the
+// ROM shade that selects dynamic-zone and dynamic-sprite colors when it does.
+// Stored in the cROMc header from concentrate version 8 on and selectable per
+// colorization through altcolor/<romname>/scaling.txt.
+//
+// Scale2x is the default (value 0): colorizations without an explicit choice,
+// and every cROMc older than version 8, resolve to it. Downscaling is never
+// performed by libserum.
+enum {
+  // Scale2x / AdvMAME2x edge-preserving pixel-art upscaling (default)
+  SERUM_SCALING_SCALE2X = 0,
+  // replicate every source pixel into a 2x2 block
+  SERUM_SCALING_LINE_DOUBLING = 1,
+};
+
 // Flags to send to Serum_Load
 enum {
   FLAG_REQUEST_32P_FRAMES = 1,  // there is a output DMD which is 32 leds high
@@ -193,6 +210,7 @@ typedef void (*Serum_SetMaximumUnknownFramesToSkipFunc)(uint8_t maximum);
 typedef void (*Serum_SetStandardPaletteFunc)(const uint8_t* palette,
                                              int bitDepth);
 typedef void (*Serum_SetGenerateCRomCFunc)(bool generate);
+typedef uint8_t (*Serum_GetScalingAlgorithmFunc)(void);
 typedef void (*Serum_DisableColorizationFunc)(void);
 typedef void (*Serum_EnableColorizationFunc)(void);
 typedef void (*Serum_DisablePupTriggersFunc)(void);

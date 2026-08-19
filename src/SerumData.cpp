@@ -131,6 +131,7 @@ SerumData::~SerumData() {}
 
 void SerumData::Clear() {
   m_packingSidecarsNormalized = false;
+  scalingAlgorithm = SERUM_SCALING_SCALE2X;
   hashcodes.clear();
   shapecompmode.clear();
   compmaskID.clear();

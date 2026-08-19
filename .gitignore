@@ -3,3 +3,6 @@
 /.vscode/
 /out/
 CMakeSettings.json
+# fetched by platforms/<platform>/<arch>/external.sh
+/external/
+/third-party/include/FrameUtil.h
