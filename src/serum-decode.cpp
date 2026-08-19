@@ -656,6 +656,22 @@ bool extraPlaneIsDerived =
 // layer contributes, never the contents of frame32.
 uint8_t* scaledLayerCoverage = NULL;
 bool scaledLayerHasCoverage = false;  // any pixel owned on the current frame
+
+// Comparison domain for the upscaler when compositing the scaled layer.
+//
+// The selection must NOT be made on frame32 directly: where the layer does not
+// own a pixel the SD static render is skipped, so frame32 holds stale content
+// there and Scale2x would be comparing garbage to decide edges. Instead every
+// pixel gets a key that encodes ownership as well as colour:
+//
+//   owned    -> 0x00010000 | rgb565
+//   unowned  -> 0
+//
+// Unowned pixels then all compare equal, so no spurious edge is ever detected
+// inside HD-owned territory, while the boundary of the layer is a real edge and
+// rounds correctly. It also makes the result independent of what happens to be
+// underneath, and identical whether or not the caller also asked for 32p.
+uint32_t* scaledLayerKey = NULL;
 uint32_t masterPlaneWidth32 =
     0;  // width of the 32p master plane, even while unadvertised
 
@@ -1452,6 +1468,7 @@ void Serum_free(void) {
   Free_element((void**)&mySerum.modifiedelements64);
   Free_element((void**)&frameshape);
   Free_element((void**)&scaledLayerCoverage);
+  Free_element((void**)&scaledLayerKey);
   scaledLayerHasCoverage = false;
   cromloaded = false;
   lastfound = 0;
@@ -1868,7 +1885,15 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   // the natively rendered HD content standing everywhere else. When the frame
   // has no HD statics the mask covers everything, so this is exactly the
   // whole-frame upscale -- one code path, not two.
-  const bool respectCoverage = onlyCoveredPixels && scaledLayerCoverage;
+  const bool respectCoverage =
+      onlyCoveredPixels && scaledLayerCoverage && scaledLayerKey;
+  if (respectCoverage) {
+    const size_t srcPixels = (size_t)srcWidth * srcHeight;
+    for (size_t i = 0; i < srcPixels; ++i) {
+      scaledLayerKey[i] =
+          scaledLayerCoverage[i] ? (0x00010000u | mySerum.frame32[i]) : 0u;
+    }
+  }
 
   // Optional source-space bounds {x0,y0,x1,y1} inclusive, expanded by one
   // source pixel because Scale2x can pull a neighbour into a destination pixel
@@ -1889,8 +1914,12 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
 
   for (uint32_t y = y0; y <= y1; y++) {
     for (uint32_t x = x0; x <= x1; x++) {
-      const uint32_t src = FrameUtil::Helper::SelectUpscaled2xSourceIndex(
-          mySerum.frame32, srcWidth, srcHeight, x, y, algorithm);
+      const uint32_t src =
+          respectCoverage
+              ? FrameUtil::Helper::SelectUpscaled2xSourceIndex(
+                    scaledLayerKey, srcWidth, srcHeight, x, y, algorithm)
+              : FrameUtil::Helper::SelectUpscaled2xSourceIndex(
+                    mySerum.frame32, srcWidth, srcHeight, x, y, algorithm);
       if (respectCoverage && scaledLayerCoverage[src] == 0) continue;
       const uint32_t dst = y * dstWidth + x;
       mySerum.frame64[dst] = mySerum.frame32[src];
@@ -2128,6 +2157,8 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
     frameshape = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     scaledLayerCoverage =
         (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
+    scaledLayerKey = (uint32_t*)malloc(g_serumData.fwidth *
+                                       g_serumData.fheight * sizeof(uint32_t));
     if (!frameshape) {
       Serum_free();
       enabled = false;
@@ -2276,6 +2307,8 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
   frameshape = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   scaledLayerCoverage =
       (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
+  scaledLayerKey = (uint32_t*)malloc(g_serumData.fwidth * g_serumData.fheight *
+                                     sizeof(uint32_t));
 
   if (Allocate32OutputPlane(runtimeFlags)) {
     mySerum.width32 = (g_serumData.fheight == 32) ? g_serumData.fwidth
