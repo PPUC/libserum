@@ -672,6 +672,15 @@ bool scaledLayerHasCoverage = false;  // any pixel owned on the current frame
 // rounds correctly. It also makes the result independent of what happens to be
 // underneath, and identical whether or not the caller also asked for 32p.
 uint32_t* scaledLayerKey = NULL;
+
+// Per-pixel dyna layer of LIT dynamic content, "layer + 1" (0 = not lit
+// dynamic). Kept at both resolutions: the SD one is filled while rendering, the
+// HD one is carried through the composite's source selection. The HD copy is
+// what lets dynamic shadows be generated from the UPSCALED glyph rather than
+// from the SD glyph -- see GenerateExtraPlaneShadows().
+uint8_t* sdDynaLayerMap = NULL;
+uint8_t* hdDynaLayerMap = NULL;
+uint8_t shadowOffsetModeRuntime = SERUM_SHADOW_OFFSET_NATIVE;
 uint32_t masterPlaneWidth32 =
     0;  // width of the 32p master plane, even while unadvertised
 
@@ -1394,52 +1403,106 @@ static std::optional<std::string> find_case_insensitive_file(
 
 // Read the optional altcolor/<romname>/scaling.txt authoring sidecar.
 //
-// The file selects the upscaling algorithm. Only the first non-empty,
-// non-comment line is evaluated. Accepted values:
-//   scale2x                                     (the default)
-//   line-doubling / linedoubling / linedouble
-// Numeric values are deliberately not accepted: the constants were renumbered
-// so that Scale2x is the default, and a bare "0" or "1" in an author's file
+// Each non-empty, non-comment line is either a bare algorithm name or a
+// "key: value" setting. `#` starts a comment. Recognised:
+//
+//   scale2x | line-doubling         upscaling algorithm
+//   shadow-offset: native           dynamic shadows offset by 1 extra-plane px
+//   shadow-offset: proportional     ...by 2, keeping SD-relative thickness
+//
+// Numeric algorithm values are deliberately not accepted: the constants were
+// renumbered so Scale2x is the default, and a bare "0"/"1" in an author's file
 // would silently mean the opposite of what it used to.
-// Returns std::nullopt when the file is absent or holds no recognized value, in
-// which case the value stored in the cROMc header stays in effect.
-static std::optional<uint8_t> read_scaling_sidecar(const std::string& dirPath) {
+//
+// Anything left unset keeps the value stored in the cROMc header.
+struct ScalingSidecar {
+  std::optional<uint8_t> algorithm;
+  std::optional<uint8_t> shadowOffsetMode;
+  bool any() const {
+    return algorithm.has_value() || shadowOffsetMode.has_value();
+  }
+};
+
+static ScalingSidecar read_scaling_sidecar(const std::string& dirPath) {
+  ScalingSidecar result;
   std::optional<std::string> foundFile =
       find_case_insensitive_file(dirPath, "scaling.txt");
-  if (!foundFile) return std::nullopt;
+  if (!foundFile) return result;
 
   std::ifstream file(*foundFile);
   if (!file.is_open()) {
     Log("Failed to open %s", foundFile->c_str());
-    return std::nullopt;
+    return result;
   }
+
+  auto trim = [](const std::string& in) -> std::string {
+    const size_t a = in.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return std::string();
+    const size_t b = in.find_last_not_of(" \t\r\n");
+    return in.substr(a, b - a + 1);
+  };
 
   std::string line;
   while (std::getline(file, line)) {
-    // strip CR, comments and surrounding whitespace
     const size_t comment = line.find('#');
     if (comment != std::string::npos) line.erase(comment);
-    const size_t first = line.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) continue;
-    const size_t last = line.find_last_not_of(" \t\r\n");
-    const std::string value = to_lower(line.substr(first, last - first + 1));
+    const std::string trimmed = trim(line);
+    if (trimmed.empty()) continue;
 
-    if (value == "scale2x") {
-      Log("Found %s, using Scale2x upscaling", foundFile->c_str());
-      return (uint8_t)SERUM_SCALING_SCALE2X;
-    }
-    if (value == "line-doubling" || value == "linedoubling" ||
-        value == "linedouble") {
-      Log("Found %s, using line doubling upscaling", foundFile->c_str());
-      return (uint8_t)SERUM_SCALING_LINE_DOUBLING;
+    const size_t colon = trimmed.find(':');
+    if (colon == std::string::npos) {
+      const std::string value = to_lower(trimmed);
+      if (value == "scale2x") {
+        result.algorithm = (uint8_t)SERUM_SCALING_SCALE2X;
+      } else if (value == "line-doubling" || value == "linedoubling" ||
+                 value == "linedouble") {
+        result.algorithm = (uint8_t)SERUM_SCALING_LINE_DOUBLING;
+      } else {
+        Log("Ignoring unknown scaling algorithm '%s' in %s", value.c_str(),
+            foundFile->c_str());
+      }
+      continue;
     }
 
-    Log("Ignoring unknown scaling algorithm '%s' in %s", value.c_str(),
-        foundFile->c_str());
-    return std::nullopt;
+    const std::string key = to_lower(trim(trimmed.substr(0, colon)));
+    const std::string value = to_lower(trim(trimmed.substr(colon + 1)));
+    if (key == "shadow-offset" || key == "shadowoffset") {
+      if (value == "native" || value == "1") {
+        result.shadowOffsetMode = (uint8_t)SERUM_SHADOW_OFFSET_NATIVE;
+      } else if (value == "proportional" || value == "2") {
+        result.shadowOffsetMode = (uint8_t)SERUM_SHADOW_OFFSET_PROPORTIONAL;
+      } else {
+        Log("Ignoring unknown shadow-offset '%s' in %s", value.c_str(),
+            foundFile->c_str());
+      }
+    } else if (key == "scaling" || key == "algorithm") {
+      if (value == "scale2x") {
+        result.algorithm = (uint8_t)SERUM_SCALING_SCALE2X;
+      } else if (value == "line-doubling" || value == "linedoubling" ||
+                 value == "linedouble") {
+        result.algorithm = (uint8_t)SERUM_SCALING_LINE_DOUBLING;
+      } else {
+        Log("Ignoring unknown scaling algorithm '%s' in %s", value.c_str(),
+            foundFile->c_str());
+      }
+    } else {
+      Log("Ignoring unknown setting '%s' in %s", key.c_str(),
+          foundFile->c_str());
+    }
   }
 
-  return std::nullopt;
+  if (result.algorithm) {
+    Log("scaling.txt: algorithm = %s",
+        *result.algorithm == SERUM_SCALING_SCALE2X ? "Scale2x"
+                                                   : "line doubling");
+  }
+  if (result.shadowOffsetMode) {
+    Log("scaling.txt: shadow-offset = %s",
+        *result.shadowOffsetMode == SERUM_SHADOW_OFFSET_NATIVE
+            ? "native"
+            : "proportional");
+  }
+  return result;
 }
 
 void Free_element(void** ppElement) {
@@ -1469,6 +1532,9 @@ void Serum_free(void) {
   Free_element((void**)&frameshape);
   Free_element((void**)&scaledLayerCoverage);
   Free_element((void**)&scaledLayerKey);
+  Free_element((void**)&sdDynaLayerMap);
+  Free_element((void**)&hdDynaLayerMap);
+  shadowOffsetModeRuntime = SERUM_SHADOW_OFFSET_NATIVE;
   scaledLayerHasCoverage = false;
   cromloaded = false;
   lastfound = 0;
@@ -1839,8 +1905,10 @@ static inline void MarkScaledLayer(uint32_t index) {
 
 static void ResetScaledLayerCoverage(void) {
   if (!scaledLayerCoverage) return;
-  memset(scaledLayerCoverage, 0,
-         (size_t)g_serumData.fwidth * g_serumData.fheight);
+  const size_t px = (size_t)g_serumData.fwidth * g_serumData.fheight;
+  memset(scaledLayerCoverage, 0, px);
+  if (sdDynaLayerMap) memset(sdDynaLayerMap, 0, px);
+  if (hdDynaLayerMap) memset(hdDynaLayerMap, 0, px * 4);
   scaledLayerHasCoverage = false;
 }
 
@@ -1920,9 +1988,23 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
                     scaledLayerKey, srcWidth, srcHeight, x, y, algorithm)
               : FrameUtil::Helper::SelectUpscaled2xSourceIndex(
                     mySerum.frame32, srcWidth, srcHeight, x, y, algorithm);
+      // Ownership follows the SELECTED source, not the centre. The unowned
+      // region is a real value in the comparison (key 0), so when the selection
+      // lands on it the destination is left to the HD layer -- which is exactly
+      // that corner being rounded away, the same result as if the background
+      // were part of the same frame.
+      //
+      // Falling back to the centre here instead would defeat the whole point:
+      // a thin feature such as a one-pixel dynamic shadow is entirely boundary,
+      // so almost every selection resolves outside it and every destination
+      // pixel would take the centre value -- a 2x2 block, i.e. line doubling,
+      // regardless of the algorithm selected.
       if (respectCoverage && scaledLayerCoverage[src] == 0) continue;
       const uint32_t dst = y * dstWidth + x;
       mySerum.frame64[dst] = mySerum.frame32[src];
+      if (respectCoverage && sdDynaLayerMap && hdDynaLayerMap) {
+        hdDynaLayerMap[dst] = sdDynaLayerMap[src];
+      }
       if (mySerum.rotationsinframe64 && mySerum.rotationsinframe32) {
         // Carry each pixel's rotation entry through the same source selection
         // as its colour, so Serum_Rotate() animates the upscaled plane in
@@ -1967,6 +2049,71 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
 
 static uint32_t OriginalPlaneWidth(void) {
   return mySerum.width32 ? mySerum.width32 : masterPlaneWidth32;
+}
+
+// Generate dynamic shadows directly on the extra plane, from the UPSCALED
+// dynamic content.
+//
+// Generating them at original resolution and letting them ride through the
+// upscale gets the geometry wrong twice over. The shadow's own outline is
+// rounded independently of the glyph's, so the two do not line up; and a
+// one-pixel original-resolution shadow becomes a two-pixel one, which on a
+// tight glyph such as "8" closes the gap between its loops. Deriving the shadow
+// here, from the finished shape, cannot disagree with that shape -- and the
+// offset becomes an explicit choice rather than a side effect of scaling.
+static void GenerateExtraPlaneShadows(uint32_t IDfound) {
+  if (!hdDynaLayerMap || !mySerum.frame64) return;
+  const uint8_t* shadowDir = g_serumData.dynashadowsdir[IDfound];
+  const uint16_t* shadowCol = g_serumData.dynashadowscol[IDfound];
+  const uint8_t* shadowDirFb = g_serumData.dynashadowsdir_extra[IDfound];
+  const uint16_t* shadowColFb = g_serumData.dynashadowscol_extra[IDfound];
+  if (!shadowDir && !shadowDirFb) return;
+
+  const uint32_t w = g_serumData.fwidth * 2;
+  const uint32_t h = g_serumData.fheight * 2;
+  if (mySerum.width64 != w) return;
+
+  const int steps =
+      (shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL) ? 2 : 1;
+  static const int8_t kNeighborDx[8] = {-1, 0, 1, 1, 1, 0, -1, -1};
+  static const int8_t kNeighborDy[8] = {-1, -1, -1, 0, 1, 1, 1, 0};
+
+  for (uint32_t y = 0; y < h; ++y) {
+    for (uint32_t x = 0; x < w; ++x) {
+      const uint8_t entry = hdDynaLayerMap[y * w + x];
+      if (entry == 0) continue;  // not lit dynamic content
+      const uint8_t layer = (uint8_t)(entry - 1);
+      uint8_t dirs = shadowDir ? shadowDir[layer] : 0;
+      uint16_t colour = shadowCol ? shadowCol[layer] : 0;
+      if (dirs == 0 && shadowDirFb) {
+        dirs = shadowDirFb[layer];
+        if (shadowColFb) colour = shadowColFb[layer];
+      }
+      if (dirs == 0) continue;
+
+      for (uint8_t bit = 0; bit < 8; ++bit) {
+        if ((dirs & (1u << bit)) == 0) continue;
+        for (int k = 1; k <= steps; ++k) {
+          const int32_t nx = (int32_t)x + kNeighborDx[bit] * k;
+          const int32_t ny = (int32_t)y + kNeighborDy[bit] * k;
+          if (nx < 0 || ny < 0 || nx >= (int32_t)w || ny >= (int32_t)h)
+            continue;
+          const uint32_t n = (uint32_t)ny * w + (uint32_t)nx;
+          // Never overwrite lit dynamic content, and let the first shadow win,
+          // matching the original-resolution behaviour.
+          // Non-zero covers both lit dynamic content and an already-claimed
+          // shadow pixel (0xff), so the first shadow wins -- as at SD.
+          if (hdDynaLayerMap[n] != 0) continue;
+          mySerum.frame64[n] = colour;
+          hdDynaLayerMap[n] = 0xff;  // mark as shadow, claimed
+          if (mySerum.rotationsinframe64) {
+            mySerum.rotationsinframe64[n * 2] = 0xffff;
+            mySerum.rotationsinframe64[n * 2 + 1] = 0xffff;
+          }
+        }
+      }
+    }
+  }
 }
 
 // Fill the 64p output by upscaling, but only when this call rendered the
@@ -2159,6 +2306,9 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
         (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     scaledLayerKey = (uint32_t*)malloc(g_serumData.fwidth *
                                        g_serumData.fheight * sizeof(uint32_t));
+    sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
+    hdDynaLayerMap =
+        (uint8_t*)malloc(g_serumData.fwidth * 2 * g_serumData.fheight * 2);
     if (!frameshape) {
       Serum_free();
       enabled = false;
@@ -2309,6 +2459,9 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
       (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   scaledLayerKey = (uint32_t*)malloc(g_serumData.fwidth * g_serumData.fheight *
                                      sizeof(uint32_t));
+  sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
+  hdDynaLayerMap =
+      (uint8_t*)malloc(g_serumData.fwidth * 2 * g_serumData.fheight * 2);
 
   if (Allocate32OutputPlane(runtimeFlags)) {
     mySerum.width32 = (g_serumData.fheight == 32) ? g_serumData.fwidth
@@ -2887,13 +3040,13 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   }
 
   std::optional<std::string> csvFoundFile;
-  std::optional<uint8_t> requestedScalingAlgorithm;
+  ScalingSidecar requestedScaling;
   if (!realMachine) {
     csvFoundFile =
         find_case_insensitive_file(pathbuf, std::string(romname) + ".pup.csv");
     // Authoring-time override of the algorithm stored in the cROMc header. On a
     // real machine only the cROMc header value is used.
-    requestedScalingAlgorithm = read_scaling_sidecar(pathbuf);
+    requestedScaling = read_scaling_sidecar(pathbuf);
   }
   NoteStartupRssSample("after-file-scan");
   if (csvFoundFile) {
@@ -2951,13 +3104,22 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
             concentrateNeedsRewrite = true;
             NoteStartupRssSample("after-csv-update");
           }
-          if (requestedScalingAlgorithm &&
-              *requestedScalingAlgorithm != g_serumData.scalingAlgorithm) {
+          if (requestedScaling.algorithm &&
+              *requestedScaling.algorithm != g_serumData.scalingAlgorithm) {
             Log("scaling.txt changes the stored scaling algorithm from %u to "
                 "%u",
                 (uint32_t)g_serumData.scalingAlgorithm,
-                (uint32_t)*requestedScalingAlgorithm);
-            g_serumData.scalingAlgorithm = *requestedScalingAlgorithm;
+                (uint32_t)*requestedScaling.algorithm);
+            g_serumData.scalingAlgorithm = *requestedScaling.algorithm;
+            concentrateNeedsRewrite = true;
+          }
+          if (requestedScaling.shadowOffsetMode &&
+              *requestedScaling.shadowOffsetMode !=
+                  g_serumData.shadowOffsetMode) {
+            Log("scaling.txt changes the stored shadow offset from %u to %u",
+                (uint32_t)g_serumData.shadowOffsetMode,
+                (uint32_t)*requestedScaling.shadowOffsetMode);
+            g_serumData.shadowOffsetMode = *requestedScaling.shadowOffsetMode;
             concentrateNeedsRewrite = true;
           }
           if (concentrateNeedsRewrite && !realMachine) {
@@ -3039,10 +3201,13 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
           NoteStartupRssSample("after-csv-update");
         }
       }
-      if (requestedScalingAlgorithm) {
-        // Raw sources carry no scaling algorithm, so the sidecar value is the
-        // only input for the cROMc generated below.
-        g_serumData.scalingAlgorithm = *requestedScalingAlgorithm;
+      if (requestedScaling.algorithm) {
+        // Raw sources carry no scaling settings, so the sidecar is the only
+        // input for the cROMc generated below.
+        g_serumData.scalingAlgorithm = *requestedScaling.algorithm;
+      }
+      if (requestedScaling.shadowOffsetMode) {
+        g_serumData.shadowOffsetMode = *requestedScaling.shadowOffsetMode;
       }
       if (!realMachine) {
         if (generateCRomC && Serum_SaveConcentrate(pFoundFile->c_str())) {
@@ -3168,6 +3333,43 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     // plane, and every consult site carries its own geometry guard already.
     useScale2xUpscaling =
         (g_serumData.scalingAlgorithm == SERUM_SCALING_SCALE2X);
+    shadowOffsetModeRuntime = g_serumData.shadowOffsetMode;
+    if (upscaleExtraFromOriginal && g_serumData.SerumVersion == SERUM_V2) {
+      // Report where this colorization actually keeps its dynamic-shadow
+      // configuration. Dynamic content is rendered at SD now, so a colorization
+      // that only has shadows in the extra tables relies on the per-layer
+      // fallback in CheckDynaShadow().
+      uint32_t sdOnly = 0, hdOnly = 0, both = 0;
+      for (uint32_t f = 0; f < g_serumData.nframes; ++f) {
+        if (f < g_serumData.frameHasDynamic.size() &&
+            g_serumData.frameHasDynamic[f] == 0)
+          continue;
+        const uint8_t* sd = g_serumData.dynashadowsdir[f];
+        const uint8_t* hd = g_serumData.dynashadowsdir_extra[f];
+        bool anySd = false, anyHd = false;
+        for (uint32_t l = 0; l < MAX_DYNA_SETS_PER_FRAME_V2; ++l) {
+          if (sd && sd[l]) anySd = true;
+          if (hd && hd[l]) anyHd = true;
+        }
+        if (anySd && anyHd)
+          ++both;
+        else if (anySd)
+          ++sdOnly;
+        else if (anyHd)
+          ++hdOnly;
+      }
+      if (sdOnly || hdOnly || both) {
+        Log("Dynamic shadows: frames with SD tables only=%u, extra tables "
+            "only=%u (using fallback), both=%u",
+            sdOnly, hdOnly, both);
+      }
+    }
+    Log("Dynamic shadow offset: %s (%u extra-plane pixel%s)",
+        shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL
+            ? "proportional"
+            : "native",
+        shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL ? 2u : 1u,
+        shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL ? "s" : "");
     Log("Upscaling algorithm: %s (source=%s, extra plane: %s)",
         useScale2xUpscaling ? "Scale2x" : "line doubling",
         g_serumData.concentrateFileVersion >= 8 ? "cROMc header" : "default",
@@ -4205,14 +4407,28 @@ bool ColorInRotation(uint32_t IDfound, uint16_t col, uint16_t* norot,
   return false;
 }
 
+// shadowDir/ColorFallback: consulted per layer when the primary tables say this
+// layer casts no shadow.
+//
+// Unlike the dynamic *masks*, these tables carry no spatial information -- they
+// are an 8-direction bitmask and a colour per dyna layer, equally meaningful at
+// either resolution. Colorizations authored in the HD editor can end up with
+// their shadow configuration only in the extra tables, so rendering dynamic
+// content at SD would silently drop every shadow. Falling back keeps the
+// author's configuration without reintroducing any HD spatial data.
 void CheckDynaShadow(uint16_t* pfr, const uint8_t* shadowDirByLayer,
                      const uint16_t* shadowColorByLayer, uint8_t dynacouche,
                      uint8_t* isdynapix, uint16_t fx, uint16_t fy, uint32_t fw,
-                     uint32_t fh, bool markCoverage = false) {
-  if (!shadowDirByLayer || !shadowColorByLayer) return;
-  const uint8_t dsdir = shadowDirByLayer[dynacouche];
+                     uint32_t fh, bool markCoverage = false,
+                     const uint8_t* shadowDirFallback = nullptr,
+                     const uint16_t* shadowColorFallback = nullptr) {
+  uint8_t dsdir = shadowDirByLayer ? shadowDirByLayer[dynacouche] : 0;
+  uint16_t tcol = shadowColorByLayer ? shadowColorByLayer[dynacouche] : 0;
+  if (dsdir == 0 && shadowDirFallback) {
+    dsdir = shadowDirFallback[dynacouche];
+    if (shadowColorFallback) tcol = shadowColorFallback[dynacouche];
+  }
   if (dsdir == 0) return;
-  const uint16_t tcol = shadowColorByLayer[dynacouche];
 
   static const int8_t kNeighborDx[8] = {-1, 0, 1, 1, 1, 0, -1, -1};
   static const int8_t kNeighborDy[8] = {-1, -1, -1, 0, 1, 1, 1, 0};
@@ -4225,6 +4441,11 @@ void CheckDynaShadow(uint16_t* pfr, const uint8_t* shadowDirByLayer,
     if (isdynapix[neighborIndex] != 0) continue;
     isdynapix[neighborIndex] = 1;
     pfr[neighborIndex] = tcol;
+    // A shadow is generated from dynamic content, so it belongs to the scaled
+    // layer and must be composited with it. Without this the shadow is written
+    // into frame32 but never owned, so the composite skips it and every dynamic
+    // shadow silently disappears from the 64p output.
+    if (markCoverage) MarkScaledLayer(neighborIndex);
   }
 }
 
@@ -4289,6 +4510,16 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         frameHasDynamic ? g_serumData.dynashadowsdir[IDfound] : nullptr;
     const uint16_t* frameShadowColor =
         frameHasDynamic ? g_serumData.dynashadowscol[IDfound] : nullptr;
+    // See CheckDynaShadow(): shadow tables are per-layer parameters, not
+    // spatial data, so the HD-authored ones are valid here too.
+    const uint8_t* shadowDirFallback =
+        (layerMode && frameHasDynamic)
+            ? g_serumData.dynashadowsdir_extra[IDfound]
+            : nullptr;
+    const uint16_t* shadowColorFallback =
+        (layerMode && frameHasDynamic)
+            ? g_serumData.dynashadowscol_extra[IDfound]
+            : nullptr;
     // create the original res frame
     if (g_serumData.fheight == 32) {
       pfr = mySerum.frame32;
@@ -4392,13 +4623,23 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                 }
               }
               if (!dynamicBlackSuppressed) {
+                // markCoverage is false in layer mode: the extra plane
+                // regenerates shadows from the upscaled glyph, so these SD
+                // shadows belong to the 32p output only and must not be
+                // composited (that would draw them twice, at two thicknesses).
                 CheckDynaShadow(pfr, frameShadowDir, frameShadowColor,
                                 dynacouche, isdynapix, ti, tj,
                                 g_serumData.fwidth, g_serumData.fheight,
-                                layerMode);
+                                /*markCoverage=*/false, shadowDirFallback,
+                                shadowColorFallback);
                 isdynapix[tk] = 1;
                 pfr[tk] = dynamicColor;
                 MarkScaledLayer(tk);
+                if (layerMode && sdDynaLayerMap) {
+                  // Remember which dyna layer this lit pixel belongs to, so the
+                  // extra plane can generate its shadow after upscaling.
+                  sdDynaLayerMap[tk] = (uint8_t)(dynacouche + 1);
+                }
               }
               // A pixel suppressed by FLAG_SCENE_REPLACE_DYNAMIC_BLACK is
               // deliberately left unowned, so the HD background shows through.
@@ -4426,6 +4667,14 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         hasBackground ? g_serumData.backgroundframes_v2_extra[backgroundId]
                       : nullptr;
     const uint16_t* frameColorsExtra = g_serumData.cframes_v2_extra[IDfound];
+    // The SD dynamic mask, projected per HD pixel below. In layer mode the
+    // scaled layer paints the dynamic content, so this pass must render what
+    // lies BEHIND it rather than trying to reproduce its footprint.
+    const bool sdHasDynamic = IDfound < g_serumData.frameHasDynamic.size() &&
+                              g_serumData.frameHasDynamic[IDfound] > 0;
+    const uint8_t* sdDynaActive = (layerMode && sdHasDynamic)
+                                      ? g_serumData.dynamasks_active[IDfound]
+                                      : nullptr;
     // In layer mode the HD dynamic data is ignored outright: all dynamic
     // content comes from the SD pass and is composited on top. Forcing this
     // false makes every dynamic pixel take the static path here, which is
@@ -4493,7 +4742,16 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                                             g_serumData.fheight, ti, tj)
                          : frame[tj * 2 * g_serumData.fwidth + ti * 2];
 
-        if (hasBackground && (srcShade == 0) &&
+        // A pixel whose SD source is inside a dynamic zone is underlay: the
+        // layer will paint over it. Deciding it by srcShade instead makes this
+        // pass stamp cframes_v2_extra (often black) in the glyph footprint,
+        // computed by Scale2x on the SHADE field -- while the composite rounds
+        // the glyph by Scale2x on the COLOUR key. The two footprints disagree,
+        // and every disagreement leaves a black pixel inside the glyph.
+        const bool srcIsDynamicZone =
+            sdDynaActive &&
+            sdDynaActive[(tj >> 1) * g_serumData.fwidth + (ti >> 1)] != 0;
+        if (hasBackground && (srcShade == 0 || srcIsDynamicZone) &&
             (frameBackgroundMaskExtra[tk] > 0)) {
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
@@ -4595,6 +4853,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
       UpscaleOriginalPlaneIntoExtra(false, /*onlyCoveredPixels=*/true);
     } else {
       MaybeUpscaleOriginalPlaneIntoExtra();
+    }
+    if (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) {
+      GenerateExtraPlaneShadows(IDfound);
     }
   }
 }

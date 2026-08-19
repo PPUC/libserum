@@ -158,6 +158,10 @@ class SerumData {
   // Persisted from concentrate version 8 on; older archives default to
   // SERUM_SCALING_SCALE2X, which is the look the stack has always produced.
   uint8_t scalingAlgorithm = SERUM_SCALING_SCALE2X;
+  // SERUM_SHADOW_OFFSET_* selector for dynamic shadows on the upscaled extra
+  // plane. Persisted from concentrate version 8 on; older archives default to
+  // NATIVE, which is what the pre-layer extra-plane renderer produced.
+  uint8_t shadowOffsetMode = SERUM_SHADOW_OFFSET_NATIVE;
 
   // Vector data
   SparseVector<uint32_t> hashcodes;
@@ -513,16 +517,20 @@ class SerumData {
 
     if constexpr (Archive::is_saving::value) {
       if (concentrateFileVersion >= 8) {
-        ar(scalingAlgorithm);
+        ar(scalingAlgorithm, shadowOffsetMode);
       }
     } else {
       if (concentrateFileVersion >= 8) {
-        ar(scalingAlgorithm);
+        ar(scalingAlgorithm, shadowOffsetMode);
         if (scalingAlgorithm > SERUM_SCALING_LINE_DOUBLING) {
           scalingAlgorithm = SERUM_SCALING_SCALE2X;
         }
+        if (shadowOffsetMode > SERUM_SHADOW_OFFSET_PROPORTIONAL) {
+          shadowOffsetMode = SERUM_SHADOW_OFFSET_NATIVE;
+        }
       } else {
         scalingAlgorithm = SERUM_SCALING_SCALE2X;
+        shadowOffsetMode = SERUM_SHADOW_OFFSET_NATIVE;
       }
     }
   }

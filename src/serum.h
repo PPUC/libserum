@@ -57,6 +57,22 @@ enum {
   SERUM_SCALING_LINE_DOUBLING = 1,
 };
 
+// How far a dynamic shadow is offset when the extra plane is produced by
+// upscaling. Stored in the cROMc header from concentrate version 8 on and
+// selectable through altcolor/<romname>/scaling.txt.
+//
+// Shadows are generated from the *upscaled* dynamic content, at extra-plane
+// resolution. SERUM_SHADOW_OFFSET_NATIVE reproduces what libserum has always
+// rendered into the extra plane (a one-pixel offset in extra-plane
+// coordinates), which is what colorization authors tuned against.
+// SERUM_SHADOW_OFFSET_PROPORTIONAL keeps the shadow's thickness proportional to
+// the glyph, matching the original-resolution output. Tight glyphs such as "8"
+// can lose the gap between their loops under PROPORTIONAL.
+enum {
+  SERUM_SHADOW_OFFSET_NATIVE = 0,       // 1 extra-plane pixel (default)
+  SERUM_SHADOW_OFFSET_PROPORTIONAL = 1  // 2 extra-plane pixels
+};
+
 // Flags to send to Serum_Load
 enum {
   FLAG_REQUEST_32P_FRAMES = 1,  // there is a output DMD which is 32 leds high
