@@ -431,7 +431,7 @@ so the HD background shows through.
 Because the mask is authoritative, the SD static render is **skipped** when HD
 statics will cover it and the caller did not ask for the `32p` plane.
 
-### Two invariants that are easy to break
+### Three invariants that are easy to break
 
 **Select on the ownership key, never on `frame32`.** The composite builds
 `scaledLayerKey[i] = owned ? (0x00010000 | colour) : 0` and runs the upscaler's
@@ -447,6 +447,22 @@ that *is* the boundary being rounded. Falling back to the centre instead makes
 every boundary pixel take the centre value, which for a thin feature such as a
 one-pixel shadow is byte-identical to line doubling regardless of the algorithm
 selected.
+
+**Pad the comparison domain with a border of "outside".** The key buffer is
+allocated `(fwidth + 2) x (fheight + 2)` and the selection runs in those padded
+coordinates. Without the border the selector clamps an out-of-bounds neighbour
+to the centre pixel, so content touching row 0 sees its own colour "above" it —
+a false edge that trips the rounding branch and shaves pixels off the top of
+glyphs. This was a real bug: scores drawn on row 0 lost the tops of `8`, `S`,
+`0`, `9` and `3`, and only there, because the same glyphs were intact at the
+bottom of the frame. Zero is the correct filler in both domains — unowned in the
+coverage domain, black in the colour domain — which is what actually lies
+outside a DMD frame. A selection that lands in the border is genuinely outside
+and paints nothing.
+
+Note that `FrameUtil`'s whole-frame `ScaleUp()` / `Scale2XIndexed()` still clamp
+at the edge, so a host scaling a frame itself can reproduce the old artefact.
+That is one more reason hosts should not scale Serum output.
 
 ### Rotations
 
