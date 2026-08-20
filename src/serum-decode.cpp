@@ -653,25 +653,10 @@ bool extraPlaneIsDerived =
 // non-zero where the scaled layer owns the pixel and must paint over whatever
 // the natively rendered HD layer put there. This is the artifact that lets one
 // upscale pass composite correctly over HD statics: the mask decides what the
-// layer contributes, never the contents of frame32.
+// layer CONTRIBUTES, while frame32 -- a complete picture -- decides how the
+// upscaler rounds. Those are deliberately two different questions.
 uint8_t* scaledLayerCoverage = NULL;
 bool scaledLayerHasCoverage = false;  // any pixel owned on the current frame
-
-// Comparison domain for the upscaler when compositing the scaled layer.
-//
-// The selection must NOT be made on frame32 directly: where the layer does not
-// own a pixel the SD static render is skipped, so frame32 holds stale content
-// there and Scale2x would be comparing garbage to decide edges. Instead every
-// pixel gets a key that encodes ownership as well as colour:
-//
-//   owned    -> 0x00010000 | rgb565
-//   unowned  -> 0
-//
-// Unowned pixels then all compare equal, so no spurious edge is ever detected
-// inside HD-owned territory, while the boundary of the layer is a real edge and
-// rounds correctly. It also makes the result independent of what happens to be
-// underneath, and identical whether or not the caller also asked for 32p.
-uint32_t* scaledLayerKey = NULL;
 
 // Per-pixel dyna layer of LIT dynamic content, "layer + 1" (0 = not lit
 // dynamic). Kept at both resolutions: the SD one is filled while rendering, the
@@ -1531,7 +1516,6 @@ void Serum_free(void) {
   Free_element((void**)&mySerum.modifiedelements64);
   Free_element((void**)&frameshape);
   Free_element((void**)&scaledLayerCoverage);
-  Free_element((void**)&scaledLayerKey);
   Free_element((void**)&sdDynaLayerMap);
   Free_element((void**)&hdDynaLayerMap);
   shadowOffsetModeRuntime = SERUM_SHADOW_OFFSET_NATIVE;
@@ -1953,16 +1937,7 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   // the natively rendered HD content standing everywhere else. When the frame
   // has no HD statics the mask covers everything, so this is exactly the
   // whole-frame upscale -- one code path, not two.
-  const bool respectCoverage =
-      onlyCoveredPixels && scaledLayerCoverage && scaledLayerKey;
-
-  if (respectCoverage) {
-    const size_t srcPixels = (size_t)srcWidth * srcHeight;
-    for (size_t i = 0; i < srcPixels; ++i) {
-      scaledLayerKey[i] =
-          scaledLayerCoverage[i] ? (0x00010000u | mySerum.frame32[i]) : 0u;
-    }
-  }
+  const bool respectCoverage = onlyCoveredPixels && scaledLayerCoverage;
 
   // Optional source-space bounds {x0,y0,x1,y1} inclusive, expanded by one
   // source pixel because Scale2x can pull a neighbour into a destination pixel
@@ -1983,20 +1958,18 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
 
   for (uint32_t y = y0; y <= y1; y++) {
     for (uint32_t x = x0; x <= x1; x++) {
-      const uint32_t src =
-          respectCoverage
-              ? FrameUtil::Helper::SelectUpscaled2xSourceIndex(
-                    scaledLayerKey, srcWidth, srcHeight, x, y, algorithm)
-              : FrameUtil::Helper::SelectUpscaled2xSourceIndex(
-                    mySerum.frame32, srcWidth, srcHeight, x, y, algorithm);
+      // Always select on the COLOUR, never on an ownership-tagged key: the
+      // scaled layer must round its edges exactly as a whole-frame upscale of
+      // the same picture would, and tagging ownership into the comparison
+      // changes those decisions along every layer boundary. frame32 is a
+      // complete picture here -- see sdRendersStatics.
+      const uint32_t src = FrameUtil::Helper::SelectUpscaled2xSourceIndex(
+          mySerum.frame32, srcWidth, srcHeight, x, y, algorithm);
       // Outside the frame: black, and nothing to read parallel planes from.
       // The layer simply does not paint here.
       if (src == FrameUtil::Helper::kUpscaleSourceOutside) continue;
-      // Ownership follows the SELECTED source, not the centre. The unowned
-      // region is a real value in the comparison (key 0), so when the selection
-      // lands on it the destination is left to the HD layer -- which is exactly
-      // that corner being rounded away, the same result as if the background
-      // were part of the same frame.
+      // Coverage decides only what is painted. Where the selection lands on a
+      // pixel the layer does not own, the natively rendered HD content stands.
       if (respectCoverage && scaledLayerCoverage[src] == 0) continue;
       const uint32_t dst = y * dstWidth + x;
       mySerum.frame64[dst] = mySerum.frame32[src];
@@ -2302,8 +2275,6 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
     frameshape = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     scaledLayerCoverage =
         (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-    scaledLayerKey = (uint32_t*)malloc(g_serumData.fwidth *
-                                       g_serumData.fheight * sizeof(uint32_t));
     sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     hdDynaLayerMap =
         (uint8_t*)malloc(g_serumData.fwidth * 2 * g_serumData.fheight * 2);
@@ -2455,8 +2426,6 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
   frameshape = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   scaledLayerCoverage =
       (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-  scaledLayerKey = (uint32_t*)malloc(g_serumData.fwidth * g_serumData.fheight *
-                                     sizeof(uint32_t));
   sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   hdDynaLayerMap =
       (uint8_t*)malloc(g_serumData.fwidth * 2 * g_serumData.fheight * 2);
@@ -4483,8 +4452,18 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
   // Static SD content is pure waste when HD statics will cover it. Render it
   // only when it will actually be read: as the scaled layer (no HD statics) or
   // as the caller's own 32p output.
-  const bool sdRendersStatics =
-      !layerMode || !isextra || originalPlaneRequestedByCaller;
+  // The SD statics are ALWAYS rendered, even when HD statics will cover them
+  // and the caller never asked for the 32p plane.
+  //
+  // They are not drawn for their own sake there -- they are the comparison
+  // domain for the upscale. Skipping them was an obvious-looking optimization
+  // and it caused a real bug: the composite then had to select on an
+  // ownership-tagged key, which makes black OUTSIDE the layer (unowned, 0)
+  // compare unequal to black INSIDE it (owned, 0x00010000). Scale2x's guard
+  // `b == h` is exactly what preserves a glyph pixel sitting on the layer
+  // boundary, and that inequality defeated it, shaving the tops off every glyph
+  // whose top row coincided with the top of a dynamic zone.
+  const bool sdRendersStatics = true;
   // ...and it only belongs to the scaled layer when there are no HD statics.
   const bool sdOwnsStatics = !layerMode || !isextra;
   if (((mySerum.frame32 && g_serumData.fheight == 32) ||

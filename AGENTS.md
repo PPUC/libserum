@@ -428,20 +428,27 @@ statics; a sprite's dynamic pixels always, its other pixels only when it has no
 HD art. Pixels suppressed by `FLAG_SCENE_REPLACE_DYNAMIC_BLACK` are left unowned
 so the HD background shows through.
 
-Because the mask is authoritative, the SD static render is **skipped** when HD
-statics will cover it and the caller did not ask for the `32p` plane.
+The mask decides what the layer **contributes**. It does not decide how the
+upscaler **rounds** — see the first invariant below, which is why the SD statics
+are always rendered even when HD statics will cover them.
 
 ### Three invariants that are easy to break
 
-**Select on the ownership key, never on `frame32`.** The composite builds
-`scaledLayerKey[i] = owned ? (0x00010000 | colour) : 0` and runs the upscaler's
-source selection over *that*. Selecting over `frame32` reads stale content at
-unowned pixels — the SD static render was skipped there — so Scale2x decides
-edges from leftover data and paints stray pixels onto HD-owned territory. The
-key also makes the result independent of what lies underneath, and identical
-whether or not `32p` was requested.
+**Select on `frame32`, never on an ownership-tagged key.** The scaled layer has
+to round its edges exactly as a whole-frame upscale of the same picture would,
+because that is what every other player produces. Feeding ownership into the
+comparison breaks that along every layer boundary: black *outside* the layer and
+black *inside* it stop comparing equal, so Scale2x's `b == h` guard — the thing
+that preserves a glyph pixel sitting on the boundary — no longer fires and the
+pixel is rounded away.
 
-**Let the selected source decide ownership, not the centre pixel.** If the
+That was a real bug, and a subtle one: every glyph whose top row coincided with
+the top of a dynamic zone lost its top row, on both the top and bottom edges of
+the zone. It is also why the SD static render must always run. Skipping it when
+HD statics cover it looks like free work to save, but it leaves `frame32`
+incomplete, which is what forced the tagged key in the first place.
+
+**Let the selected source decide painting, not the centre pixel.** If the
 selection lands on an unowned pixel the destination is left to the HD layer —
 that *is* the boundary being rounded. Falling back to the centre instead makes
 every boundary pixel take the centre value, which for a thin feature such as a
