@@ -1956,26 +1956,11 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   const bool respectCoverage =
       onlyCoveredPixels && scaledLayerCoverage && scaledLayerKey;
 
-  // The upscaler's comparison domain, with a one-pixel border of "outside".
-  //
-  // The border matters as much as the key. Without it the selector clamps an
-  // out-of-bounds neighbour to the centre pixel, so a glyph sitting on row 0
-  // sees its own colour "above" it -- a false edge that trips the rounding
-  // branch and shaves pixels off the top. A real border makes the two
-  // out-of-frame neighbours compare equal, the guard fires, and the centre is
-  // kept. Zero is the right filler in both domains: unowned in the coverage
-  // domain, black in the colour domain, which is what lies outside a DMD frame.
-  const uint32_t padW = srcWidth + 2, padH = srcHeight + 2;
-  if (!scaledLayerKey) return;
-  memset(scaledLayerKey, 0, (size_t)padW * padH * sizeof(uint32_t));
-  for (uint32_t y = 0; y < srcHeight; ++y) {
-    for (uint32_t x = 0; x < srcWidth; ++x) {
-      const uint32_t i = y * srcWidth + x;
-      scaledLayerKey[(y + 1) * padW + (x + 1)] =
-          respectCoverage
-              ? (scaledLayerCoverage[i] ? (0x00010000u | mySerum.frame32[i])
-                                        : 0u)
-              : mySerum.frame32[i];
+  if (respectCoverage) {
+    const size_t srcPixels = (size_t)srcWidth * srcHeight;
+    for (size_t i = 0; i < srcPixels; ++i) {
+      scaledLayerKey[i] =
+          scaledLayerCoverage[i] ? (0x00010000u | mySerum.frame32[i]) : 0u;
     }
   }
 
@@ -1998,14 +1983,15 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
 
   for (uint32_t y = y0; y <= y1; y++) {
     for (uint32_t x = x0; x <= x1; x++) {
-      // Select in padded coordinates, then map the chosen source back.
-      const uint32_t psrc = FrameUtil::Helper::SelectUpscaled2xSourceIndex(
-          scaledLayerKey, padW, padH, x + 2, y + 2, algorithm);
-      const uint32_t py = psrc / padW, px = psrc % padW;
-      // The selection landed in the border: that is genuinely outside the
-      // frame, so there is nothing to paint.
-      if (px == 0 || py == 0 || px > srcWidth || py > srcHeight) continue;
-      const uint32_t src = (py - 1) * srcWidth + (px - 1);
+      const uint32_t src =
+          respectCoverage
+              ? FrameUtil::Helper::SelectUpscaled2xSourceIndex(
+                    scaledLayerKey, srcWidth, srcHeight, x, y, algorithm)
+              : FrameUtil::Helper::SelectUpscaled2xSourceIndex(
+                    mySerum.frame32, srcWidth, srcHeight, x, y, algorithm);
+      // Outside the frame: black, and nothing to read parallel planes from.
+      // The layer simply does not paint here.
+      if (src == FrameUtil::Helper::kUpscaleSourceOutside) continue;
       // Ownership follows the SELECTED source, not the centre. The unowned
       // region is a real value in the comparison (key 0), so when the selection
       // lands on it the destination is left to the HD layer -- which is exactly
@@ -2316,9 +2302,8 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
     frameshape = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     scaledLayerCoverage =
         (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-    scaledLayerKey =
-        (uint32_t*)malloc((g_serumData.fwidth + 2) * (g_serumData.fheight + 2) *
-                          sizeof(uint32_t));
+    scaledLayerKey = (uint32_t*)malloc(g_serumData.fwidth *
+                                       g_serumData.fheight * sizeof(uint32_t));
     sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     hdDynaLayerMap =
         (uint8_t*)malloc(g_serumData.fwidth * 2 * g_serumData.fheight * 2);
@@ -2470,8 +2455,8 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
   frameshape = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   scaledLayerCoverage =
       (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-  scaledLayerKey = (uint32_t*)malloc(
-      (g_serumData.fwidth + 2) * (g_serumData.fheight + 2) * sizeof(uint32_t));
+  scaledLayerKey = (uint32_t*)malloc(g_serumData.fwidth * g_serumData.fheight *
+                                     sizeof(uint32_t));
   sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   hdDynaLayerMap =
       (uint8_t*)malloc(g_serumData.fwidth * 2 * g_serumData.fheight * 2);

@@ -448,21 +448,19 @@ every boundary pixel take the centre value, which for a thin feature such as a
 one-pixel shadow is byte-identical to line doubling regardless of the algorithm
 selected.
 
-**Pad the comparison domain with a border of "outside".** The key buffer is
-allocated `(fwidth + 2) x (fheight + 2)` and the selection runs in those padded
-coordinates. Without the border the selector clamps an out-of-bounds neighbour
-to the centre pixel, so content touching row 0 sees its own colour "above" it —
-a false edge that trips the rounding branch and shaves pixels off the top of
-glyphs. This was a real bug: scores drawn on row 0 lost the tops of `8`, `S`,
-`0`, `9` and `3`, and only there, because the same glyphs were intact at the
-bottom of the frame. Zero is the correct filler in both domains — unowned in the
-coverage domain, black in the colour domain — which is what actually lies
-outside a DMD frame. A selection that lands in the border is genuinely outside
-and paints nothing.
+**Handle `kUpscaleSourceOutside`.** Outside the frame is black, not a copy of
+the edge pixel — `FrameUtil` clamped there until `db067bc`, which made content
+touching row 0 see its own colour "above" it, a false edge that trips the
+rounding branch. Scores drawn on row 0 lost the tops of `8`, `S`, `0`, `9` and
+`3`, and only there, because the same glyphs were intact at the bottom of the
+frame.
 
-Note that `FrameUtil`'s whole-frame `ScaleUp()` / `Scale2XIndexed()` still clamp
-at the edge, so a host scaling a frame itself can reproduce the old artefact.
-That is one more reason hosts should not scale Serum output.
+Since outside is now a real value the selection can land on it, and
+`SelectUpscaled2xSourceIndex()` then returns `kUpscaleSourceOutside` instead of
+an index. The composite indexes `frame32`, `sdDynaLayerMap` and
+`rotationsinframe32` with that result, so it **must** test for the sentinel
+first; using it as an index reads far out of bounds. The layer simply paints
+nothing there.
 
 ### Rotations
 
