@@ -5089,8 +5089,32 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
             }
             return;
           }
-          const bool spritePixelIsDynamic =
-              hasExtraDynaActive && spriteExtraDynaActive[spritePixel] != 0;
+          // Which pixels count as dynamic is decided by the SD mask in layer
+          // mode, never by the HD one.
+          //
+          // The two disagree, and a pixel that falls in the gap is drawn by
+          // NEITHER layer: static in the SD mask, so the scaled layer never
+          // claimed it (see MarkScaledLayer above), and dynamic in the HD mask,
+          // so this pass skips it. It stays black. Authors hit this with digit
+          // sprites whose dark outline is static at SD but marked dynamic in
+          // the HD mask -- the outline, which reads as the digit's shadow,
+          // simply vanished at 64p while looking right at 32p.
+          //
+          // Deciding from the SD mask is also just rule 5 again: all dynamic
+          // matching belongs on the SD original, and dynaspritemasks_extra is
+          // ignored exactly like dynamasks_extra.
+          bool spritePixelIsDynamic;
+          if (layerMode) {
+            const uint32_t sdSpritePixel =
+                upscaleExtra
+                    ? ((tj + tspy) / 2) * MAX_SPRITE_WIDTH + (ti + tspx) / 2
+                    : ((tj + tspy) * 2) * MAX_SPRITE_WIDTH + (ti + tspx) * 2;
+            spritePixelIsDynamic =
+                hasDynaActive && spriteDynaActive[sdSpritePixel] != 0;
+          } else {
+            spritePixelIsDynamic =
+                hasExtraDynaActive && spriteExtraDynaActive[spritePixel] != 0;
+          }
           // In layer mode the sprite's dynamic pixels were composited from the
           // scaled layer already; leave them alone so that content shows.
           if (layerMode && spritePixelIsDynamic) continue;
