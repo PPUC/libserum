@@ -666,6 +666,14 @@ bool scaledLayerHasCoverage = false;  // any pixel owned on the current frame
 uint8_t* sdDynaLayerMap = NULL;
 uint8_t* hdDynaLayerMap = NULL;
 uint8_t shadowOffsetModeRuntime = SERUM_SHADOW_OFFSET_NATIVE;
+// Width the 64p output plane was allocated for, in pixels.
+//
+// mySerum.width64 is an OUTPUT field: Colorize_Framev2() clears it at the start
+// of every frame and each render path sets it to what it produced. It therefore
+// says nothing about how much room frame64 has, and must not be used as a
+// precondition for writing into it.
+uint32_t allocatedPlaneWidth64 = 0;
+
 uint32_t masterPlaneWidth32 =
     0;  // width of the 32p master plane, even while unadvertised
 
@@ -1543,6 +1551,7 @@ void Serum_free(void) {
   useScale2xUpscaling = false;
   upscaleExtraFromOriginal = false;
   masterPlaneWidth32 = 0;
+  allocatedPlaneWidth64 = 0;
   originalPlaneRequestedByCaller = false;
   extraPlaneIsDerived = false;
   g_sceneResumeState.clear();
@@ -1924,7 +1933,15 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   const uint32_t srcHeight = g_serumData.fheight;
   const uint32_t dstWidth = srcWidth * 2;
   const uint32_t dstHeight = srcHeight * 2;
-  if (mySerum.width64 != dstWidth) return;
+  // Guard on the ALLOCATED width, not mySerum.width64. width64 is cleared at
+  // the start of every frame and only set by whichever path rendered something,
+  // so on a frame carrying no extra content it is still zero here -- and
+  // testing it made this function return without upscaling, without setting
+  // FLAG_RETURNED_64P_FRAME_OK, and so without a 64p frame for the caller.
+  // Hosts then fell back to scaling the 32p output themselves with whatever
+  // algorithm they were configured for, which is the exact outcome this path
+  // exists to prevent.
+  if (allocatedPlaneWidth64 != dstWidth) return;
 
   const FrameUtil::ScalingAlgorithm algorithm =
       useScale2xUpscaling ? FrameUtil::ScalingAlgorithm::Scale2x
@@ -2247,6 +2264,7 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
       if (mySerum.width64 == 0 && upscaleExtraFromOriginal) {
         mySerum.width64 = g_serumData.fwidth * 2;
       }
+      allocatedPlaneWidth64 = mySerum.width64;
       mySerum.frame64 =
           (uint16_t*)malloc(64 * mySerum.width64 * sizeof(uint16_t));
       mySerum.rotations64 = (uint16_t*)malloc(
@@ -2458,6 +2476,7 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
       // upscaling the original plane.
       mySerum.width64 = g_serumData.fwidth * 2;
     }
+    allocatedPlaneWidth64 = mySerum.width64;
     mySerum.frame64 =
         (uint16_t*)malloc(64 * mySerum.width64 * sizeof(uint16_t));
     mySerum.rotations64 = (uint16_t*)malloc(
