@@ -75,6 +75,11 @@ jobs:
             mingw-w64-ucrt-x86_64-libwinpthread \
             mingw-w64-ucrt-x86_64-cmake"
       #
+      # fetch external dependencies (FrameUtil.h from libframeutil)
+      #
+      - name: Fetch external dependencies
+        run: ./platforms/${{ matrix.platform }}/${{ matrix.arch }}/external.sh
+      #
       # build (win)
       #
       - if: (matrix.platform == 'win')

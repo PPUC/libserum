@@ -65,6 +65,21 @@ SERUM_API void Serum_SetStandardPalette(const uint8_t* palette,
  */
 SERUM_API void Serum_SetGenerateCRomC(bool generate);
 
+/** @brief Get the upscaling algorithm selected for the loaded colorization
+ *
+ * Valid after a successful Serum_Load(). The value comes from the cROMc header
+ * and may be overridden at authoring time by altcolor/<romname>/scaling.txt.
+ *
+ * Callers that scale libserum's output frame further (for example to fit a
+ * physical DMD) should use this so their scaling matches the scaling libserum
+ * applied internally. The value is the authored choice and is reported even
+ * when this particular load has no extra-resolution plane to upscale into.
+ *
+ * @return One of the SERUM_SCALING_* constants; SERUM_SCALING_SCALE2X (the
+ * default) if nothing is loaded
+ */
+SERUM_API uint8_t Serum_GetScalingAlgorithm(void);
+
 /** @brief Release the content and memory of the loaded Serum file.
  */
 SERUM_API void Serum_Dispose(void);

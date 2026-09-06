@@ -391,6 +391,144 @@ Critical-trigger fast rejection:
   preempt the non-interruptable scene immediately; libserum stops the current
   scene/end-hold and processes the monochrome-trigger frame normally.
 
+## Resolution scaling and the two-layer renderer
+
+When the caller requests `64p` output and the content is `128x32`, libserum
+produces the `64p` frame itself instead of handing back a `32p` frame for the
+host to scale. This is what keeps a colorization looking the same in every
+player.
+
+### Layers
+
+Rendering splits by *provenance*, not by plane:
+
+- **HD-authored content** — `cframes_v2_extra`, `backgroundframes_v2_extra`,
+  `backgroundmask_extra`, HD background scenes, and HD sprite art
+  (`spritecolored_extra`) — rendered natively at `64p`.
+- **ROM-driven content** — dynamic zones, sprites with no HD version, and the
+  dynamic parts of sprites that do have HD art — rendered at original resolution
+  and upscaled **once**, then composited on top.
+
+`HasHdStaticContent()` gates the first layer. It deliberately does **not**
+require every referenced sprite to have an HD version, unlike the historical
+`CheckExtraFrameAvailable()`: sprites are their own layer now, so one without HD
+art no longer forces the whole frame to discard its authored HD background.
+
+**HD dynamic masks are ignored outright.** `dynamasks_extra` and friends carry no
+spatial information the SD masks do not, and the authoring tool line-doubles
+them, so honouring them produced blocky dynamic zones next to sharp statics. In
+layer mode `frameHasDynamicExtra` is forced false, which also makes the extra
+plane render the correct *underlay* beneath dynamic content.
+
+### The coverage mask
+
+`scaledLayerCoverage` (one byte per original-resolution pixel) records what the
+scaled layer owns. Dynamic zones always; statics only when there are no HD
+statics; a sprite's dynamic pixels always, its other pixels only when it has no
+HD art. Pixels suppressed by `FLAG_SCENE_REPLACE_DYNAMIC_BLACK` are left unowned
+so the HD background shows through.
+
+The mask decides what the layer **contributes**. It does not decide how the
+upscaler **rounds** — see the first invariant below, which is why the SD statics
+are always rendered even when HD statics will cover them.
+
+### Three invariants that are easy to break
+
+**Select on `frame32`, never on an ownership-tagged key.** The scaled layer has
+to round its edges exactly as a whole-frame upscale of the same picture would,
+because that is what every other player produces. Feeding ownership into the
+comparison breaks that along every layer boundary: black *outside* the layer and
+black *inside* it stop comparing equal, so Scale2x's `b == h` guard — the thing
+that preserves a glyph pixel sitting on the boundary — no longer fires and the
+pixel is rounded away.
+
+That was a real bug, and a subtle one: every glyph whose top row coincided with
+the top of a dynamic zone lost its top row, on both the top and bottom edges of
+the zone. It is also why the SD static render must always run. Skipping it when
+HD statics cover it looks like free work to save, but it leaves `frame32`
+incomplete, which is what forced the tagged key in the first place.
+
+**Let the selected source decide painting, not the centre pixel.** If the
+selection lands on an unowned pixel the destination is left to the HD layer —
+that *is* the boundary being rounded. Falling back to the centre instead makes
+every boundary pixel take the centre value, which for a thin feature such as a
+one-pixel shadow is byte-identical to line doubling regardless of the algorithm
+selected.
+
+**Handle `kUpscaleSourceOutside`.** Outside the frame is black, not a copy of
+the edge pixel — `FrameUtil` clamped there until `db067bc`, which made content
+touching row 0 see its own colour "above" it, a false edge that trips the
+rounding branch. Scores drawn on row 0 lost the tops of `8`, `S`, `0`, `9` and
+`3`, and only there, because the same glyphs were intact at the bottom of the
+frame.
+
+Since outside is now a real value the selection can land on it, and
+`SelectUpscaled2xSourceIndex()` then returns `kUpscaleSourceOutside` instead of
+an index. The composite indexes `frame32`, `sdDynaLayerMap` and
+`rotationsinframe32` with that result, so it **must** test for the sentinel
+first; using it as an index reads far out of bounds. The layer simply paints
+nothing there.
+
+### Rotations
+
+Rotation entries are carried through the upscale using the same source selection
+as the colour, so `Serum_Rotate()` animates the composited frame directly with
+no re-composite per tick.
+
+The geometry is therefore frozen at colorize time: a rotation that changed a
+colour enough to alter Scale2x's edge decisions would not be reflected. This is
+deliberate. It requires a rotating colour to become *equal* to one of its
+neighbours, which colorizations avoid — a rotation that momentarily matched its
+surroundings would read as the background rotating.
+
+**Constraint on new algorithms:** every algorithm in
+`FrameUtil::ScalingAlgorithm` must be *selection-based*, so
+`SelectUpscaled2xSourceIndex()` can express it. An interpolating scaler (hq2x,
+xBR, bilinear) blends colours and produces pixels no rotation entry covers.
+
+Still outstanding: on a frame with HD statics, scaled-layer pixels resolve their
+rotation index against `colorrotations_v2` while the plane ships
+`colorrotations_v2_extra`. The two are independently authored and can differ in
+colour list, length *and* tick rate, so a rotating non-HD sprite on such a frame
+animates against the wrong table. The fix is to keep both tables and tag each
+pixel (`0x0100 | index` for the SD table), which needs a second set of slot
+timers and `Calc_Next_Rotationv2()` scanning 8 slots rather than 4.
+
+### Dynamic shadows
+
+Shadows are generated **on the extra plane, from the upscaled glyph**
+(`GenerateExtraPlaneShadows()`), not scaled up with the layer. Generating them at
+original resolution gets the geometry wrong twice: the shadow outline is rounded
+independently of the glyph's, and a one-pixel shadow becomes two pixels, which on
+a tight glyph such as `8` closes the gap between its loops.
+
+The composite carries each lit pixel's dyna layer into `hdDynaLayerMap`, which is
+what lets the pass know which per-layer direction bitmask and colour apply. SD
+shadows are still rendered for the `32p` output but are **not** covered, or they
+would be drawn twice at two thicknesses.
+
+The offset is a persisted per-colorization choice, `shadowOffsetMode`:
+`SERUM_SHADOW_OFFSET_NATIVE` (1 extra-plane pixel — what the pre-layer renderer
+produced, and what authors tuned against) or `_PROPORTIONAL` (2 pixels, matching
+the `32p` output's relative thickness). Real colorizations disagree about which
+looks right, hence the setting.
+
+### Selection and persistence
+
+`SERUM_SCALING_*` and `SERUM_SHADOW_OFFSET_*` live in `serum.h`; the shared
+implementation is `FrameUtil::ScalingAlgorithm` in libframeutil, fetched into
+`third-party/include` by `platforms/<platform>/<arch>/external.sh`. Both values
+are stored in the `cROMc` header from concentrate version 8 and are overridable
+per colorization through `altcolor/<romname>/scaling.txt`
+(`read_scaling_sidecar()`), which is **not** read on a real machine — the stored
+values are authoritative there, matching how `pup.csv` and `skip-cromc.txt` are
+treated.
+
+Scale2x is value `0` so that anything without an explicit choice resolves to it.
+The selector must never be gated on extra-plane geometry: the whole-frame upscale
+runs precisely when there is no extra plane, and gating there silently made every
+`32p`-only colorization fall back to line doubling.
+
 ## Scene playback and options
 Scene data comes from CSV (`SceneGenerator`).
 

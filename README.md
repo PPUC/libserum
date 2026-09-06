@@ -102,6 +102,75 @@ On real-machine targets:
 Both modes remain active while frames are unknown/not colorized and are
 reevaluated when a new frame is identified.
 
+## Upscaling
+
+If you ask `libserum` for `256x64` frames and the ROM is `128x32`, you get
+`256x64` frames. `libserum` performs the upscale itself, using the algorithm the
+colorization author selected, rather than leaving it to the host. That is the
+only way a colorization looks the same in every player, so hosts should no
+longer scale Serum output themselves.
+
+A frame is rendered as two layers:
+
+- HD-authored content — static colorization, background images and background
+  scenes — is rendered natively at `256x64` and stays sharp.
+- Everything driven by the `128x32` ROM frame — dynamic zones, sprites without
+  an HD version, and colour rotations — is rendered at original resolution and
+  upscaled **once**, then composited on top.
+
+Dynamic shadows are generated afterwards, directly on the upscaled result, so a
+shadow always follows the shape of the glyph it belongs to.
+
+Two algorithms are available:
+
+- **Scale2x** (AdvMAME2x, default) — edge-preserving pixel-art upscaling
+- **line doubling** — each source pixel becomes a `2x2` block
+
+Scale2x is the default, so colorizations that say nothing keep the look the
+stack has always produced. The algorithms come from
+[libframeutil](https://github.com/PPUC/libframeutil), shared with the rest of
+the PPUC stack, and hosts can read the selection back with
+`Serum_GetScalingAlgorithm()` so any further scaling they do matches.
+
+### `scaling.txt`
+
+Authors override the defaults with an optional sidecar next to the colorization
+files:
+
+```text
+altcolor/<romname>/scaling.txt
+```
+
+Each non-empty line is either a bare algorithm name or a `key: value` setting.
+`#` starts a comment:
+
+```text
+# smoother than the default is not always better on tight fonts
+line-doubling
+shadow-offset: proportional
+```
+
+| setting | values | default | meaning |
+|---|---|---|---|
+| *(bare word)* or `scaling:` | `scale2x`, `line-doubling` | `scale2x` | upscaling algorithm |
+| `shadow-offset:` | `native`, `proportional` | `native` | how far dynamic shadows are offset on the upscaled plane |
+
+`shadow-offset: native` offsets a shadow by one `256x64` pixel, which is what
+`libserum` has always rendered into the high-resolution plane and therefore what
+most colorizations were tuned against. `proportional` uses two pixels, keeping
+the shadow's thickness proportional to the glyph and matching the `128x32`
+output. Tight glyphs such as `8` can lose the gap between their loops under
+`proportional`, while thicker fonts often look better with it — which is why it
+is a per-colorization choice.
+
+Dropping in or editing `scaling.txt` next to an existing `*.cROMc` regenerates
+that `*.cROMc` on the next load, so the settings take effect immediately and are
+then carried by the archive itself. On real-machine targets `scaling.txt` is not
+read and the values stored in the `*.cROMc` are used.
+
+Downscaling is not done by `libserum`. A `128x32` request against `64p`-only
+content still returns the `64p` frame, and the host decides how to reduce it.
+
 ## Rotation Scenes
 
 For `Serum v2`, scenes are authored in `*.pup.csv`.

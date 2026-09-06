@@ -107,6 +107,18 @@ set(SERUM_INCLUDE_DIRS
    third-party/include
 )
 
+# FrameUtil.h is fetched from PPUC/libframeutil by
+# platforms/<platform>/<arch>/external.sh. Fail with an actionable message
+# instead of a bare "file not found" deep inside the compile.
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third-party/include/FrameUtil.h")
+   message(FATAL_ERROR
+      "third-party/include/FrameUtil.h is missing.\n"
+      "Run the external dependency fetch first, e.g.:\n"
+      "  ./platforms/${PLATFORM}/${ARCH}/external.sh\n"
+      "or point it at a local checkout:\n"
+      "  LIBFRAMEUTIL_SOURCE_DIR=../libframeutil ./platforms/${PLATFORM}/${ARCH}/external.sh")
+endif()
+
 if(BUILD_SHARED)
    add_library(serum_shared SHARED ${SERUM_SOURCES})
 
