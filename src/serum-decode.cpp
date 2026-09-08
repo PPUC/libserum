@@ -656,6 +656,18 @@ bool extraPlaneIsDerived =
 // layer CONTRIBUTES, while frame32 -- a complete picture -- decides how the
 // upscaler rounds. Those are deliberately two different questions.
 uint8_t* scaledLayerCoverage = NULL;
+
+// The frame's own scaled-layer coverage, snapshotted before any sprite renders.
+//
+// Each sprite scopes the mask to itself so its composite cannot re-paint an
+// earlier sprite's pixels over later HD art. Zeroing the mask for that is too
+// blunt: it also drops what the FRAME owns there, and the sprite's composite
+// then leaves those pixels holding the pre-sprite upscale. They are stale,
+// because drawing the sprite changes which source Scale2x picks for the
+// destinations around it, not only for the ones the sprite covers. Restoring
+// the frame's coverage instead of clearing it keeps every pixel the SD layer
+// owns in the recomposite, while still excluding other sprites.
+uint8_t* frameLayerCoverage = NULL;
 bool scaledLayerHasCoverage = false;  // any pixel owned on the current frame
 
 // Per-pixel dyna layer of LIT dynamic content, "layer + 1" (0 = not lit
@@ -1524,6 +1536,7 @@ void Serum_free(void) {
   Free_element((void**)&mySerum.modifiedelements64);
   Free_element((void**)&frameshape);
   Free_element((void**)&scaledLayerCoverage);
+  Free_element((void**)&frameLayerCoverage);
   Free_element((void**)&sdDynaLayerMap);
   Free_element((void**)&hdDynaLayerMap);
   shadowOffsetModeRuntime = SERUM_SHADOW_OFFSET_NATIVE;
@@ -2293,6 +2306,8 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
     frameshape = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     scaledLayerCoverage =
         (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
+    frameLayerCoverage =
+        (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     hdDynaLayerMap =
         (uint8_t*)malloc(g_serumData.fwidth * 2 * g_serumData.fheight * 2);
@@ -2443,6 +2458,8 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
 
   frameshape = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   scaledLayerCoverage =
+      (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
+  frameLayerCoverage =
       (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   hdDynaLayerMap =
@@ -4853,6 +4870,12 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     if (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) {
       GenerateExtraPlaneShadows(IDfound);
     }
+    // Sprites render next and each scopes the mask to itself; remember what the
+    // frame owns so they can restore it rather than lose it.
+    if (frameLayerCoverage && scaledLayerCoverage) {
+      memcpy(frameLayerCoverage, scaledLayerCoverage,
+             (size_t)g_serumData.fwidth * g_serumData.fheight);
+    }
     // Everything needed to reproduce a rendering report: which path the frame
     // took, how much of it the scaled layer owned, and the active settings.
     // Without this an author's screenshot cannot be tied back to a frame.
@@ -4955,9 +4978,13 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
     for (uint16_t ty = 0; ty < hei; ty++) {
       const uint32_t row = (uint32_t)(fry + ty) * g_serumData.fwidth + frx;
       if (fry + ty >= g_serumData.fheight) break;
-      memset(
-          scaledLayerCoverage + row, 0,
-          (frx + wid <= g_serumData.fwidth) ? wid : g_serumData.fwidth - frx);
+      const size_t run =
+          (frx + wid <= g_serumData.fwidth) ? wid : g_serumData.fwidth - frx;
+      if (frameLayerCoverage) {
+        memcpy(scaledLayerCoverage + row, frameLayerCoverage + row, run);
+      } else {
+        memset(scaledLayerCoverage + row, 0, run);
+      }
     }
     scaledLayerHasCoverage = false;
   }
