@@ -123,11 +123,19 @@ shadow always follows the shape of the glyph it belongs to.
 
 Two algorithms are available:
 
-- **Scale2x** (AdvMAME2x, default) — edge-preserving pixel-art upscaling
+- **Scale2x preserve** (default) — Scale2x that never drops a pixel the source
+  lit. Reference Scale2x rounds convex corners by taking a neighbour, and where
+  that neighbour is empty the pixel is simply lost — which eats DMD text, often
+  only five pixels tall, to the point where `S`, `R` and `C` stop being
+  readable. This keeps the centre in that one case, so the result is the union
+  of Scale2x and line doubling. On artwork it changes well under 1% of pixels
+  and is invisible.
+- **Scale2x** (AdvMAME2x) — the reference algorithm, unmodified
 - **line doubling** — each source pixel becomes a `2x2` block
 
-Scale2x is the default, so colorizations that say nothing keep the look the
-stack has always produced. The algorithms come from
+Scale2x preserve is the default because a colorization has no way to ask for
+one algorithm on its text frames and another on its artwork — most ROMs
+alternate between the two constantly — and this one is right for both. The algorithms come from
 [libframeutil](https://github.com/PPUC/libframeutil), shared with the rest of
 the PPUC stack, and hosts can read the selection back with
 `Serum_GetScalingAlgorithm()` so any further scaling they do matches.
@@ -145,14 +153,14 @@ Each non-empty line is either a bare algorithm name or a `key: value` setting.
 `#` starts a comment:
 
 ```text
-# smoother than the default is not always better on tight fonts
-line-doubling
+# the reference algorithm, if you want exactly what other players produce
+scale2x
 shadow-offset: proportional
 ```
 
 | setting | values | default | meaning |
 |---|---|---|---|
-| *(bare word)* or `scaling:` | `scale2x`, `line-doubling` | `scale2x` | upscaling algorithm |
+| *(bare word)* or `scaling:` | `scale2x-preserve`, `scale2x`, `line-doubling` | `scale2x-preserve` | upscaling algorithm |
 | `shadow-offset:` | `native`, `proportional` | `native` | how far dynamic shadows are offset on the upscaled plane |
 
 `shadow-offset: native` offsets a shadow by one `256x64` pixel, which is what

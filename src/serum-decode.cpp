@@ -638,8 +638,32 @@ bool isoriginalfallbackrequested =
     false;  // should original resolution be rendered only as fallback when the
             // preferred extra resolution is unavailable
 
-bool useScale2xUpscaling =
-    false;  // cached from g_serumData.scalingAlgorithm at load time
+uint8_t runtimeScalingAlgorithm =
+    SERUM_SCALING_SCALE2X_PRESERVE;  // cached from g_serumData.scalingAlgorithm
+                                     // at load time
+
+// The upscaling algorithm this colorization selected, as libframeutil's enum.
+static inline FrameUtil::ScalingAlgorithm RuntimeScalingAlgorithm() {
+  switch (runtimeScalingAlgorithm) {
+    case SERUM_SCALING_LINE_DOUBLING:
+      return FrameUtil::ScalingAlgorithm::LineDoubling;
+    case SERUM_SCALING_SCALE2X:
+      return FrameUtil::ScalingAlgorithm::Scale2x;
+    default:
+      return FrameUtil::ScalingAlgorithm::Scale2xPreserve;
+  }
+}
+
+static inline const char* ScalingAlgorithmName() {
+  switch (runtimeScalingAlgorithm) {
+    case SERUM_SCALING_LINE_DOUBLING:
+      return "line-doubling";
+    case SERUM_SCALING_SCALE2X:
+      return "scale2x";
+    default:
+      return "scale2x-preserve";
+  }
+}
 
 bool upscaleExtraFromOriginal =
     false;  // 32p content with a 64p request: libserum owns the upscale
@@ -1411,7 +1435,7 @@ static std::optional<std::string> find_case_insensitive_file(
 // Each non-empty, non-comment line is either a bare algorithm name or a
 // "key: value" setting. `#` starts a comment. Recognised:
 //
-//   scale2x | line-doubling         upscaling algorithm
+//   scale2x-preserve | scale2x | line-doubling    upscaling algorithm
 //   shadow-offset: native           dynamic shadows offset by 1 extra-plane px
 //   shadow-offset: proportional     ...by 2, keeping SD-relative thickness
 //
@@ -1457,7 +1481,10 @@ static ScalingSidecar read_scaling_sidecar(const std::string& dirPath) {
     const size_t colon = trimmed.find(':');
     if (colon == std::string::npos) {
       const std::string value = to_lower(trimmed);
-      if (value == "scale2x") {
+      if (value == "scale2x-preserve" || value == "scale2xpreserve" ||
+          value == "preserve") {
+        result.algorithm = SERUM_SCALING_SCALE2X_PRESERVE;
+      } else if (value == "scale2x") {
         result.algorithm = (uint8_t)SERUM_SCALING_SCALE2X;
       } else if (value == "line-doubling" || value == "linedoubling" ||
                  value == "linedouble") {
@@ -1481,7 +1508,10 @@ static ScalingSidecar read_scaling_sidecar(const std::string& dirPath) {
             foundFile->c_str());
       }
     } else if (key == "scaling" || key == "algorithm") {
-      if (value == "scale2x") {
+      if (value == "scale2x-preserve" || value == "scale2xpreserve" ||
+          value == "preserve") {
+        result.algorithm = SERUM_SCALING_SCALE2X_PRESERVE;
+      } else if (value == "scale2x") {
         result.algorithm = (uint8_t)SERUM_SCALING_SCALE2X;
       } else if (value == "line-doubling" || value == "linedoubling" ||
                  value == "linedouble") {
@@ -1561,7 +1591,7 @@ void Serum_free(void) {
   isoriginalrequested = true;
   isextrarequested = false;
   isoriginalfallbackrequested = false;
-  useScale2xUpscaling = false;
+  runtimeScalingAlgorithm = SERUM_SCALING_SCALE2X_PRESERVE;
   upscaleExtraFromOriginal = false;
   masterPlaneWidth32 = 0;
   allocatedPlaneWidth64 = 0;
@@ -1881,10 +1911,9 @@ template <typename T>
 static inline T SampleUpscaled2x(const T* source, uint32_t sourceWidth,
                                  uint32_t sourceHeight, uint32_t targetX,
                                  uint32_t targetY) {
-  return FrameUtil::Helper::SampleUpscaled2x(
-      source, sourceWidth, sourceHeight, targetX, targetY,
-      useScale2xUpscaling ? FrameUtil::ScalingAlgorithm::Scale2x
-                          : FrameUtil::ScalingAlgorithm::LineDoubling);
+  return FrameUtil::Helper::SampleUpscaled2x(source, sourceWidth, sourceHeight,
+                                             targetX, targetY,
+                                             RuntimeScalingAlgorithm());
 }
 
 // True when the matched frame carries usable HD *static* content: an authored
@@ -1956,9 +1985,7 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   // exists to prevent.
   if (allocatedPlaneWidth64 != dstWidth) return;
 
-  const FrameUtil::ScalingAlgorithm algorithm =
-      useScale2xUpscaling ? FrameUtil::ScalingAlgorithm::Scale2x
-                          : FrameUtil::ScalingAlgorithm::LineDoubling;
+  const FrameUtil::ScalingAlgorithm algorithm = RuntimeScalingAlgorithm();
   const bool propagateModified = propagateModifiedElements &&
                                  mySerum.modifiedelements32 &&
                                  mySerum.modifiedelements64;
@@ -3334,8 +3361,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     // Selects the algorithm only. Do NOT gate this on the extra-plane geometry:
     // the whole-frame upscale path exists precisely when there is no extra
     // plane, and every consult site carries its own geometry guard already.
-    useScale2xUpscaling =
-        (g_serumData.scalingAlgorithm == SERUM_SCALING_SCALE2X);
+    runtimeScalingAlgorithm = g_serumData.scalingAlgorithm;
     shadowOffsetModeRuntime = g_serumData.shadowOffsetMode;
     if (upscaleExtraFromOriginal && g_serumData.SerumVersion == SERUM_V2) {
       // Report where this colorization actually keeps its dynamic-shadow
@@ -3374,7 +3400,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
         shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL ? 2u : 1u,
         shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL ? "s" : "");
     Log("Upscaling algorithm: %s (source=%s, extra plane: %s)",
-        useScale2xUpscaling ? "Scale2x" : "line doubling",
+        ScalingAlgorithmName(),
         g_serumData.concentrateFileVersion >= 8 ? "cROMc header" : "default",
         IsExactDoubleExtraPlane() ? "yes" : "no");
   }
@@ -4894,7 +4920,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
           extraPlaneIsDerived ? "whole-frame-upscale" : "layer-composite",
           isextra ? "yes" : "no", owned,
           (uint32_t)(g_serumData.fwidth * g_serumData.fheight), mySerum.width32,
-          mySerum.width64, useScale2xUpscaling ? "scale2x" : "line-doubling",
+          mySerum.width64, ScalingAlgorithmName(),
           shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL
               ? "proportional"
               : "native");
@@ -5229,9 +5255,9 @@ SERUM_API void Serum_SetGenerateCRomC(bool generate) {
 SERUM_API uint8_t Serum_GetScalingAlgorithm(void) {
   SERUM_API_GUARD_START("Serum_GetScalingAlgorithm")
   // Report what the colorization asks for, not what this load ended up using.
-  // useScale2xUpscaling is additionally forced off when there is no 2x extra
-  // plane to render into, but a caller scaling the finished frame for its own
-  // display still has to honour the authored choice in exactly that case.
+  // runtimeScalingAlgorithm is additionally forced off when there is no 2x
+  // extra plane to render into, but a caller scaling the finished frame for its
+  // own display still has to honour the authored choice in exactly that case.
   return g_serumData.scalingAlgorithm;
   SERUM_API_GUARD_END("Serum_GetScalingAlgorithm",
                       (uint8_t)SERUM_SCALING_SCALE2X)

@@ -55,6 +55,15 @@ enum {
   SERUM_SCALING_SCALE2X = 0,
   // replicate every source pixel into a 2x2 block
   SERUM_SCALING_LINE_DOUBLING = 1,
+  // Scale2x that never drops a pixel the source lit (default).
+  //
+  // Reference Scale2x rounds convex corners by taking a neighbour, and where
+  // that neighbour is empty the pixel is lost. DMD text is often five pixels
+  // tall, where a glyph is almost nothing but corners, and the erosion makes
+  // letters like S, R and C unreadable. This keeps the centre in that one case,
+  // so the output is the union of Scale2x and line doubling. On artwork it
+  // changes well under 1% of pixels and is invisible.
+  SERUM_SCALING_SCALE2X_PRESERVE = 2,
 };
 
 // How far a dynamic shadow is offset when the extra plane is produced by
