@@ -107,16 +107,33 @@ set(SERUM_INCLUDE_DIRS
    third-party/include
 )
 
-# FrameUtil.h is fetched from PPUC/libframeutil by
-# platforms/<platform>/<arch>/external.sh. Fail with an actionable message
-# instead of a bare "file not found" deep inside the compile.
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third-party/include/FrameUtil.h")
-   message(FATAL_ERROR
-      "third-party/include/FrameUtil.h is missing.\n"
-      "Run the external dependency fetch first, e.g.:\n"
-      "  ./platforms/${PLATFORM}/${ARCH}/external.sh\n"
-      "or point it at a local checkout:\n"
-      "  LIBFRAMEUTIL_SOURCE_DIR=../libframeutil ./platforms/${PLATFORM}/${ARCH}/external.sh")
+# FrameUtil.h comes from PPUC/libframeutil, by either of two routes:
+#
+#  * platforms/<platform>/<arch>/external.sh drops it in third-party/include.
+#    This is how the standalone builds work.
+#  * A packaging system installs it on the include path -- Buildroot, for
+#    instance, has a libframeutil package that stages it into
+#    $(STAGING_DIR)/usr/include and never runs external.sh at all.
+#
+# Prefer the vendored copy so a local checkout still wins, then fall back to the
+# system one. Fail with an actionable message rather than a bare "file not
+# found" deep inside the compile.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third-party/include/FrameUtil.h")
+   message(STATUS "FrameUtil.h: third-party/include (fetched by external.sh)")
+else()
+   find_path(FRAMEUTIL_INCLUDE_DIR NAMES FrameUtil.h)
+   if(FRAMEUTIL_INCLUDE_DIR)
+      message(STATUS "FrameUtil.h: ${FRAMEUTIL_INCLUDE_DIR} (installed package)")
+      list(APPEND SERUM_INCLUDE_DIRS ${FRAMEUTIL_INCLUDE_DIR})
+   else()
+      message(FATAL_ERROR
+         "FrameUtil.h not found.\n"
+         "Either fetch it into third-party/include:\n"
+         "  ./platforms/${PLATFORM}/${ARCH}/external.sh\n"
+         "or point that at a local checkout:\n"
+         "  LIBFRAMEUTIL_SOURCE_DIR=../libframeutil ./platforms/${PLATFORM}/${ARCH}/external.sh\n"
+         "or install libframeutil so FrameUtil.h is on the include path.")
+   endif()
 endif()
 
 if(BUILD_SHARED)
