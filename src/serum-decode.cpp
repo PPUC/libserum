@@ -598,7 +598,7 @@ uint32_t lastframe_full_crc_normal = 0;
 uint32_t lastframe_full_crc_scene = 0;
 bool first_match_normal = true;
 bool first_match_scene = true;
-uint32_t lastframe_found = GetMonotonicTimeMs();
+uint32_t firstUnknownFrameTimestamp = 0;
 uint32_t lastTriggerID = 0xffffffff;  // last trigger ID found
 uint32_t lasttriggerTimestamp = 0;
 bool isrotation = true;     // are there rotations to send
@@ -5351,7 +5351,7 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
     if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
       g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
 
-    lastframe_found = now;
+    firstUnknownFrameTimestamp = 0;
     if (maxFramesToSkip) {
       framesSkippedCounter = 0;
     }
@@ -5443,12 +5443,15 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
       return mySerum.rotationtimer;
     }
   }
+  else if (firstUnknownFrameTimestamp == 0) {
+    firstUnknownFrameTimestamp = now;
+  }
 
   mySerum.triggerID = 0xffffffff;
 
   if (monochromeMode ||
-      (ignoreUnknownFramesTimeout &&
-       (now - lastframe_found) >= ignoreUnknownFramesTimeout) ||
+      (ignoreUnknownFramesTimeout && firstUnknownFrameTimestamp > 0 &&
+       (now - firstUnknownFrameTimestamp) >= ignoreUnknownFramesTimeout) ||
       (maxFramesToSkip && (frameID == IDENTIFY_NO_FRAME) &&
        (++framesSkippedCounter >= maxFramesToSkip))) {
     // apply standard palette
@@ -5709,7 +5712,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     }
 
     // frame identified
-    lastframe_found = now;
+    firstUnknownFrameTimestamp = 0;
     if (maxFramesToSkip) {
       framesSkippedCounter = 0;
     }
@@ -6143,6 +6146,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
              (rotationIsScene ? FLAG_RETURNED_V2_SCENE : 0);
     }
   }
+  else if (firstUnknownFrameTimestamp == 0) {
+    firstUnknownFrameTimestamp = now;
+  }
 
   if (DebugTraceAllInputsEnabled()) {
     Log("Serum debug input result: api=v2 inputCrc=%u result=no-frame "
@@ -6153,8 +6159,8 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   mySerum.triggerID = 0xffffffff;
 
   if (monochromeMode || monochromePaletteMode ||
-      (ignoreUnknownFramesTimeout &&
-       (now - lastframe_found) >= ignoreUnknownFramesTimeout) ||
+      (ignoreUnknownFramesTimeout && firstUnknownFrameTimestamp > 0 &&
+       (now - firstUnknownFrameTimestamp) >= ignoreUnknownFramesTimeout) ||
       (maxFramesToSkip && (frameID == IDENTIFY_NO_FRAME) &&
        (++framesSkippedCounter >= maxFramesToSkip))) {
     // Apply monochrome to original resolution
