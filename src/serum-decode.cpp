@@ -2082,44 +2082,50 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
       if (rowCount[y] * 3 >= peak) baseline = y;
 
     if (baseline < r1) {
-      // Columns of this band carrying pixels below its bottom line.
+      // Columns of this band carrying pixels below its bottom line, minus the
+      // ones that belong to a glyph. A separator's column starts at or just
+      // above the bottom line; a digit's column runs most of the band.
+      //
+      // This is decided per column, not per run, because a comma's tail
+      // usually slants under the character before it. That puts one of the
+      // preceding glyph's columns into the run, and judging the run as a whole
+      // let that column -- which reaches the top of the band -- reject the
+      // comma beside it. In a tightly kerned font that missed every comma.
+      //
+      // How far above the bottom line a separator may start scales with the
+      // band: a comma is about a quarter of the text height, so a tall font
+      // draws a taller comma.
+      const uint32_t maxRise = std::max(1u, (r1 - r0 + 1) / 4);
+      const uint32_t highest = (baseline >= maxRise) ? baseline - maxRise : 0;
       uint8_t* const descends = separatorDescends;
       memset(descends, 0, W);
-      for (uint32_t x = 0; x < W; ++x)
+      for (uint32_t x = 0; x < W; ++x) {
+        bool below = false;
         for (uint32_t y = baseline + 1; y <= r1; ++y)
           if (f[y * W + x]) {
-            descends[x] = 1;
+            below = true;
             break;
           }
+        if (!below) continue;
+        uint32_t topRow = r1;
+        for (uint32_t y = r0; y <= r1; ++y)
+          if (f[y * W + x]) {
+            topRow = y;
+            break;
+          }
+        if (topRow >= highest) descends[x] = 1;
+      }
 
       for (uint32_t c0 = 0; c0 < W; ++c0) {
         if (!descends[c0]) continue;
         uint32_t c1 = c0;
         while (c1 + 1 < W && descends[c1 + 1]) c1++;
-        if (c1 - c0 + 1 > 2) {
-          c0 = c1;
-          continue;
-        }  // wider than a separator
-
-        uint32_t topRow = r1 + 1;
-        for (uint32_t x = c0; x <= c1; ++x)
-          for (uint32_t y = r0; y <= r1; ++y)
-            if (f[y * W + x]) {
-              topRow = std::min(topRow, y);
-              break;
-            }
-
-        // A separator starts on the bottom line or one row above it; anything
-        // reaching higher belongs to a glyph.
-        if (topRow + 1 < baseline) {
-          c0 = c1;
-          continue;
+        if (c1 - c0 + 1 <= 2) {  // wider than this is not a separator
+          for (uint32_t x = c0; x <= c1; ++x)
+            for (uint32_t y = r0; y <= r1; ++y)
+              if (f[y * W + x]) separatorMask[y * W + x] = 1;
+          found++;
         }
-
-        for (uint32_t x = c0; x <= c1; ++x)
-          for (uint32_t y = topRow; y <= r1; ++y)
-            if (f[y * W + x]) separatorMask[y * W + x] = 1;
-        found++;
         c0 = c1;
       }
     }
