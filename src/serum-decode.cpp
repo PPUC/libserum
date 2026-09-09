@@ -4300,6 +4300,15 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
   auto buildFrameDwords = [&]() {
     if (frameDwordsBuilt) return;
     frameDwordsBuilt = true;
+    // The load paths that can reach v2 sprite detection all allocate this, but
+    // returning "not present" from a missing table would silently drop every
+    // sprite rather than fail loudly, so allocate rather than trust that.
+    if (!frameDwordKeys || !frameDwordStamps) {
+      Free_element((void**)&frameDwordKeys);
+      Free_element((void**)&frameDwordStamps);
+      AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
+      if (!frameDwordKeys || !frameDwordStamps) return;
+    }
     FrameDwordsBegin();
     for (uint32_t y = 0; y < g_serumData.fheight; ++y) {
       const uint32_t rowBase = y * g_serumData.fwidth;
@@ -4431,7 +4440,8 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
           isshapecheck ? (frameShapeDwords.find(detMeta.detectionWord) !=
                           frameShapeDwords.end())
                        : (buildFrameDwords(),
-                          FrameDwordsContains(detMeta.detectionWord));
+                          frameDwordKeys != NULL &&
+                              FrameDwordsContains(detMeta.detectionWord));
       if (!hasDetectionWord) {
         continue;
       }
