@@ -692,6 +692,27 @@ uint8_t* scaledLayerCoverage = NULL;
 // the frame's coverage instead of clearing it keeps every pixel the SD layer
 // owns in the recomposite, while still excluding other sprites.
 uint8_t* frameLayerCoverage = NULL;
+
+// Thousands separators found in the 32p plane, and a copy of that plane with
+// them removed.
+//
+// Scale2x connects diagonally adjacent pixels of the same colour -- that is the
+// whole algorithm, not a flaw in it. A score's separator sits diagonally below
+// the digit before it, so the upscale bridges the two and the comma runs into
+// the number. Nothing local can distinguish that from a diagonal stroke inside
+// a glyph, which is the same pattern; the difference is what the pixels MEAN.
+//
+// So the separator is taken out of the picture before the upscale, scaled on
+// its own, and put back. Digits then scale with no separator adjacent to bridge
+// to, and the separator keeps its exact shape.
+uint8_t* separatorMask = NULL;
+uint16_t* separatorFreeFrame = NULL;
+// Scratch for DetectSeparators(), allocated once. It runs on every upscale
+// call -- once per frame plus once per sprite -- so per-call heap traffic here
+// would be paid dozens of times a frame on the Pi.
+uint32_t* separatorRowCount = NULL;
+uint8_t* separatorDescends = NULL;
+
 bool scaledLayerHasCoverage = false;  // any pixel owned on the current frame
 
 // Per-pixel dyna layer of LIT dynamic content, "layer + 1" (0 = not lit
@@ -1567,6 +1588,10 @@ void Serum_free(void) {
   Free_element((void**)&frameshape);
   Free_element((void**)&scaledLayerCoverage);
   Free_element((void**)&frameLayerCoverage);
+  Free_element((void**)&separatorMask);
+  Free_element((void**)&separatorFreeFrame);
+  Free_element((void**)&separatorRowCount);
+  Free_element((void**)&separatorDescends);
   Free_element((void**)&sdDynaLayerMap);
   Free_element((void**)&hdDynaLayerMap);
   shadowOffsetModeRuntime = SERUM_SHADOW_OFFSET_NATIVE;
@@ -1947,6 +1972,93 @@ static void ResetScaledLayerCoverage(void) {
   scaledLayerHasCoverage = false;
 }
 
+// A thousands separator owns a narrow column that contains nothing else.
+//
+// Digits never descend below the text's bottom line, so a column carrying lit
+// pixels below it belongs to a separator. The separator is then everything lit
+// in that column (or the two columns it may span) -- which starts at the bottom
+// line or one row above it, depending on the font. Fonts in the wild do both.
+//
+// That column ownership is what rejects a descender such as a Q's tail: the
+// tail's column also carries the glyph's body, so its topmost lit pixel sits
+// far above the bottom line and the candidate is discarded. No digit counting
+// is needed, and the test is conservative -- an unusual separator is missed
+// rather than a glyph being misread, which is the safe direction.
+static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
+  if (!separatorMask || !mySerum.frame32) return 0;
+  memset(separatorMask, 0, (size_t)W * H);
+  const uint16_t* f = mySerum.frame32;
+
+  // A frame can show several rows of text, so each row is handled on its own:
+  // one baseline for the whole frame would put every row but the lowest above
+  // it, and a column scanned over the full height would pick up whatever sits
+  // in the rows above. Bands are maximal runs of rows carrying pixels.
+  if (!separatorRowCount || !separatorDescends) return 0;
+  uint32_t* const rowCount = separatorRowCount;
+  memset(rowCount, 0, H * sizeof(uint32_t));
+  for (uint32_t y = 0; y < H; ++y)
+    for (uint32_t x = 0; x < W; ++x)
+      if (f[y * W + x]) rowCount[y]++;
+
+  uint32_t found = 0;
+  for (uint32_t r0 = 0; r0 < H; ++r0) {
+    if (!rowCount[r0]) continue;
+    uint32_t r1 = r0;
+    while (r1 + 1 < H && rowCount[r1 + 1]) r1++;
+
+    uint32_t peak = 0;
+    for (uint32_t y = r0; y <= r1; ++y) peak = std::max(peak, rowCount[y]);
+    uint32_t baseline = r0;
+    for (uint32_t y = r0; y <= r1; ++y)
+      if (rowCount[y] * 3 >= peak) baseline = y;
+
+    if (baseline < r1) {
+      // Columns of this band carrying pixels below its bottom line.
+      uint8_t* const descends = separatorDescends;
+      memset(descends, 0, W);
+      for (uint32_t x = 0; x < W; ++x)
+        for (uint32_t y = baseline + 1; y <= r1; ++y)
+          if (f[y * W + x]) {
+            descends[x] = 1;
+            break;
+          }
+
+      for (uint32_t c0 = 0; c0 < W; ++c0) {
+        if (!descends[c0]) continue;
+        uint32_t c1 = c0;
+        while (c1 + 1 < W && descends[c1 + 1]) c1++;
+        if (c1 - c0 + 1 > 2) {
+          c0 = c1;
+          continue;
+        }  // wider than a separator
+
+        uint32_t topRow = r1 + 1;
+        for (uint32_t x = c0; x <= c1; ++x)
+          for (uint32_t y = r0; y <= r1; ++y)
+            if (f[y * W + x]) {
+              topRow = std::min(topRow, y);
+              break;
+            }
+
+        // A separator starts on the bottom line or one row above it; anything
+        // reaching higher belongs to a glyph.
+        if (topRow + 1 < baseline) {
+          c0 = c1;
+          continue;
+        }
+
+        for (uint32_t x = c0; x <= c1; ++x)
+          for (uint32_t y = topRow; y <= r1; ++y)
+            if (f[y * W + x]) separatorMask[y * W + x] = 1;
+        found++;
+        c0 = c1;
+      }
+    }
+    r0 = r1;
+  }
+  return found;
+}
+
 // Derive the 64p output plane from the already composited 32p plane.
 //
 // Used when the caller requested 64p output but the matched frame carries no
@@ -1996,6 +2108,30 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   // whole-frame upscale -- one code path, not two.
   const bool respectCoverage = onlyCoveredPixels && scaledLayerCoverage;
 
+  // Take thousands separators out of the picture before scaling; see
+  // DetectSeparators().
+  //
+  // NOTE (unoptimized on purpose): detection runs on every call, so a frame is
+  // scanned once for itself and again for each sprite composited on top --
+  // about 3.7 us per scan at 128x32, roughly 30% of this function. The mask
+  // only changes when the 32p plane does, so it could be computed once per
+  // Serum_Colorize() and invalidated when a sprite writes to frame32. Left as
+  // is until profiling says this path matters; correctness first. Selecting on
+  // a copy with them removed means the digits have nothing adjacent to bridge
+  // to, and the separators are stamped back afterwards at their exact shape.
+  const uint16_t* selectSource = mySerum.frame32;
+  uint32_t separatorsFound = 0;
+  if (separatorMask && separatorFreeFrame) {
+    separatorsFound = DetectSeparators(srcWidth, srcHeight);
+    if (separatorsFound) {
+      const size_t px = (size_t)srcWidth * srcHeight;
+      memcpy(separatorFreeFrame, mySerum.frame32, px * sizeof(uint16_t));
+      for (size_t i = 0; i < px; ++i)
+        if (separatorMask[i]) separatorFreeFrame[i] = 0;
+      selectSource = separatorFreeFrame;
+    }
+  }
+
   // Optional source-space bounds {x0,y0,x1,y1} inclusive, expanded by one
   // source pixel because Scale2x can pull a neighbour into a destination pixel
   // whose own centre lies outside the region.
@@ -2021,7 +2157,7 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       // changes those decisions along every layer boundary. frame32 is a
       // complete picture here -- see sdRendersStatics.
       const uint32_t src = FrameUtil::Helper::SelectUpscaled2xSourceIndex(
-          mySerum.frame32, srcWidth, srcHeight, x, y, algorithm);
+          selectSource, srcWidth, srcHeight, x, y, algorithm);
       // Outside the frame: black, and nothing to read parallel planes from.
       // The layer simply does not paint here.
       if (src == FrameUtil::Helper::kUpscaleSourceOutside) continue;
@@ -2049,6 +2185,35 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       }
       if (propagateModified) {
         mySerum.modifiedelements64[dst] = mySerum.modifiedelements32[src];
+      }
+    }
+  }
+
+  // Put the separators back, line doubled, so each keeps exactly the shape the
+  // ROM drew. Only where the layer owns them, so this cannot paint over HD art.
+  if (separatorsFound) {
+    for (uint32_t sy = y0 / 2; sy <= y1 / 2 && sy < srcHeight; ++sy) {
+      for (uint32_t sx = x0 / 2; sx <= x1 / 2 && sx < srcWidth; ++sx) {
+        const uint32_t i = sy * srcWidth + sx;
+        if (!separatorMask[i]) continue;
+        if (respectCoverage && scaledLayerCoverage[i] == 0) continue;
+        const uint16_t colour = mySerum.frame32[i];
+        for (uint32_t dy = 0; dy < 2; ++dy)
+          for (uint32_t dx = 0; dx < 2; ++dx) {
+            const uint32_t dst = (sy * 2 + dy) * dstWidth + sx * 2 + dx;
+            mySerum.frame64[dst] = colour;
+            // Carry the dyna layer so GenerateExtraPlaneShadows() still gives
+            // the separator its shadow, exactly as for the digits.
+            if (respectCoverage && sdDynaLayerMap && hdDynaLayerMap) {
+              hdDynaLayerMap[dst] = sdDynaLayerMap[i];
+            }
+            if (mySerum.rotationsinframe64 && mySerum.rotationsinframe32) {
+              mySerum.rotationsinframe64[dst * 2] =
+                  mySerum.rotationsinframe32[i * 2];
+              mySerum.rotationsinframe64[dst * 2 + 1] =
+                  mySerum.rotationsinframe32[i * 2 + 1];
+            }
+          }
       }
     }
   }
@@ -2335,6 +2500,12 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
         (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     frameLayerCoverage =
         (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
+    separatorMask = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
+    separatorFreeFrame = (uint16_t*)malloc(
+        g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
+    separatorRowCount =
+        (uint32_t*)malloc(g_serumData.fheight * sizeof(uint32_t));
+    separatorDescends = (uint8_t*)malloc(g_serumData.fwidth);
     sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     hdDynaLayerMap =
         (uint8_t*)malloc(g_serumData.fwidth * 2 * g_serumData.fheight * 2);
@@ -2488,6 +2659,11 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
       (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   frameLayerCoverage =
       (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
+  separatorMask = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
+  separatorFreeFrame = (uint16_t*)malloc(
+      g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
+  separatorRowCount = (uint32_t*)malloc(g_serumData.fheight * sizeof(uint32_t));
+  separatorDescends = (uint8_t*)malloc(g_serumData.fwidth);
   sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   hdDynaLayerMap =
       (uint8_t*)malloc(g_serumData.fwidth * 2 * g_serumData.fheight * 2);
@@ -5442,8 +5618,7 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
 
       return mySerum.rotationtimer;
     }
-  }
-  else if (firstUnknownFrameTimestamp == 0) {
+  } else if (firstUnknownFrameTimestamp == 0) {
     firstUnknownFrameTimestamp = now;
   }
 
@@ -6145,8 +6320,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       return (uint32_t)mySerum.rotationtimer |
              (rotationIsScene ? FLAG_RETURNED_V2_SCENE : 0);
     }
-  }
-  else if (firstUnknownFrameTimestamp == 0) {
+  } else if (firstUnknownFrameTimestamp == 0) {
     firstUnknownFrameTimestamp = now;
   }
 
