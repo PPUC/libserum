@@ -455,6 +455,16 @@ every boundary pixel take the centre value, which for a thin feature such as a
 one-pixel shadow is byte-identical to line doubling regardless of the algorithm
 selected.
 
+The converse is equally load-bearing: a destination pixel whose **own** source
+is unowned must not be painted at all, even when the selection reaches back
+inside the layer. Testing only the selected source let a dynamic zone with a
+bright edge paint over the HD content beside it — Iron Man's settings screen,
+where the highlighted border of the active tab bled into the letter next to it.
+Both tests are needed, and they answer different questions: the selected source
+decides whether the boundary rounds, the destination's own source decides
+whether the layer may paint there at all. An editor upscaling the whole frame
+cannot hit this, which is why the same frame looks right there.
+
 **Handle `kUpscaleSourceOutside`.** Outside the frame is black, not a copy of
 the edge pixel — `FrameUtil` clamped there until `db067bc`, which made content
 touching row 0 see its own colour "above" it, a false edge that trips the

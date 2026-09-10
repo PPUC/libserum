@@ -121,15 +121,18 @@ A frame is rendered as two layers:
 Dynamic shadows are generated afterwards, directly on the upscaled result, so a
 shadow always follows the shape of the glyph it belongs to.
 
-Two algorithms are available:
+Three algorithms are available:
 
-- **Scale2x preserve** (default) — Scale2x that never drops a pixel the source
-  lit. Reference Scale2x rounds convex corners by taking a neighbour, and where
-  that neighbour is empty the pixel is simply lost — which eats DMD text, often
-  only five pixels tall, to the point where `S`, `R` and `C` stop being
-  readable. This keeps the centre in that one case, so the result is the union
-  of Scale2x and line doubling. On artwork it changes well under 1% of pixels
-  and is invisible.
+- **Scale2x preserve** (default) — Scale2x that never rounds a lit pixel's
+  corner away into emptiness. Reference Scale2x rounds a convex corner by
+  taking a neighbour, and where that neighbour is empty one of the pixel's four
+  output pixels goes with it. Exhaustively that is never more than one of the
+  four, so a lit pixel cannot disappear — but DMD text is often five pixels
+  tall and almost nothing but corners, and there the single chipped corner
+  reads as a hole, to the point where `S`, `R` and `C` stop being readable.
+  This keeps the centre in exactly that case, so the result is the union of
+  Scale2x and line doubling. On artwork it changes well under 1% of pixels and
+  is invisible.
 - **Scale2x** (AdvMAME2x) — the reference algorithm, unmodified
 - **line doubling** — each source pixel becomes a `2x2` block
 
@@ -139,6 +142,28 @@ alternate between the two constantly — and this one is right for both. The alg
 [libframeutil](https://github.com/PPUC/libframeutil), shared with the rest of
 the PPUC stack, and hosts can read the selection back with
 `Serum_GetScalingAlgorithm()` so any further scaling they do matches.
+
+### Thousands separators
+
+Scale2x joins two pixels of the same colour that touch only diagonally, and in
+a score that is exactly what fuses a comma to the digit beside it: the comma's
+tail sits one row below the text and one column across, so the scaler runs a
+diagonal between the two and they become one shape.
+
+libserum finds those separators before scaling and stamps them back afterwards
+by line doubling, so the digits have nothing adjacent to bridge to. The search
+runs one colour at a time. That is not an optimization: Scale2x only ever joins
+pixels sharing a colour, and a colorization that paints a background behind its
+score — most of them — has no empty row anywhere for a whole-frame search to
+find text with. Within a single colour the structure is unmistakable, and a
+separator is then a narrow column carrying pixels below the text's bottom line.
+A column that carries the glyph above it is never a candidate, which is what
+keeps a letter's own pixels out of the mask; marked pixels are line doubled, so
+marking one would damage the letter around it.
+
+There is no sidecar setting for this — it is always on. A handful of artwork
+pixels per frame can match the same shape and get line doubled with the commas.
+Measured at 0.3% of a frame, and not noticeable in practice.
 
 ### `scaling.txt`
 
