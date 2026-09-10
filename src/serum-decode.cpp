@@ -714,8 +714,11 @@ uint32_t* separatorRowCount = NULL;
 uint8_t* separatorDescends = NULL;
 // Distinct colours in the frame, for the per-colour separator analysis.
 static const uint32_t kSeparatorMaxColors = 64;
+// Pixels a bottom line must carry before it can hold a separator.
+static const uint32_t kSeparatorMinBaseline = 8;
 uint16_t* separatorColors = NULL;
 uint8_t* separatorColPresent = NULL;  // kSeparatorMaxColors blocks of W
+uint16_t* separatorTextFrame = NULL;  // the 32p plane, lit dynamic pixels only
 // Source index per destination pixel, for the whole-frame upscale.
 //
 // The composite below needs the index Scale2x selected, not just the colour:
@@ -1676,6 +1679,7 @@ void Serum_free(void) {
   Free_element((void**)&separatorDescends);
   Free_element((void**)&separatorColors);
   Free_element((void**)&separatorColPresent);
+  Free_element((void**)&separatorTextFrame);
   Free_element((void**)&upscaleIndexPlane);
   separatorMaskValid = false;
   separatorMaskCount = 0;
@@ -2103,7 +2107,34 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
   if (!separatorRowCount || !separatorDescends || !separatorColors) return 0;
   if (!separatorColPresent) return 0;
   memset(separatorMask, 0, (size_t)W * H);
-  const uint16_t* f = mySerum.frame32;
+  if (!separatorTextFrame || !sdDynaLayerMap) return 0;
+
+  // Only lit dynamic content is considered.
+  //
+  // This filter exists for one thing: a comma in a score fusing with the digit
+  // beside it, and scores are dynamic. Everything else it looked at was a
+  // liability. Dithered artwork carries a colour a few pixels to a row, and at
+  // that size the tests below are decided by noise -- one frame of an
+  // animation reads as having a descender and the next does not, so marks
+  // flicker on artwork that never moved. GoldenEye is dense dithered artwork
+  // with no dynamic content whatsoever, and 440 of its frame pairs changed a
+  // mark on a pixel that had not changed.
+  //
+  // A colorization whose score is static rather than dynamic keeps its fused
+  // comma. That is the conservative direction: missing a separator costs one
+  // pixel of a comma, marking the wrong thing costs stability everywhere.
+  uint16_t* const textFrame = separatorTextFrame;
+  bool anyText = false;
+  {
+    const size_t px = (size_t)W * H;
+    for (size_t i = 0; i < px; ++i) {
+      const uint16_t c = sdDynaLayerMap[i] ? mySerum.frame32[i] : 0;
+      textFrame[i] = c;
+      if (c) anyText = true;
+    }
+  }
+  if (!anyText) return 0;
+  const uint16_t* f = textFrame;
 
   // Distinct colours and their per-row counts, in one pass over the frame.
   // Walking the frame once per colour costs 64 us on a Cortex-A53, more than
@@ -2203,7 +2234,14 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
                groupRow[baseline] * 3 <= groupRow[baseline - 1])
           --baseline;
 
-        if (baseline < r1) {
+        // A separator only means something under a line of text, and a line of
+        // text puts a row of glyph bottoms on its bottom line. Dithered
+        // artwork does not: a scattered colour carries one to five pixels per
+        // row, and at that size the ratio above is decided by noise -- one
+        // frame of an animation reads as having a descender and the next does
+        // not, so marks flicker on artwork that never moved. Real text clears
+        // this comfortably: the score on spagb_100 frame 241 has 23.
+        if (baseline < r1 && groupRow[baseline] >= kSeparatorMinBaseline) {
           // How far above the bottom line a separator may start scales with
           // the band: a comma is roughly a quarter of the text height, so a
           // tall font draws a taller comma.
@@ -2754,12 +2792,16 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
     separatorColors = (uint16_t*)malloc(kSeparatorMaxColors * sizeof(uint16_t));
     separatorColPresent =
         (uint8_t*)malloc((size_t)kSeparatorMaxColors * g_serumData.fwidth);
+    separatorTextFrame = (uint16_t*)malloc(
+        (size_t)g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
     upscaleIndexPlane =
         (uint32_t*)malloc((size_t)g_serumData.fwidth * 2 * g_serumData.fheight *
                           2 * sizeof(uint32_t));
     separatorColors = (uint16_t*)malloc(kSeparatorMaxColors * sizeof(uint16_t));
     separatorColPresent =
         (uint8_t*)malloc((size_t)kSeparatorMaxColors * g_serumData.fwidth);
+    separatorTextFrame = (uint16_t*)malloc(
+        (size_t)g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
     AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
     sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     hdDynaLayerMap =
