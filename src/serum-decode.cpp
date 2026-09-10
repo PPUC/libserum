@@ -2186,11 +2186,22 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
         uint32_t r1 = r0;
         while (r1 + 1 < H && groupRow[r1 + 1]) r1++;
 
-        uint32_t peak = 0;
-        for (uint32_t y = r0; y <= r1; ++y) peak = std::max(peak, groupRow[y]);
-        uint32_t baseline = r0;
-        for (uint32_t y = r0; y <= r1; ++y)
-          if (groupRow[y] * 3 >= peak) baseline = y;
+        // The bottom line, found by walking up from the last row while each
+        // row holds far less than the one above it. That is what a descender
+        // row looks like: a comma or two against a row of glyph bottoms.
+        //
+        // Comparing neighbouring rows rather than each row against the band's
+        // peak matters for stability. The peak moves whenever anything in the
+        // run is occluded -- a ball crossing "BALL SAVE" hides part of the
+        // text, the peak drops, the bottom line moves up, and rows that are
+        // really glyph bottoms start looking like descenders. The marks then
+        // flicker on and off as the object passes, in text whose own pixels
+        // never changed. A ratio between adjacent rows moves with both rows
+        // at once, so it stays put.
+        uint32_t baseline = r1;
+        while (baseline > r0 &&
+               groupRow[baseline] * 3 <= groupRow[baseline - 1])
+          --baseline;
 
         if (baseline < r1) {
           // How far above the bottom line a separator may start scales with
