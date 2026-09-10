@@ -712,6 +712,9 @@ uint16_t* separatorFreeFrame = NULL;
 // would be paid dozens of times a frame on the Pi.
 uint32_t* separatorRowCount = NULL;
 uint8_t* separatorDescends = NULL;
+// Distinct colours in the frame, for the per-colour separator analysis.
+static const uint32_t kSeparatorMaxColors = 64;
+uint16_t* separatorColors = NULL;
 
 // The set of 4-byte windows present in the current ROM frame, used by sprite
 // detection to reject a sprite's detection word without scanning for it.
@@ -1656,6 +1659,7 @@ void Serum_free(void) {
   Free_element((void**)&separatorFreeFrame);
   Free_element((void**)&separatorRowCount);
   Free_element((void**)&separatorDescends);
+  Free_element((void**)&separatorColors);
   Free_element((void**)&frameDwordKeys);
   Free_element((void**)&frameDwordStamps);
   frameDwordMask = 0;
@@ -2041,95 +2045,132 @@ static void ResetScaledLayerCoverage(void) {
   scaledLayerHasCoverage = false;
 }
 
-// A thousands separator owns a narrow column that contains nothing else.
+// A thousands separator owns a narrow column that contains nothing else --
+// judged one colour at a time.
 //
-// Digits never descend below the text's bottom line, so a column carrying lit
-// pixels below it belongs to a separator. The separator is then everything lit
-// in that column (or the two columns it may span) -- which starts at the bottom
-// line or one row above it, depending on the font. Fonts in the wild do both.
+// Per colour, because Scale2x only ever joins two pixels that share a colour.
+// A comma can therefore only fuse with a digit of its own colour, and looking
+// at one colour at a time makes the painted background disappear from the
+// analysis: its pixels carry other colours. That is what defeated the earlier
+// whole-frame version of this. It searched for text as maximal runs of rows
+// carrying pixels, and a colorization that paints artwork behind its score has
+// no empty row anywhere, so the whole frame collapsed into one band and not a
+// single separator was ever found. It worked only on a black background.
 //
-// That column ownership is what rejects a descender such as a Q's tail: the
-// tail's column also carries the glyph's body, so its topmost lit pixel sits
-// far above the bottom line and the candidate is discarded. No digit counting
-// is needed, and the test is conservative -- an unusual separator is missed
-// rather than a glyph being misread, which is the safe direction.
+// Within one colour the structure is unmistakable. On frame 241 of spagb_100,
+// colour 0x9480 carries 23 pixels on row 29 -- the bottoms of "1,000,000" --
+// and 2 on row 30, which are exactly its two comma tails.
+//
+// Digits never descend below the text's bottom line, so a column carrying that
+// colour below it belongs to a separator. The separator is then everything of
+// that colour in the column (or the two columns it may span), which starts at
+// the bottom line or a little above it depending on the font.
+//
+// Column ownership is what rejects a descender such as a Q's tail: the tail's
+// column also carries the glyph's body in the same colour, so its topmost
+// pixel sits far above the bottom line and the candidate is discarded. It is
+// equally what keeps a glyph's own pixels out of the mask -- marked pixels are
+// pulled out of the frame Scale2x sees and stamped back line-doubled, so
+// marking one would damage the letter around it.
 static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
   if (!separatorMask || !mySerum.frame32) return 0;
+  if (!separatorRowCount || !separatorDescends || !separatorColors) return 0;
   memset(separatorMask, 0, (size_t)W * H);
   const uint16_t* f = mySerum.frame32;
 
-  // A frame can show several rows of text, so each row is handled on its own:
-  // one baseline for the whole frame would put every row but the lowest above
-  // it, and a column scanned over the full height would pick up whatever sits
-  // in the rows above. Bands are maximal runs of rows carrying pixels.
-  if (!separatorRowCount || !separatorDescends) return 0;
-  uint32_t* const rowCount = separatorRowCount;
-  memset(rowCount, 0, H * sizeof(uint32_t));
-  for (uint32_t y = 0; y < H; ++y)
-    for (uint32_t x = 0; x < W; ++x)
-      if (f[y * W + x]) rowCount[y]++;
+  // Distinct colours and their per-row counts, in one pass over the frame.
+  // Walking the frame once per colour costs 64 us on a Cortex-A53, more than
+  // the entire upscale; the run-length cache below collapses almost every
+  // lookup, because a DMD frame is long runs of one colour. The cap keeps a
+  // pathological frame bounded.
+  uint32_t ncolors = 0;
+  uint32_t* const counts = separatorRowCount;  // ncolors blocks of H
+  uint16_t lastColor = 0;
+  uint32_t lastSlot = UINT32_MAX;
+  for (uint32_t y = 0; y < H; ++y) {
+    const uint16_t* row = f + (size_t)y * W;
+    for (uint32_t x = 0; x < W; ++x) {
+      const uint16_t c = row[x];
+      if (!c) continue;  // black is never text
+      uint32_t slot;
+      if (c == lastColor && lastSlot != UINT32_MAX) {
+        slot = lastSlot;
+      } else {
+        for (slot = 0; slot < ncolors; ++slot)
+          if (separatorColors[slot] == c) break;
+        if (slot == ncolors) {
+          if (ncolors == kSeparatorMaxColors) continue;
+          separatorColors[ncolors] = c;
+          memset(counts + (size_t)ncolors * H, 0, H * sizeof(uint32_t));
+          ncolors++;
+        }
+        lastColor = c;
+        lastSlot = slot;
+      }
+      counts[(size_t)slot * H + y]++;
+    }
+  }
 
   uint32_t found = 0;
-  for (uint32_t r0 = 0; r0 < H; ++r0) {
-    if (!rowCount[r0]) continue;
-    uint32_t r1 = r0;
-    while (r1 + 1 < H && rowCount[r1 + 1]) r1++;
+  for (uint32_t ci = 0; ci < ncolors; ++ci) {
+    const uint16_t color = separatorColors[ci];
+    const uint32_t* const rowCount = counts + (size_t)ci * H;
+    uint32_t total = 0;
+    for (uint32_t y = 0; y < H; ++y) total += rowCount[y];
+    if (total < 4) continue;  // too little of this colour to be a line of text
 
-    uint32_t peak = 0;
-    for (uint32_t y = r0; y <= r1; ++y) peak = std::max(peak, rowCount[y]);
-    uint32_t baseline = r0;
-    for (uint32_t y = r0; y <= r1; ++y)
-      if (rowCount[y] * 3 >= peak) baseline = y;
+    for (uint32_t r0 = 0; r0 < H; ++r0) {
+      if (!rowCount[r0]) continue;
+      uint32_t r1 = r0;
+      while (r1 + 1 < H && rowCount[r1 + 1]) r1++;
 
-    if (baseline < r1) {
-      // Columns of this band carrying pixels below its bottom line, minus the
-      // ones that belong to a glyph. A separator's column starts at or just
-      // above the bottom line; a digit's column runs most of the band.
-      //
-      // This is decided per column, not per run, because a comma's tail
-      // usually slants under the character before it. That puts one of the
-      // preceding glyph's columns into the run, and judging the run as a whole
-      // let that column -- which reaches the top of the band -- reject the
-      // comma beside it. In a tightly kerned font that missed every comma.
-      //
-      // How far above the bottom line a separator may start scales with the
-      // band: a comma is about a quarter of the text height, so a tall font
-      // draws a taller comma.
-      const uint32_t maxRise = std::max(1u, (r1 - r0 + 1) / 4);
-      const uint32_t highest = (baseline >= maxRise) ? baseline - maxRise : 0;
-      uint8_t* const descends = separatorDescends;
-      memset(descends, 0, W);
-      for (uint32_t x = 0; x < W; ++x) {
-        bool below = false;
-        for (uint32_t y = baseline + 1; y <= r1; ++y)
-          if (f[y * W + x]) {
-            below = true;
-            break;
-          }
-        if (!below) continue;
-        uint32_t topRow = r1;
-        for (uint32_t y = r0; y <= r1; ++y)
-          if (f[y * W + x]) {
-            topRow = y;
-            break;
-          }
-        if (topRow >= highest) descends[x] = 1;
-      }
+      uint32_t peak = 0;
+      for (uint32_t y = r0; y <= r1; ++y) peak = std::max(peak, rowCount[y]);
+      uint32_t baseline = r0;
+      for (uint32_t y = r0; y <= r1; ++y)
+        if (rowCount[y] * 3 >= peak) baseline = y;
 
-      for (uint32_t c0 = 0; c0 < W; ++c0) {
-        if (!descends[c0]) continue;
-        uint32_t c1 = c0;
-        while (c1 + 1 < W && descends[c1 + 1]) c1++;
-        if (c1 - c0 + 1 <= 2) {  // wider than this is not a separator
-          for (uint32_t x = c0; x <= c1; ++x)
-            for (uint32_t y = r0; y <= r1; ++y)
-              if (f[y * W + x]) separatorMask[y * W + x] = 1;
-          found++;
+      if (baseline < r1) {
+        // How far above the bottom line a separator may start scales with the
+        // band: a comma is roughly a quarter of the text height, so a tall
+        // font draws a taller comma.
+        const uint32_t maxRise = std::max(1u, (r1 - r0 + 1) / 4);
+        const uint32_t highest = (baseline >= maxRise) ? baseline - maxRise : 0;
+        uint8_t* const descends = separatorDescends;
+        memset(descends, 0, W);
+        for (uint32_t x = 0; x < W; ++x) {
+          bool below = false;
+          for (uint32_t y = baseline + 1; y <= r1; ++y)
+            if (f[(size_t)y * W + x] == color) {
+              below = true;
+              break;
+            }
+          if (!below) continue;
+          uint32_t topRow = r1;
+          for (uint32_t y = r0; y <= r1; ++y)
+            if (f[(size_t)y * W + x] == color) {
+              topRow = y;
+              break;
+            }
+          if (topRow >= highest) descends[x] = 1;
         }
-        c0 = c1;
+
+        for (uint32_t c0 = 0; c0 < W; ++c0) {
+          if (!descends[c0]) continue;
+          uint32_t c1 = c0;
+          while (c1 + 1 < W && descends[c1 + 1]) c1++;
+          if (c1 - c0 + 1 <= 2) {  // wider than this is not a separator
+            for (uint32_t x = c0; x <= c1; ++x)
+              for (uint32_t y = r0; y <= r1; ++y)
+                if (f[(size_t)y * W + x] == color)
+                  separatorMask[(size_t)y * W + x] = 1;
+            found++;
+          }
+          c0 = c1;
+        }
       }
+      r0 = r1;
     }
-    r0 = r1;
   }
   return found;
 }
@@ -2578,9 +2619,11 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
     separatorMask = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     separatorFreeFrame = (uint16_t*)malloc(
         g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
-    separatorRowCount =
-        (uint32_t*)malloc(g_serumData.fheight * sizeof(uint32_t));
+    separatorRowCount = (uint32_t*)malloc(
+        kSeparatorMaxColors * g_serumData.fheight * sizeof(uint32_t));
     separatorDescends = (uint8_t*)malloc(g_serumData.fwidth);
+    separatorColors = (uint16_t*)malloc(kSeparatorMaxColors * sizeof(uint16_t));
+    separatorColors = (uint16_t*)malloc(kSeparatorMaxColors * sizeof(uint16_t));
     AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
     sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     hdDynaLayerMap =
@@ -2738,7 +2781,8 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
   separatorMask = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   separatorFreeFrame = (uint16_t*)malloc(
       g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
-  separatorRowCount = (uint32_t*)malloc(g_serumData.fheight * sizeof(uint32_t));
+  separatorRowCount = (uint32_t*)malloc(kSeparatorMaxColors *
+                                        g_serumData.fheight * sizeof(uint32_t));
   separatorDescends = (uint8_t*)malloc(g_serumData.fwidth);
   AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
   sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
