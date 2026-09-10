@@ -5,7 +5,7 @@ set -e
 # Pinned revision of https://github.com/PPUC/libframeutil.
 # libserum consumes the header-only FrameUtil.h from it for the shared frame
 # scaling algorithms (see AGENTS.md, "Resolution scaling").
-LIBFRAMEUTIL_SHA=4b171dc98f792ee51c7d15f936dea56c80ab627b
+LIBFRAMEUTIL_SHA=711ab21dcf9ad33d8db8339dfd3b1548bcc34cdb
 
 PROJECT_SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
