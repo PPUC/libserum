@@ -2184,11 +2184,31 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
           uint32_t c1 = c0;
           while (c1 + 1 < W && descends[c1 + 1]) c1++;
           if (c1 - c0 + 1 <= 2) {  // wider than this is not a separator
+            // ...and a separator is short. Height was unbounded, so a tall
+            // thin feature whose column runs below the bottom line qualified
+            // as one enormous comma: the highlighted border down the side of
+            // a tab on Iron Man's settings screen was marked over its whole
+            // length and line doubled, which is what made it read as blocks
+            // instead of a scaled edge.
+            //
+            // Judged on the whole run, not per column. Dropping a single
+            // column would split a run that was too wide to be a separator
+            // into narrow pieces that then qualify, which marks more than
+            // before rather than less.
+            uint32_t top = r1, bottom = r0;
             for (uint32_t x = c0; x <= c1; ++x)
               for (uint32_t y = r0; y <= r1; ++y)
-                if (f[(size_t)y * W + x] == color)
-                  separatorMask[(size_t)y * W + x] = 1;
-            found++;
+                if (f[(size_t)y * W + x] == color) {
+                  if (y < top) top = y;
+                  if (y > bottom) bottom = y;
+                }
+            if (bottom - top + 1 <= maxRise + 2) {
+              for (uint32_t x = c0; x <= c1; ++x)
+                for (uint32_t y = r0; y <= r1; ++y)
+                  if (f[(size_t)y * W + x] == color)
+                    separatorMask[(size_t)y * W + x] = 1;
+              found++;
+            }
           }
           c0 = c1;
         }
