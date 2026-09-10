@@ -2058,6 +2058,33 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
   memset(separatorMask, 0, (size_t)W * H);
   const uint16_t* f = mySerum.frame32;
 
+  // What counts as text.
+  //
+  // Not the composited frame: a colorization that paints a background behind
+  // its score -- which is most of them -- has no empty row anywhere, so the
+  // whole frame collapses into a single band, the bottom line lands on the
+  // last row, and nothing is ever found. That is why this worked on a black
+  // background and did nothing on artwork.
+  //
+  // Lit dynamic content is the score text with the background excluded, which
+  // is exactly the signal wanted. Frames with no dynamic content at all fall
+  // back to the composited frame, which is the case the band analysis was
+  // first written against.
+  const uint8_t* dyn = sdDynaLayerMap;
+  bool anyDyna = false;
+  if (dyn) {
+    const size_t px = (size_t)W * H;
+    for (size_t i = 0; i < px; ++i)
+      if (dyn[i]) {
+        anyDyna = true;
+        break;
+      }
+  }
+  auto lit = [&](uint32_t x, uint32_t y) -> bool {
+    const size_t i = (size_t)y * W + x;
+    return anyDyna ? dyn[i] != 0 : f[i] != 0;
+  };
+
   // A frame can show several rows of text, so each row is handled on its own:
   // one baseline for the whole frame would put every row but the lowest above
   // it, and a column scanned over the full height would pick up whatever sits
@@ -2067,7 +2094,7 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
   memset(rowCount, 0, H * sizeof(uint32_t));
   for (uint32_t y = 0; y < H; ++y)
     for (uint32_t x = 0; x < W; ++x)
-      if (f[y * W + x]) rowCount[y]++;
+      if (lit(x, y)) rowCount[y]++;
 
   uint32_t found = 0;
   for (uint32_t r0 = 0; r0 < H; ++r0) {
@@ -2095,6 +2122,17 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
       // How far above the bottom line a separator may start scales with the
       // band: a comma is about a quarter of the text height, so a tall font
       // draws a taller comma.
+      // Everything below the bottom line is a descender, and a digit does not
+      // descend, so none of it belongs to the number. Mark it wherever it
+      // sits, including inside a glyph's own column: a comma's tail commonly
+      // slants left, under the character before it, and the per-column test
+      // below drops that column as a glyph. Leaving the tail in the scaled
+      // layer is precisely what lets Scale2x run a diagonal from it into the
+      // digit above -- the artefact this filter exists to stop.
+      for (uint32_t y = baseline + 1; y <= r1; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+          if (lit(x, y)) separatorMask[y * W + x] = 1;
+
       const uint32_t maxRise = std::max(1u, (r1 - r0 + 1) / 4);
       const uint32_t highest = (baseline >= maxRise) ? baseline - maxRise : 0;
       uint8_t* const descends = separatorDescends;
@@ -2102,14 +2140,14 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
       for (uint32_t x = 0; x < W; ++x) {
         bool below = false;
         for (uint32_t y = baseline + 1; y <= r1; ++y)
-          if (f[y * W + x]) {
+          if (lit(x, y)) {
             below = true;
             break;
           }
         if (!below) continue;
         uint32_t topRow = r1;
         for (uint32_t y = r0; y <= r1; ++y)
-          if (f[y * W + x]) {
+          if (lit(x, y)) {
             topRow = y;
             break;
           }
@@ -2123,7 +2161,7 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
         if (c1 - c0 + 1 <= 2) {  // wider than this is not a separator
           for (uint32_t x = c0; x <= c1; ++x)
             for (uint32_t y = r0; y <= r1; ++y)
-              if (f[y * W + x]) separatorMask[y * W + x] = 1;
+              if (lit(x, y)) separatorMask[y * W + x] = 1;
           found++;
         }
         c0 = c1;
