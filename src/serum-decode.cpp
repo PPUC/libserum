@@ -715,6 +715,7 @@ uint8_t* separatorDescends = NULL;
 // Distinct colours in the frame, for the per-colour separator analysis.
 static const uint32_t kSeparatorMaxColors = 64;
 uint16_t* separatorColors = NULL;
+uint8_t* separatorColPresent = NULL;  // kSeparatorMaxColors blocks of W
 // Source index per destination pixel, for the whole-frame upscale.
 //
 // The composite below needs the index Scale2x selected, not just the colour:
@@ -1674,6 +1675,7 @@ void Serum_free(void) {
   Free_element((void**)&separatorRowCount);
   Free_element((void**)&separatorDescends);
   Free_element((void**)&separatorColors);
+  Free_element((void**)&separatorColPresent);
   Free_element((void**)&upscaleIndexPlane);
   separatorMaskValid = false;
   separatorMaskCount = 0;
@@ -2099,6 +2101,7 @@ static void ResetScaledLayerCoverage(void) {
 static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
   if (!separatorMask || !mySerum.frame32) return 0;
   if (!separatorRowCount || !separatorDescends || !separatorColors) return 0;
+  if (!separatorColPresent) return 0;
   memset(separatorMask, 0, (size_t)W * H);
   const uint16_t* f = mySerum.frame32;
 
@@ -2126,12 +2129,14 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
           if (ncolors == kSeparatorMaxColors) continue;
           separatorColors[ncolors] = c;
           memset(counts + (size_t)ncolors * H, 0, H * sizeof(uint32_t));
+          memset(separatorColPresent + (size_t)ncolors * W, 0, W);
           ncolors++;
         }
         lastColor = c;
         lastSlot = slot;
       }
       counts[(size_t)slot * H + y]++;
+      separatorColPresent[(size_t)slot * W + x] = 1;
     }
   }
 
@@ -2143,77 +2148,113 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
     for (uint32_t y = 0; y < H; ++y) total += rowCount[y];
     if (total < 4) continue;  // too little of this colour to be a line of text
 
-    for (uint32_t r0 = 0; r0 < H; ++r0) {
-      if (!rowCount[r0]) continue;
-      uint32_t r1 = r0;
-      while (r1 + 1 < H && rowCount[r1 + 1]) r1++;
+    // Group the colour's columns first, and find the text's bottom line inside
+    // each group rather than across the frame.
+    //
+    // Everything below is decided from pixel counts per row, and taking those
+    // across the full width couples parts of the frame that have nothing to do
+    // with each other: an animation playing on one side moved the bottom line
+    // and flipped separator decisions in static text on the other, so the text
+    // flickered in the 64p output while the 32p sat still. Characters within a
+    // run of text sit a column or two apart, separate elements much further,
+    // so grouping by column gap keeps each decision local to its own text.
+    const uint8_t* const present = separatorColPresent + (size_t)ci * W;
+    const uint32_t kGap = 2;  // columns of space that still read as one run
+    for (uint32_t g0 = 0; g0 < W; ++g0) {
+      if (!present[g0]) continue;
+      uint32_t g1 = g0;
+      for (;;) {
+        uint32_t probe = g1 + 1;
+        while (probe < W && probe - g1 <= kGap && !present[probe]) probe++;
+        if (probe < W && probe - g1 <= kGap && present[probe])
+          g1 = probe;
+        else
+          break;
+      }
 
-      uint32_t peak = 0;
-      for (uint32_t y = r0; y <= r1; ++y) peak = std::max(peak, rowCount[y]);
-      uint32_t baseline = r0;
-      for (uint32_t y = r0; y <= r1; ++y)
-        if (rowCount[y] * 3 >= peak) baseline = y;
+      uint32_t* const groupRow =
+          separatorRowCount + (size_t)kSeparatorMaxColors * H;
+      for (uint32_t y = 0; y < H; ++y) {
+        uint32_t n = 0;
+        for (uint32_t x = g0; x <= g1; ++x)
+          if (f[(size_t)y * W + x] == color) n++;
+        groupRow[y] = n;
+      }
 
-      if (baseline < r1) {
-        // How far above the bottom line a separator may start scales with the
-        // band: a comma is roughly a quarter of the text height, so a tall
-        // font draws a taller comma.
-        const uint32_t maxRise = std::max(1u, (r1 - r0 + 1) / 4);
-        const uint32_t highest = (baseline >= maxRise) ? baseline - maxRise : 0;
-        uint8_t* const descends = separatorDescends;
-        memset(descends, 0, W);
-        for (uint32_t x = 0; x < W; ++x) {
-          bool below = false;
-          for (uint32_t y = baseline + 1; y <= r1; ++y)
-            if (f[(size_t)y * W + x] == color) {
-              below = true;
-              break;
-            }
-          if (!below) continue;
-          uint32_t topRow = r1;
-          for (uint32_t y = r0; y <= r1; ++y)
-            if (f[(size_t)y * W + x] == color) {
-              topRow = y;
-              break;
-            }
-          if (topRow >= highest) descends[x] = 1;
-        }
+      for (uint32_t r0 = 0; r0 < H; ++r0) {
+        if (!groupRow[r0]) continue;
+        uint32_t r1 = r0;
+        while (r1 + 1 < H && groupRow[r1 + 1]) r1++;
 
-        for (uint32_t c0 = 0; c0 < W; ++c0) {
-          if (!descends[c0]) continue;
-          uint32_t c1 = c0;
-          while (c1 + 1 < W && descends[c1 + 1]) c1++;
-          if (c1 - c0 + 1 <= 2) {  // wider than this is not a separator
-            // ...and a separator is short. Height was unbounded, so a tall
-            // thin feature whose column runs below the bottom line qualified
-            // as one enormous comma: the highlighted border down the side of
-            // a tab on Iron Man's settings screen was marked over its whole
-            // length and line doubled, which is what made it read as blocks
-            // instead of a scaled edge.
-            //
-            // Judged on the whole run, not per column. Dropping a single
-            // column would split a run that was too wide to be a separator
-            // into narrow pieces that then qualify, which marks more than
-            // before rather than less.
-            uint32_t top = r1, bottom = r0;
-            for (uint32_t x = c0; x <= c1; ++x)
-              for (uint32_t y = r0; y <= r1; ++y)
-                if (f[(size_t)y * W + x] == color) {
-                  if (y < top) top = y;
-                  if (y > bottom) bottom = y;
-                }
-            if (bottom - top + 1 <= maxRise + 2) {
+        uint32_t peak = 0;
+        for (uint32_t y = r0; y <= r1; ++y) peak = std::max(peak, groupRow[y]);
+        uint32_t baseline = r0;
+        for (uint32_t y = r0; y <= r1; ++y)
+          if (groupRow[y] * 3 >= peak) baseline = y;
+
+        if (baseline < r1) {
+          // How far above the bottom line a separator may start scales with
+          // the band: a comma is roughly a quarter of the text height, so a
+          // tall font draws a taller comma.
+          const uint32_t maxRise = std::max(1u, (r1 - r0 + 1) / 4);
+          const uint32_t highest =
+              (baseline >= maxRise) ? baseline - maxRise : 0;
+          uint8_t* const descends = separatorDescends;
+          memset(descends + g0, 0, g1 - g0 + 1);
+          for (uint32_t x = g0; x <= g1; ++x) {
+            bool below = false;
+            for (uint32_t y = baseline + 1; y <= r1; ++y)
+              if (f[(size_t)y * W + x] == color) {
+                below = true;
+                break;
+              }
+            if (!below) continue;
+            uint32_t topRow = r1;
+            for (uint32_t y = r0; y <= r1; ++y)
+              if (f[(size_t)y * W + x] == color) {
+                topRow = y;
+                break;
+              }
+            if (topRow >= highest) descends[x] = 1;
+          }
+
+          for (uint32_t c0 = g0; c0 <= g1; ++c0) {
+            if (!descends[c0]) continue;
+            uint32_t c1 = c0;
+            while (c1 + 1 <= g1 && descends[c1 + 1]) c1++;
+            if (c1 - c0 + 1 <= 2) {  // wider than this is not a separator
+              // ...and a separator is short. Height was unbounded, so a tall
+              // thin feature whose column runs below the bottom line
+              // qualified as one enormous comma: the highlighted border down
+              // the side of a tab on Iron Man's settings screen was marked
+              // over its whole length and line doubled, which made it read as
+              // blocks instead of a scaled edge.
+              //
+              // Judged on the whole run, not per column: dropping a single
+              // column would split a run too wide to be a separator into
+              // narrow pieces that then qualify, marking more rather than
+              // less.
+              uint32_t top = r1, bottom = r0;
               for (uint32_t x = c0; x <= c1; ++x)
                 for (uint32_t y = r0; y <= r1; ++y)
-                  if (f[(size_t)y * W + x] == color)
-                    separatorMask[(size_t)y * W + x] = 1;
-              found++;
+                  if (f[(size_t)y * W + x] == color) {
+                    if (y < top) top = y;
+                    if (y > bottom) bottom = y;
+                  }
+              if (bottom - top + 1 <= maxRise + 2) {
+                for (uint32_t x = c0; x <= c1; ++x)
+                  for (uint32_t y = r0; y <= r1; ++y)
+                    if (f[(size_t)y * W + x] == color)
+                      separatorMask[(size_t)y * W + x] = 1;
+                found++;
+              }
             }
+            c0 = c1;
           }
-          c0 = c1;
         }
+        r0 = r1;
       }
-      r0 = r1;
+      g0 = g1;
     }
   }
   return found;
@@ -2694,14 +2735,20 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
     separatorMask = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     separatorFreeFrame = (uint16_t*)malloc(
         g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
+    // One block of fheight counters per colour, plus one more used as scratch
+    // for the per-column-group row counts.
     separatorRowCount = (uint32_t*)malloc(
-        kSeparatorMaxColors * g_serumData.fheight * sizeof(uint32_t));
+        (kSeparatorMaxColors + 1) * g_serumData.fheight * sizeof(uint32_t));
     separatorDescends = (uint8_t*)malloc(g_serumData.fwidth);
     separatorColors = (uint16_t*)malloc(kSeparatorMaxColors * sizeof(uint16_t));
+    separatorColPresent =
+        (uint8_t*)malloc((size_t)kSeparatorMaxColors * g_serumData.fwidth);
     upscaleIndexPlane =
         (uint32_t*)malloc((size_t)g_serumData.fwidth * 2 * g_serumData.fheight *
                           2 * sizeof(uint32_t));
     separatorColors = (uint16_t*)malloc(kSeparatorMaxColors * sizeof(uint16_t));
+    separatorColPresent =
+        (uint8_t*)malloc((size_t)kSeparatorMaxColors * g_serumData.fwidth);
     AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
     sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
     hdDynaLayerMap =
@@ -2859,7 +2906,7 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
   separatorMask = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   separatorFreeFrame = (uint16_t*)malloc(
       g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
-  separatorRowCount = (uint32_t*)malloc(kSeparatorMaxColors *
+  separatorRowCount = (uint32_t*)malloc((kSeparatorMaxColors + 1) *
                                         g_serumData.fheight * sizeof(uint32_t));
   separatorDescends = (uint8_t*)malloc(g_serumData.fwidth);
   AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
