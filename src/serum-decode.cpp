@@ -715,6 +715,12 @@ uint8_t* separatorDescends = NULL;
 // Distinct colours in the frame, for the per-colour separator analysis.
 static const uint32_t kSeparatorMaxColors = 64;
 uint16_t* separatorColors = NULL;
+// The mask is a property of the composited 32p plane, so it is computed once
+// per frame rather than on every upscale. Sprite compositing calls the upscale
+// again per sprite to preserve z-order, and re-deriving the whole-frame mask
+// each time cost 7.6 us a go -- more than the upscale it was serving.
+bool separatorMaskValid = false;
+uint32_t separatorMaskCount = 0;
 
 // The set of 4-byte windows present in the current ROM frame, used by sprite
 // detection to reject a sprite's detection word without scanning for it.
@@ -1660,6 +1666,8 @@ void Serum_free(void) {
   Free_element((void**)&separatorRowCount);
   Free_element((void**)&separatorDescends);
   Free_element((void**)&separatorColors);
+  separatorMaskValid = false;
+  separatorMaskCount = 0;
   Free_element((void**)&frameDwordKeys);
   Free_element((void**)&frameDwordStamps);
   frameDwordMask = 0;
@@ -2043,6 +2051,7 @@ static void ResetScaledLayerCoverage(void) {
   if (sdDynaLayerMap) memset(sdDynaLayerMap, 0, px);
   if (hdDynaLayerMap) memset(hdDynaLayerMap, 0, px * 4);
   scaledLayerHasCoverage = false;
+  separatorMaskValid = false;
 }
 
 // A thousands separator owns a narrow column that contains nothing else --
@@ -2229,16 +2238,21 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   //
   // NOTE (unoptimized on purpose): detection runs on every call, so a frame is
   // scanned once for itself and again for each sprite composited on top --
-  // about 3.7 us per scan at 128x32, roughly 30% of this function. The mask
-  // only changes when the 32p plane does, so it could be computed once per
-  // Serum_Colorize() and invalidated when a sprite writes to frame32. Left as
-  // is until profiling says this path matters; correctness first. Selecting on
-  // a copy with them removed means the digits have nothing adjacent to bridge
-  // to, and the separators are stamped back afterwards at their exact shape.
+  // The mask is derived once per frame, not per call: sprite compositing
+  // invokes this again for each sprite to keep z-order, and re-deriving it
+  // every time cost more than the upscale itself. A separator drawn by a
+  // sprite rather than by the frame is therefore missed, which is the same
+  // thing that happened before this filter existed at all. Selecting on a copy
+  // with the separators removed means the digits have nothing adjacent to
+  // bridge to, and they are stamped back afterwards at their exact shape.
   const uint16_t* selectSource = mySerum.frame32;
   uint32_t separatorsFound = 0;
   if (separatorMask && separatorFreeFrame) {
-    separatorsFound = DetectSeparators(srcWidth, srcHeight);
+    if (!separatorMaskValid) {
+      separatorMaskCount = DetectSeparators(srcWidth, srcHeight);
+      separatorMaskValid = true;
+    }
+    separatorsFound = separatorMaskCount;
     if (separatorsFound) {
       const size_t px = (size_t)srcWidth * srcHeight;
       memcpy(separatorFreeFrame, mySerum.frame32, px * sizeof(uint16_t));
