@@ -2307,6 +2307,19 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
 
   for (uint32_t y = y0; y <= y1; y++) {
     for (uint32_t x = x0; x <= x1; x++) {
+      // The layer paints only destination pixels it owns.
+      //
+      // Gating on the SELECTED source alone was not enough: where the
+      // selection reached back inside the layer from a destination whose own
+      // source sits outside it, the layer painted over natively rendered HD
+      // content. A dynamic zone with a bright edge bled a high-resolution
+      // pixel into whatever was drawn beside it -- the highlighted tab border
+      // leaking into the letter next to it on Iron Man's settings screen.
+      // Upscaling the whole frame at once, as an editor does, cannot do this
+      // because there is no layer to be outside of.
+      if (respectCoverage &&
+          scaledLayerCoverage[(size_t)(y >> 1) * srcWidth + (x >> 1)] == 0)
+        continue;
       // Always select on the COLOUR, never on an ownership-tagged key: the
       // scaled layer must round its edges exactly as a whole-frame upscale of
       // the same picture would, and tagging ownership into the comparison
