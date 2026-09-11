@@ -51,6 +51,25 @@ explains the rule; if the test fails, read that commit message first.
 | `hash/frame_dword_slot_uses_high_bits` | Fibonacci hashing carries its entropy upwards |
 | `separator/not_fused_with_digit` | a thousands separator is stamped back line-doubled, not bridged to the digit |
 
+Not everything here is a past bug. The rest covers behaviour that had no test at
+all and would fail quietly — a misparsed `scaling.txt` falls back to a default
+nobody chose, a rotation that ticks at the wrong rate looks like a slow machine,
+and a packing bug corrupts every colorization at once.
+
+| test | what it pins |
+|---|---|
+| `sidecar/spellings` | every spelling `scaling.txt` advertises, bare and under `scaling:`/`algorithm:` |
+| `sidecar/shadow_offset` | `native`/`proportional`/`1`/`2`, and both keys in one file |
+| `sidecar/tolerance` | comments, blank lines, padding, case; an unknown key or value leaves the stored choice alone rather than replacing it with a default |
+| `sparse/round_trip` | an element never set reads back as the no-data signature, so the render path can index it unconditionally |
+| `sparse/drops_empty_payloads` | an all-no-data payload is not stored — the point of the structure |
+| `sparse/parent_gating` | a child vector stores nothing where its parent has nothing (`dynamasks_extra` hangs off `isextraframe` this way) |
+| `sparse/value_packing_is_exact` | packed values survive exactly, at every width; a normalization to 0/1 would flatten every dynamic mask |
+| `sparse/wide_values_round_trip` | `uint16_t` vectors — the colorized frames — come back bit for bit |
+| `rotation/advances_tagged_pixels_only` | a pixel tagged with a slot advances, a pixel tagged `0xffff` never does |
+| `rotation/wraps_at_length` | the shift wraps at the rotation's length instead of running off its colour list |
+| `rotation/empty_slot_not_due_next` | a slot with no colours or no delay is not a rotation and is not reported as due |
+
 ## Keeping the suite honest
 
 A test that cannot fail is worse than no test, so each one above was checked by

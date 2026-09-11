@@ -6,6 +6,8 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -491,6 +493,267 @@ static void Test_SeparatorIsNotFusedWithTheDigit(void) {
 }
 
 // ---------------------------------------------------------------------------
+// scaling.txt, the per-colorization override
+// ---------------------------------------------------------------------------
+
+// Writes a scaling.txt and hands back the directory holding it.
+static std::string WriteSidecar(const char* body) {
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "libserum_tests" / "altcolor";
+  std::filesystem::create_directories(dir);
+  std::ofstream out(dir / "scaling.txt", std::ios::trunc);
+  out << body;
+  out.close();
+  return dir.string();
+}
+
+static void ExpectSidecar(const char* body, int algorithm, int shadowOffset) {
+  const ScalingSidecar got = read_scaling_sidecar(WriteSidecar(body));
+  ++g_checks;
+  if (algorithm < 0) {
+    if (got.algorithm)
+      Fail(__FILE__, __LINE__, "%s: algorithm set to %d, want untouched", body,
+           (int)*got.algorithm);
+  } else if (!got.algorithm || (int)*got.algorithm != algorithm) {
+    Fail(__FILE__, __LINE__, "%s: algorithm %s, want %d", body,
+         got.algorithm ? std::to_string((int)*got.algorithm).c_str() : "unset",
+         algorithm);
+  }
+  ++g_checks;
+  if (shadowOffset < 0) {
+    if (got.shadowOffsetMode)
+      Fail(__FILE__, __LINE__, "%s: shadow-offset set to %d, want untouched",
+           body, (int)*got.shadowOffsetMode);
+  } else if (!got.shadowOffsetMode ||
+             (int)*got.shadowOffsetMode != shadowOffset) {
+    Fail(__FILE__, __LINE__, "%s: shadow-offset %s, want %d", body,
+         got.shadowOffsetMode
+             ? std::to_string((int)*got.shadowOffsetMode).c_str()
+             : "unset",
+         shadowOffset);
+  }
+}
+
+// The file is how an author overrides the stored choice, so every spelling the
+// parser advertises has to keep working, and anything it does not recognize
+// has to leave the stored choice alone rather than fall back to a default.
+static void Test_ScalingSidecarSpellings(void) {
+  ExpectSidecar("scale2x\n", SERUM_SCALING_SCALE2X, -1);
+  ExpectSidecar("scale2x-preserve\n", SERUM_SCALING_SCALE2X_PRESERVE, -1);
+  ExpectSidecar("scale2xpreserve\n", SERUM_SCALING_SCALE2X_PRESERVE, -1);
+  ExpectSidecar("preserve\n", SERUM_SCALING_SCALE2X_PRESERVE, -1);
+  ExpectSidecar("line-doubling\n", SERUM_SCALING_LINE_DOUBLING, -1);
+  ExpectSidecar("linedoubling\n", SERUM_SCALING_LINE_DOUBLING, -1);
+  ExpectSidecar("linedouble\n", SERUM_SCALING_LINE_DOUBLING, -1);
+  ExpectSidecar("scaling: scale2x\n", SERUM_SCALING_SCALE2X, -1);
+  ExpectSidecar("algorithm: line-doubling\n", SERUM_SCALING_LINE_DOUBLING, -1);
+}
+
+static void Test_ScalingSidecarShadowOffset(void) {
+  ExpectSidecar("shadow-offset: native\n", -1, SERUM_SHADOW_OFFSET_NATIVE);
+  ExpectSidecar("shadow-offset: proportional\n", -1,
+                SERUM_SHADOW_OFFSET_PROPORTIONAL);
+  ExpectSidecar("shadowoffset: 1\n", -1, SERUM_SHADOW_OFFSET_NATIVE);
+  ExpectSidecar("shadow-offset: 2\n", -1, SERUM_SHADOW_OFFSET_PROPORTIONAL);
+  ExpectSidecar("scale2x\nshadow-offset: proportional\n", SERUM_SCALING_SCALE2X,
+                SERUM_SHADOW_OFFSET_PROPORTIONAL);
+}
+
+// Comments, blank lines, padding and case are all tolerated; an unknown key,
+// an unknown value and a missing file all leave the stored choice standing.
+static void Test_ScalingSidecarTolerance(void) {
+  ExpectSidecar("# a comment\n\n  SCALE2X  \n", SERUM_SCALING_SCALE2X, -1);
+  ExpectSidecar("scale2x # trailing comment\n", SERUM_SCALING_SCALE2X, -1);
+  ExpectSidecar("\tShadow-Offset :\tPROPORTIONAL \n", -1,
+                SERUM_SHADOW_OFFSET_PROPORTIONAL);
+  ExpectSidecar("hq2x\n", -1, -1);
+  ExpectSidecar("scaling: hq2x\n", -1, -1);
+  ExpectSidecar("shadow-offset: sideways\n", -1, -1);
+  ExpectSidecar("colours: many\n", -1, -1);
+  ExpectSidecar("", -1, -1);
+
+  const ScalingSidecar none = read_scaling_sidecar(
+      (std::filesystem::temp_directory_path() / "libserum_tests_absent")
+          .string());
+  CHECK(!none.algorithm);
+  CHECK(!none.shadowOffsetMode);
+  CHECK(!none.any());
+}
+
+// ---------------------------------------------------------------------------
+// SparseVector, the storage every vector in a colorization sits on
+// ---------------------------------------------------------------------------
+
+// What goes in comes out, for an element that was set and for one that never
+// was -- the latter reads back as the no-data signature rather than as absent,
+// which is what lets the render path index it unconditionally.
+static void Test_SparseVectorRoundTrip(void) {
+  SparseVector<uint16_t> v(0);
+  const uint16_t a[4] = {1, 2, 3, 4};
+  const uint16_t b[4] = {9, 8, 7, 6};
+  v.set(0, a, 4);
+  v.set(2, b, 4);
+  CHECK(v.hasData(0));
+  CHECK(v.hasData(2));
+  CHECK(!v.hasData(1));
+  for (int i = 0; i < 4; ++i) {
+    CHECK_EQ(v[0][i], a[i]);
+    CHECK_EQ(v[2][i], b[i]);
+    CHECK_EQ(v[1][i], 0);
+  }
+}
+
+// An element whose payload is entirely the no-data signature is not stored at
+// all: that is the whole point of the structure, and a colorization is mostly
+// such elements.
+static void Test_SparseVectorDropsEmptyPayloads(void) {
+  SparseVector<uint8_t> v(0);
+  const uint8_t empty[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  const uint8_t filled[8] = {0, 0, 1, 0, 0, 0, 0, 0};
+  v.set(5, empty, 8);
+  v.set(6, filled, 8);
+  CHECK(!v.hasData(5));
+  CHECK(v.hasData(6));
+  CHECK_EQ(v[6][2], 1);
+}
+
+// A vector parented to another only stores an element where the parent has
+// one. dynamasks_extra hangs off isextraframe this way, so a frame with no
+// extra content costs nothing.
+static void Test_SparseVectorParentGating(void) {
+  SparseVector<uint8_t> parent(0);
+  const uint8_t on[1] = {1};
+  parent.set(3, on, 1);
+
+  SparseVector<uint8_t> child(0);
+  const uint8_t payload[4] = {7, 7, 7, 7};
+  child.set(3, payload, 4, &parent);
+  child.set(4, payload, 4, &parent);  // parent has nothing for 4
+  CHECK(child.hasData(3));
+  CHECK(!child.hasData(4));
+  CHECK_EQ(child[3][0], 7);
+}
+
+// Values are packed to the fewest bits that can hold them, and must survive it
+// exactly. dynamasks is constructed this way -- no-data 255, compressed, value
+// packed -- and a normalization to 0/1 here would flatten every dynamic mask
+// into "is there a zone", losing which of the four colour sets each pixel uses.
+static void Test_SparseVectorValuePackingIsExact(void) {
+  SparseVector<uint8_t> v(255, false, true, true, 0, 1);
+  uint8_t payload[16];
+  for (int i = 0; i < 16; ++i) payload[i] = (uint8_t)i;  // needs four bits
+  v.set(1, payload, 16);
+  for (int i = 0; i < 16; ++i) CHECK_EQ(v[1][i], (uint8_t)i);
+
+  // Two bits' worth, the width a dynamic mask actually uses.
+  uint8_t couches[16];
+  for (int i = 0; i < 16; ++i) couches[i] = (uint8_t)(i % 4);
+  v.set(2, couches, 16);
+  for (int i = 0; i < 16; ++i) CHECK_EQ(v[2][i], (uint8_t)(i % 4));
+
+  // And a payload too wide to pack still round-trips, unpacked.
+  uint8_t wide[16];
+  for (int i = 0; i < 16; ++i) wide[i] = (uint8_t)(i * 16);
+  v.set(3, wide, 16);
+  for (int i = 0; i < 16; ++i) CHECK_EQ(v[3][i], (uint8_t)(i * 16));
+}
+
+// uint16_t vectors -- the colorized frames themselves -- are never value
+// packed, and must come back bit for bit.
+static void Test_SparseVectorWideValuesRoundTrip(void) {
+  SparseVector<uint16_t> w(0);
+  uint16_t wide[8] = {0, 1, 255, 256, 4095, 4096, 65534, 65535};
+  w.set(1, wide, 8);
+  for (int i = 0; i < 8; ++i) CHECK_EQ(w[1][i], wide[i]);
+}
+
+// ---------------------------------------------------------------------------
+// Colour rotations
+// ---------------------------------------------------------------------------
+
+// One rotation in slot 0: four colours, 10 ms apart. A pixel tagged with the
+// slot advances; a pixel tagged 0xffff never does.
+static void Test_RotationAdvancesTaggedPixelsOnly(void) {
+  SetUpFrame();
+  mySerum.flags = FLAG_RETURNED_32P_FRAME_OK;
+  mySerum.rotations32 = (uint16_t*)calloc(
+      MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION, sizeof(uint16_t));
+  mySerum.rotations64 = (uint16_t*)calloc(
+      MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION, sizeof(uint16_t));
+  mySerum.rotations32[0] = 4;   // four colours
+  mySerum.rotations32[1] = 10;  // every 10 ms
+  for (int i = 0; i < 4; ++i)
+    mySerum.rotations32[2 + i] = (uint16_t)(0x100 + i);
+
+  const size_t px = (size_t)kW * 32;
+  for (size_t i = 0; i < px; ++i) {
+    mySerum.rotationsinframe32[i * 2] = 0xffff;
+    mySerum.rotationsinframe32[i * 2 + 1] = 0xffff;
+  }
+  mySerum.rotationsinframe32[0] = 0;  // pixel 0 is in slot 0, at offset 0
+  mySerum.rotationsinframe32[1] = 0;
+  mySerum.frame32[0] = 0x100;
+  mySerum.frame32[1] = 0xDEAD;  // untagged, must not move
+
+  colorshiftinittime32[0] = 0;  // long overdue
+  colorshifts32[0] = 0;
+  Serum_ApplyRotationsv2();
+
+  CHECK_EQ(mySerum.frame32[0], 0x101);
+  CHECK_EQ(mySerum.frame32[1], 0xDEAD);
+  CHECK_EQ(colorshifts32[0], 1);
+  TearDownFrame();
+}
+
+// The shift wraps at the rotation's length rather than running off the end of
+// the colour list.
+static void Test_RotationWrapsAtItsLength(void) {
+  SetUpFrame();
+  mySerum.flags = FLAG_RETURNED_32P_FRAME_OK;
+  mySerum.rotations32 = (uint16_t*)calloc(
+      MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION, sizeof(uint16_t));
+  mySerum.rotations64 = (uint16_t*)calloc(
+      MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION, sizeof(uint16_t));
+  mySerum.rotations32[0] = 3;
+  mySerum.rotations32[1] = 1;
+  for (int i = 0; i < 3; ++i)
+    mySerum.rotations32[2 + i] = (uint16_t)(0x200 + i);
+  const size_t px = (size_t)kW * 32;
+  for (size_t i = 0; i < px; ++i) mySerum.rotationsinframe32[i * 2] = 0xffff;
+  mySerum.rotationsinframe32[0] = 0;
+  mySerum.rotationsinframe32[1] = 0;
+
+  colorshifts32[0] = 2;
+  for (int step = 0; step < 4; ++step) {
+    colorshiftinittime32[0] = 0;
+    Serum_ApplyRotationsv2();
+    CHECK(colorshifts32[0] < 3);
+    CHECK(mySerum.frame32[0] >= 0x200 && mySerum.frame32[0] <= 0x202);
+  }
+  TearDownFrame();
+}
+
+// A slot with no colours, or no delay, is not a rotation and must not be
+// reported as one due next.
+static void Test_EmptyRotationSlotIsNotDueNext(void) {
+  SetUpFrame();
+  mySerum.rotations32 = (uint16_t*)calloc(
+      MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION, sizeof(uint16_t));
+  mySerum.rotations64 = (uint16_t*)calloc(
+      MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION, sizeof(uint16_t));
+  CHECK_EQ(Calc_Next_Rotationv2(1000), 0);
+
+  mySerum.rotations32[0] = 4;
+  mySerum.rotations32[1] = 0;  // no delay: still not a rotation
+  CHECK_EQ(Calc_Next_Rotationv2(1000), 0);
+
+  mySerum.rotations32[1] = 25;
+  colorrotnexttime32[0] = 1200;
+  CHECK_EQ(Calc_Next_Rotationv2(1000), 200);
+  TearDownFrame();
+}
+
+// ---------------------------------------------------------------------------
 
 struct TestCase {
   const char* name;
@@ -519,6 +782,18 @@ static const TestCase kTests[] = {
      Test_NoRotationWritesBothHalves},
     {"hash/frame_dword_slot_uses_high_bits", Test_FrameDwordSlotUsesHighBits},
     {"separator/not_fused_with_digit", Test_SeparatorIsNotFusedWithTheDigit},
+    {"sidecar/spellings", Test_ScalingSidecarSpellings},
+    {"sidecar/shadow_offset", Test_ScalingSidecarShadowOffset},
+    {"sidecar/tolerance", Test_ScalingSidecarTolerance},
+    {"sparse/round_trip", Test_SparseVectorRoundTrip},
+    {"sparse/drops_empty_payloads", Test_SparseVectorDropsEmptyPayloads},
+    {"sparse/parent_gating", Test_SparseVectorParentGating},
+    {"sparse/value_packing_is_exact", Test_SparseVectorValuePackingIsExact},
+    {"sparse/wide_values_round_trip", Test_SparseVectorWideValuesRoundTrip},
+    {"rotation/advances_tagged_pixels_only",
+     Test_RotationAdvancesTaggedPixelsOnly},
+    {"rotation/wraps_at_length", Test_RotationWrapsAtItsLength},
+    {"rotation/empty_slot_not_due_next", Test_EmptyRotationSlotIsNotDueNext},
 };
 
 int main(int argc, char** argv) {

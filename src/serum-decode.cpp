@@ -637,8 +637,8 @@ static inline FrameUtil::ScalingAlgorithm RuntimeScalingAlgorithm() {
   }
 }
 
-static inline const char* ScalingAlgorithmName() {
-  switch (runtimeScalingAlgorithm) {
+static inline const char* ScalingAlgorithmNameOf(uint8_t algorithm) {
+  switch (algorithm) {
     case SERUM_SCALING_LINE_DOUBLING:
       return "line-doubling";
     case SERUM_SCALING_SCALE2X:
@@ -646,6 +646,10 @@ static inline const char* ScalingAlgorithmName() {
     default:
       return "scale2x-preserve";
   }
+}
+
+static inline const char* ScalingAlgorithmName() {
+  return ScalingAlgorithmNameOf(runtimeScalingAlgorithm);
 }
 
 bool upscaleExtraFromOriginal =
@@ -1624,8 +1628,7 @@ static ScalingSidecar read_scaling_sidecar(const std::string& dirPath) {
 
   if (result.algorithm) {
     Log("scaling.txt: algorithm = %s",
-        *result.algorithm == SERUM_SCALING_SCALE2X ? "Scale2x"
-                                                   : "line doubling");
+        ScalingAlgorithmNameOf(*result.algorithm));
   }
   if (result.shadowOffsetMode) {
     Log("scaling.txt: shadow-offset = %s",
@@ -6154,12 +6157,15 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
 uint32_t Calc_Next_Rotationv2(uint32_t now) {
   uint32_t nextrot = 0xffffffff;
   for (int ti = 0; ti < MAX_COLOR_ROTATION_V2; ti++) {
-    if (mySerum.frame32 &&
+    // Guard on the table this reads, not on the plane it belongs to. They are
+    // allocated together, so this is not a live bug -- but the mismatch reads
+    // as if a missing table were handled, and it is not.
+    if (mySerum.rotations32 &&
         mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION] > 0 &&
         mySerum.rotations32[ti * MAX_LENGTH_COLOR_ROTATION + 1] > 0) {
       if (colorrotnexttime32[ti] < nextrot) nextrot = colorrotnexttime32[ti];
     }
-    if (mySerum.frame64 &&
+    if (mySerum.rotations64 &&
         mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION] > 0 &&
         mySerum.rotations64[ti * MAX_LENGTH_COLOR_ROTATION + 1] > 0) {
       if (colorrotnexttime64[ti] < nextrot) nextrot = colorrotnexttime64[ti];
