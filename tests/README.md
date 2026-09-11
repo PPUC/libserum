@@ -1,0 +1,63 @@
+# libserum tests
+
+`unit_tests.cpp` is a single translation unit that `#include`s
+`src/serum-decode.cpp` directly. That is deliberate: almost everything worth
+pinning down here is a `static` function or a file-scope buffer, and widening
+the public surface so a test could reach it would be the worse trade. It also
+means there must stay exactly **one** such TU, or the implementation is compiled
+twice and the link fails.
+
+The tests build their frames in memory — a handful of pixels chosen to make one
+rule observable. There are no dumps and no colorization files in the repository.
+Frame buffers come from `AllocateFrameWorkBuffers()`, the same function both
+load paths call, so a buffer added there is present here too.
+
+## Running
+
+    cmake --build <build dir> --target serum_unit_tests
+    ctest --test-dir <build dir>
+
+Or run the binary directly; it takes an optional substring to filter test names:
+
+    ./build/serum_unit_tests shadow/
+
+Configure with `-DENABLE_SANITIZERS=ON` to run the same tests under
+AddressSanitizer and UndefinedBehaviorSanitizer. Do that at least once per
+change to the render path: one of the bugs below was an out-of-bounds read whose
+*output* was whatever happened to follow a table in memory, so it cannot be
+pinned by an assertion on pixels — but ASan names the line.
+
+## What each test is protecting
+
+Every case exists because something once broke. The commit named beside it
+explains the rule; if the test fails, read that commit message first.
+
+| test | commit |
+|---|---|
+| `preserve/thin_arm_under_lit_band` | `a424478` — a corner is judged by the glyph's shade, not by whether anything behind it is lit |
+| `preserve/lit_band_scales_as_artwork` | the same rule must not become blanket protection |
+| `preserve/solid_corner_rounds` | `84330ef` — a glyph two pixels thick gets its corner rounded |
+| `preserve/corner_needs_both_orthogonals` | `c2e1a9b` (reverted) — testing only the diagonal chips small curved letters |
+| `preserve/rounds_on_black_background` | `cabe025` — libframeutil must be asked for plain Scale2x, or it decides first |
+| `upscale/every_pixel_written` | `5b5b0f7` — nothing else writes this plane, so a skipped pixel keeps the previous frame |
+| `upscale/line_doubling_replicates` | line doubling is exactly a 2x2 replication |
+| `shadow/every_dyna_layer` | `fb5c3a1` — the layer index is bounded by the table it indexes, not by the v1 constant |
+| `shadow/claim_marker_is_not_a_layer` | `e9f8c07` — a painted shadow is not content and casts nothing |
+| `shadow/offset_modes` | native is one extra-plane pixel, proportional is two |
+| `shadow/never_covers_lit_content` | a shadow goes behind the glyph, and the first one to claim a pixel keeps it |
+| `shadow/deferred_leaves_plane_alone` | `8dd46b4` — the upscale must read a shadow-free picture |
+| `shadow/replay_yields_to_lit_content` | the replay keyed on `sdDynaLayerMap`, not on the reused `isdynapix` |
+| `rotation/no_rotation_writes_both_halves` | `effef51` — the offset is written too, or the output differs between runs |
+| `hash/frame_dword_slot_uses_high_bits` | Fibonacci hashing carries its entropy upwards |
+| `separator/not_fused_with_digit` | a thousands separator is stamped back line-doubled, not bridged to the digit |
+
+## Keeping the suite honest
+
+A test that cannot fail is worse than no test, so each one above was checked by
+reverting the fix it guards and confirming it goes red. Nine of the ten
+reversions are caught by an assertion; the tenth — decoding a shadow's own claim
+marker as a dyna layer — reads out of bounds, and what it returns is whatever
+follows the table, so it is caught by the sanitizer build instead.
+
+Do the same for anything added here: break the code on purpose, watch the test
+fail, then put it back.

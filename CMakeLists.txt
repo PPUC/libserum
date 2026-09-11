@@ -188,6 +188,28 @@ if(BUILD_SHARED)
       )
 
       target_link_libraries(serum_test PUBLIC serum_shared)
+
+      # Unit tests. The TU includes src/serum-decode.cpp so that the static
+      # internals are reachable, so it must NOT link the library as well --
+      # see tests/README.md.
+      enable_testing()
+      add_executable(serum_unit_tests
+         tests/unit_tests.cpp
+      )
+      target_include_directories(serum_unit_tests PRIVATE
+         ${CMAKE_CURRENT_SOURCE_DIR}/src
+         ${CMAKE_CURRENT_SOURCE_DIR}/third-party/include
+      )
+      # Everything SERUM_SOURCES has except serum-decode.cpp, which the test
+      # TU includes itself.
+      target_sources(serum_unit_tests PRIVATE
+         src/SerumData.cpp
+         src/SceneGenerator.cpp
+         third-party/include/lz4/lz4.c
+         third-party/include/lz4/lz4hc.c
+         third-party/include/miniz/miniz.c
+      )
+      add_test(NAME serum_unit_tests COMMAND serum_unit_tests)
    endif()
 endif()
 
