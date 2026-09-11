@@ -492,6 +492,90 @@ static void Test_SeparatorIsNotFusedWithTheDigit(void) {
   TearDownFrame();
 }
 
+// Build a score line and report whether the filter recognizes its separators:
+// `tall` rows of digits in `shades` gradient bands, commas `cw` by `ch`
+// hanging below the baseline in the colour that band gives them.
+static uint32_t SeparatorsFoundFor(uint32_t tall, int shades, uint32_t cw,
+                                   uint32_t ch) {
+  const uint32_t W = g_serumData.fwidth, H = g_serumData.fheight;
+  memset(mySerum.frame32, 0, (size_t)W * H * sizeof(uint16_t));
+  memset(sdDynaLayerMap, 0, (size_t)W * H);
+  const uint32_t top = 4, bottom = top + tall - 1;
+  uint32_t x = 4;
+  int digits = 0;
+  while (x + 6 < W - 4) {
+    for (uint32_t dy = 0; dy < tall; ++dy) {
+      const int band = shades > 1 ? (int)(dy * shades / tall) : 0;
+      const uint16_t colour = (uint16_t)(0xffe0 - band * 0x0420);
+      for (uint32_t dx = 0; dx < 5; ++dx) {
+        if (dx > 0 && dx < 4 && dy > 0 && dy < tall - 1) continue;
+        mySerum.frame32[(top + dy) * W + x + dx] = colour;
+        sdDynaLayerMap[(top + dy) * W + x + dx] = 1;
+      }
+    }
+    x += 6;
+    if (++digits % 3 == 0 && x + cw + 6 < W - 4) {
+      const uint16_t colour =
+          (uint16_t)(0xffe0 - (shades > 1 ? shades - 1 : 0) * 0x0420);
+      for (uint32_t cy = 0; cy < ch; ++cy)
+        for (uint32_t dx = 0; dx < cw; ++dx) {
+          const uint32_t yy = bottom - (ch - 1) + cy + 1;
+          if (yy >= H) continue;
+          mySerum.frame32[yy * W + x + dx] = colour;
+          sdDynaLayerMap[yy * W + x + dx] = 1;
+        }
+      x += cw + 1;
+    }
+  }
+  separatorMaskValid = false;
+  return DetectSeparators(W, H);
+}
+
+// What the filter will and will not accept as a thousands separator.
+//
+// The envelope is FIXED: two columns wide and three rows tall, whatever the
+// height of the text it belongs to. A sixteen-row score font gets the same
+// allowance as a six-row caption, because all three bounds -- how far a column
+// may rise above the baseline, how wide the run may be, how tall it may be --
+// are derived from the span of one COLOUR's rows, and a gradient font puts
+// each colour in a horizontal band that is a slice of the glyph rather than
+// the glyph.
+//
+// This test states the envelope as it is, not as it should be. A font whose
+// comma is drawn proportionally -- three pixels wide, or four tall, as a large
+// score font's is -- falls outside it and is scaled like any other pixel, which
+// is what the filter exists to avoid. Widening it means measuring the glyph
+// across every colour in those columns; when that is done this test should
+// change with it, deliberately.
+static void Test_SeparatorEnvelopeIsFixed(void) {
+  SetUpFrame(128, 32);
+  for (uint32_t tall = 6; tall <= 16; tall += 2) {
+    ++g_checks;
+    if (SeparatorsFoundFor(tall, 3, 1, 2) == 0)
+      Fail(__FILE__, __LINE__, "%u-row font: a 1x2 comma was not recognized",
+           tall);
+    ++g_checks;
+    if (SeparatorsFoundFor(tall, 3, 2, 3) == 0)
+      Fail(__FILE__, __LINE__, "%u-row font: a 2x3 comma was not recognized",
+           tall);
+    // Known limitation, see above: these are proportional to a large font and
+    // are rejected at every size.
+    ++g_checks;
+    if (SeparatorsFoundFor(tall, 3, 3, 3) != 0)
+      Fail(__FILE__, __LINE__,
+           "%u-row font: a 3x3 comma is now recognized -- if that was "
+           "intended, update this test",
+           tall);
+    ++g_checks;
+    if (SeparatorsFoundFor(tall, 3, 2, 4) != 0)
+      Fail(__FILE__, __LINE__,
+           "%u-row font: a 2x4 comma is now recognized -- if that was "
+           "intended, update this test",
+           tall);
+  }
+  TearDownFrame();
+}
+
 // ---------------------------------------------------------------------------
 // scaling.txt, the per-colorization override
 // ---------------------------------------------------------------------------
@@ -782,6 +866,7 @@ static const TestCase kTests[] = {
      Test_NoRotationWritesBothHalves},
     {"hash/frame_dword_slot_uses_high_bits", Test_FrameDwordSlotUsesHighBits},
     {"separator/not_fused_with_digit", Test_SeparatorIsNotFusedWithTheDigit},
+    {"separator/envelope_is_fixed", Test_SeparatorEnvelopeIsFixed},
     {"sidecar/spellings", Test_ScalingSidecarSpellings},
     {"sidecar/shadow_offset", Test_ScalingSidecarShadowOffset},
     {"sidecar/tolerance", Test_ScalingSidecarTolerance},

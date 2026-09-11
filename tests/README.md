@@ -58,6 +58,7 @@ and a packing bug corrupts every colorization at once.
 
 | test | what it pins |
 |---|---|
+| `separator/envelope_is_fixed` | what the filter accepts as a separator, and — as a known limitation — that the envelope does not follow the font |
 | `sidecar/spellings` | every spelling `scaling.txt` advertises, bare and under `scaling:`/`algorithm:` |
 | `sidecar/shadow_offset` | `native`/`proportional`/`1`/`2`, and both keys in one file |
 | `sidecar/tolerance` | comments, blank lines, padding, case; an unknown key or value leaves the stored choice alone rather than replacing it with a default |
