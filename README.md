@@ -133,10 +133,12 @@ Three algorithms are available:
   stop being readable.
 
   The two are told apart by the three source pixels *behind* the corner: they
-  are lit exactly when the glyph is at least two pixels thick there. A large
-  glyph rounds; a one-pixel stroke never can, so it is kept whole. Testing only
-  the diagonal is not enough — a diagonal stroke has a lit diagonal neighbour
-  by definition, and small curved letters were chipped anyway.
+  carry the glyph's own shade exactly when it is at least two pixels thick
+  there. A large glyph rounds; a one-pixel stroke never can, so it is kept
+  whole. Testing only the diagonal is not enough — a diagonal stroke has a lit
+  diagonal neighbour by definition, and small curved letters were chipped
+  anyway — and testing only whether the pixels behind are *lit* fails wherever
+  a ROM draws its text over artwork rather than over black.
 
   The test is made on the ROM frame, not on the output colour: after
   colorization an unlit pixel is only recognizable when the palette happens to

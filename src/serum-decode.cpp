@@ -2304,29 +2304,36 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
   return found;
 }
 
-// Is the corner Scale2x wants to round backed by solid glyph?
+// Is the corner Scale2x wants to round backed by more of the same glyph?
 //
 // A destination pixel sits in one of the four quadrants of its source pixel,
 // and Scale2x only ever chips the quadrant that points away from the glyph.
 // The three source pixels behind that quadrant -- the two orthogonal
-// neighbours on the far side and the diagonal between them -- are lit exactly
-// when the glyph is at least two pixels thick there. That is the whole
-// distinction Scale2xPreserve needs:
+// neighbours on the far side and the diagonal between them -- carry the
+// glyph's own shade exactly when it is at least two pixels thick there. That
+// is the whole distinction Scale2xPreserve needs:
 //
 //   * A large digit's corner has that 2x2 behind it, so it rounds as reference
 //     Scale2x would, matching the chamfer the font already draws at the top.
 //   * Five-pixel text is one pixel per stroke, so nothing is ever behind the
 //     corner and every pixel is kept -- which is what makes S, R and C legible.
 //
-// Testing only the diagonal, as an earlier attempt did, is not enough: a
-// diagonal stroke has a lit diagonal neighbour by definition, so small letters
-// with curves were chipped anyway. Requiring both orthogonals as well is what
-// tells a solid corner from a diagonal one pixel wide.
+// It compares the SHADE, not merely whether the pixel is lit. Lit-ness is only
+// a good enough proxy on a ROM that draws its text on black. spagb_100 draws
+// the "SUPER JACKPOT" line over artwork, one row below a solid band of shade
+// 3: every corner of that five-pixel text read as backed by solid glyph, so
+// none of it was protected and S, R and C eroded exactly as they do under
+// reference Scale2x. The band is lit, but it is not the glyph.
 //
-// Off-frame counts as unlit, so a glyph touching the edge keeps its corner.
+// Testing only the diagonal, as an earlier attempt did, is not enough either:
+// a diagonal stroke has a lit diagonal neighbour by definition, so small
+// letters with curves were chipped anyway. Requiring both orthogonals as well
+// is what tells a solid corner from a diagonal one pixel wide.
+//
+// Off-frame counts as not solid, so a glyph touching the edge keeps its corner.
 static inline bool CornerIsSolid(const uint8_t* rom, uint32_t srcWidth,
                                  uint32_t srcHeight, uint32_t destX,
-                                 uint32_t destY) {
+                                 uint32_t destY, size_t own) {
   // The quadrant points away from the glyph; step the opposite way.
   const int32_t bx = (destX & 1) ? -1 : 1;
   const int32_t by = (destY & 1) ? -1 : 1;
@@ -2335,8 +2342,9 @@ static inline bool CornerIsSolid(const uint8_t* rom, uint32_t srcWidth,
   if (sx < 0 || sy < 0 || sx >= (int32_t)srcWidth || sy >= (int32_t)srcHeight)
     return false;
   const size_t behind = (size_t)sy * srcWidth + (size_t)sx;
-  return rom[behind] && rom[behind - (size_t)by * srcWidth] &&
-         rom[behind - (size_t)bx];
+  const uint8_t shade = rom[own];
+  return rom[behind] == shade && rom[behind - (size_t)by * srcWidth] == shade &&
+         rom[behind - (size_t)bx] == shade;
 }
 
 // Derive the 64p output plane from the already composited 32p plane.
@@ -2535,7 +2543,7 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       // whether the glyph is solid BEHIND the corner -- see CornerIsSolid().
       if (protectLitSource && src != own && romFrameForUpscale[own] &&
           !romFrameForUpscale[src] &&
-          !CornerIsSolid(romFrameForUpscale, srcWidth, srcHeight, x, y))
+          !CornerIsSolid(romFrameForUpscale, srcWidth, srcHeight, x, y, own))
         src = (uint32_t)own;
       // Coverage decides only what is painted. Where the selection lands on a
       // pixel the layer does not own, the natively rendered HD content stands.

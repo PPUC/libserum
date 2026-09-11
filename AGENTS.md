@@ -561,10 +561,17 @@ while the font's own chamfer still tapers the top.
 
 The decision is `CornerIsSolid()` in `serum-decode.cpp`: for the quadrant
 Scale2x wants to chip, the three source pixels behind it — both orthogonal
-neighbours on the far side and the diagonal between them — must be lit, which
-happens exactly when the glyph is two pixels thick there. Testing the diagonal
-alone is not sufficient: a diagonal stroke always has a lit diagonal neighbour,
-so small curved glyphs were chipped regardless.
+neighbours on the far side and the diagonal between them — must carry **the same
+ROM shade as the pixel being chipped**, which happens exactly when the glyph is
+two pixels thick there. Testing the diagonal alone is not sufficient: a diagonal
+stroke always has a lit diagonal neighbour, so small curved glyphs were chipped
+regardless.
+
+Comparing the shade rather than mere lit-ness matters wherever a ROM draws text
+over artwork. `spagb_100`'s `SUPER JACKPOT` line sits one row below a solid band
+of shade 3, so every corner of that five-pixel text read as backed by solid
+glyph, nothing was protected, and `S`, `R` and `C` eroded exactly as under
+reference Scale2x. The band is lit, but it is not the glyph.
 
 It is judged on the ROM frame (`romFrameForUpscale`), not on the output colour.
 libframeutil can only recognize an unlit neighbour when the palette paints it
