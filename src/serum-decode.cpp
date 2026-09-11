@@ -2861,6 +2861,50 @@ bool Serum_SaveConcentrate(const char* filename) {
   return g_serumData.SaveToFile(concentratePath.c_str());
 }
 
+// Allocate the per-frame working buffers the v2 render path needs.
+//
+// One function because there are two load paths -- the concentrate reader and
+// the cROM stream reader -- and they had drifted. The stream reader never
+// allocated separatorColors, separatorColPresent, separatorTextFrame or
+// upscaleIndexPlane, so on a .cROM or .cRZ the thousands-separator filter was
+// inert (DetectSeparators() returns 0 the moment separatorTextFrame is NULL)
+// and every upscale fell back to per-pixel source selection. The concentrate
+// reader allocated three of those twice over and leaked the first set.
+//
+// Returns false if any allocation failed; the caller frees and gives up.
+static bool AllocateFrameWorkBuffers(void) {
+  const size_t px = (size_t)g_serumData.fwidth * g_serumData.fheight;
+  frameshape = (uint8_t*)malloc(px);
+  scaledLayerCoverage = (uint8_t*)malloc(px);
+  frameLayerCoverage = (uint8_t*)malloc(px);
+  separatorMask = (uint8_t*)malloc(px);
+  separatorFreeFrame = (uint16_t*)malloc(px * sizeof(uint16_t));
+  // One block of fheight counters per colour, plus one more used as scratch
+  // for the per-column-group row counts.
+  separatorRowCount = (uint32_t*)malloc((kSeparatorMaxColors + 1) *
+                                        g_serumData.fheight * sizeof(uint32_t));
+  separatorDescends = (uint8_t*)malloc(g_serumData.fwidth);
+  separatorColors = (uint16_t*)malloc(kSeparatorMaxColors * sizeof(uint16_t));
+  separatorColPresent =
+      (uint8_t*)malloc((size_t)kSeparatorMaxColors * g_serumData.fwidth);
+  separatorTextFrame = (uint16_t*)malloc(px * sizeof(uint16_t));
+  upscaleIndexPlane = (uint32_t*)malloc(px * 4 * sizeof(uint32_t));
+  AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
+  // Zeroed, not just allocated: the separator filter reads sdDynaLayerMap to
+  // tell dynamic content from artwork, and it is only cleared per frame once a
+  // layer-mode render begins. Before that it would be reading whatever the
+  // allocator handed back.
+  sdDynaLayerMap = (uint8_t*)calloc(px, 1);
+  sdShadowColour = (uint16_t*)calloc(px, sizeof(uint16_t));
+  sdShadowClaim = (uint8_t*)calloc(px, 1);
+  hdDynaLayerMap = (uint8_t*)calloc(px * 4, 1);
+  return frameshape && scaledLayerCoverage && frameLayerCoverage &&
+         separatorMask && separatorFreeFrame && separatorRowCount &&
+         separatorDescends && separatorColors && separatorColPresent &&
+         separatorTextFrame && upscaleIndexPlane && sdDynaLayerMap &&
+         sdShadowColour && sdShadowClaim && hdDynaLayerMap;
+}
+
 static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
     const uint8_t runtimeFlags) {
   // Update mySerum structure
@@ -2940,46 +2984,7 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
       }
     }
 
-    frameshape = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-    scaledLayerCoverage =
-        (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-    frameLayerCoverage =
-        (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-    separatorMask = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-    separatorFreeFrame = (uint16_t*)malloc(
-        g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
-    // One block of fheight counters per colour, plus one more used as scratch
-    // for the per-column-group row counts.
-    separatorRowCount = (uint32_t*)malloc(
-        (kSeparatorMaxColors + 1) * g_serumData.fheight * sizeof(uint32_t));
-    separatorDescends = (uint8_t*)malloc(g_serumData.fwidth);
-    separatorColors = (uint16_t*)malloc(kSeparatorMaxColors * sizeof(uint16_t));
-    separatorColPresent =
-        (uint8_t*)malloc((size_t)kSeparatorMaxColors * g_serumData.fwidth);
-    separatorTextFrame = (uint16_t*)malloc(
-        (size_t)g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
-    upscaleIndexPlane =
-        (uint32_t*)malloc((size_t)g_serumData.fwidth * 2 * g_serumData.fheight *
-                          2 * sizeof(uint32_t));
-    separatorColors = (uint16_t*)malloc(kSeparatorMaxColors * sizeof(uint16_t));
-    separatorColPresent =
-        (uint8_t*)malloc((size_t)kSeparatorMaxColors * g_serumData.fwidth);
-    separatorTextFrame = (uint16_t*)malloc(
-        (size_t)g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
-    AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
-    // Zeroed, not just allocated: the separator filter reads this to tell
-    // dynamic content from artwork, and it is only cleared per frame once a
-    // layer-mode render begins. Before that it would be reading whatever the
-    // allocator handed back.
-    sdDynaLayerMap =
-        (uint8_t*)calloc(g_serumData.fwidth * g_serumData.fheight, 1);
-    sdShadowColour = (uint16_t*)calloc(
-        (size_t)g_serumData.fwidth * g_serumData.fheight, sizeof(uint16_t));
-    sdShadowClaim =
-        (uint8_t*)calloc(g_serumData.fwidth * g_serumData.fheight, 1);
-    hdDynaLayerMap = (uint8_t*)calloc(
-        (size_t)g_serumData.fwidth * 2 * g_serumData.fheight * 2, 1);
-    if (!frameshape) {
+    if (!AllocateFrameWorkBuffers()) {
       Serum_free();
       enabled = false;
       return NULL;
@@ -3124,25 +3129,11 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
     g_serumData.is256x64 = (is256x64 != 0);
   }
 
-  frameshape = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-  scaledLayerCoverage =
-      (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-  frameLayerCoverage =
-      (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-  separatorMask = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-  separatorFreeFrame = (uint16_t*)malloc(
-      g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
-  separatorRowCount = (uint32_t*)malloc((kSeparatorMaxColors + 1) *
-                                        g_serumData.fheight * sizeof(uint32_t));
-  separatorDescends = (uint8_t*)malloc(g_serumData.fwidth);
-  AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
-  sdDynaLayerMap =
-      (uint8_t*)calloc(g_serumData.fwidth * g_serumData.fheight, 1);
-  sdShadowColour = (uint16_t*)calloc(
-      (size_t)g_serumData.fwidth * g_serumData.fheight, sizeof(uint16_t));
-  sdShadowClaim = (uint8_t*)calloc(g_serumData.fwidth * g_serumData.fheight, 1);
-  hdDynaLayerMap = (uint8_t*)calloc(
-      (size_t)g_serumData.fwidth * 2 * g_serumData.fheight * 2, 1);
+  if (!AllocateFrameWorkBuffers()) {
+    Serum_free();
+    enabled = false;
+    return NULL;
+  }
 
   if (Allocate32OutputPlane(runtimeFlags)) {
     mySerum.width32 = (g_serumData.fheight == 32) ? g_serumData.fwidth
