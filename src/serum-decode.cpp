@@ -2528,16 +2528,21 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
     }
   }
 
-  if (respectCoverage) {
-    // Compositing over native HD content: that content keeps its own rotation
-    // entries, and the plane is not a pure derivative of frame32, so the
-    // re-derive-after-rotation path must not claim it.
-    masterPlaneWidth32 = srcWidth;
-    return;
-  }
+  masterPlaneWidth32 = srcWidth;
+
+  // Compositing over natively rendered HD content: that content keeps its own
+  // rotation entries, and the plane is not a pure derivative of frame32, so
+  // the re-derive-after-rotation path must not claim it. The HD pass has
+  // already advertised the plane, so there is nothing further to do.
+  //
+  // Without HD content there is no HD pass, and this composite is what
+  // produced the plane -- it has to advertise it here. Leaving that to a later
+  // stage is not equivalent: GenerateExtraPlaneShadows() runs immediately
+  // after this and is gated on the flag, so the dynamic shadows were silently
+  // skipped and shadow-offset had nothing to act on.
+  if (respectCoverage && (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK)) return;
 
   extraPlaneIsDerived = true;
-  masterPlaneWidth32 = srcWidth;
   mySerum.flags |= FLAG_RETURNED_64P_FRAME_OK;
   mySerum.width64 = dstWidth;
 
@@ -5399,19 +5404,22 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
   }
 
   if (layerMode) {
-    // Composite the scaled layer over whatever the HD pass left standing. When
-    // the frame has no HD statics the mask covers everything, so this is
-    // exactly the whole-frame upscale -- one code path, not two.
+    // Composite the scaled layer over whatever the HD pass left standing.
+    // Always through the mask, even with no HD statics to composite over.
+    //
+    // The mask does not "cover everything" on such a frame, which is what an
+    // earlier version of this assumed: the SD dynamic shadows are drawn into
+    // the 32p plane deliberately unowned, because the extra plane regenerates
+    // them from the upscaled glyph. Taking the maskless path composited those
+    // SD shadows after all, and left hdDynaLayerMap empty so nothing
+    // regenerated -- so the shadows on a frame without HD statics were scaled
+    // copies of the 32p ones, and shadow-offset did nothing at all to them.
     //
     // Done here, at the end of the call, rather than after sprites: a
     // background-scene pass snapshots the output plane into
     // sceneBackgroundFrame before its own pixel loop, so the plane has to be
     // complete by the time Colorize_Framev2 returns.
-    if (isextra) {
-      UpscaleOriginalPlaneIntoExtra(false, /*onlyCoveredPixels=*/true);
-    } else {
-      MaybeUpscaleOriginalPlaneIntoExtra();
-    }
+    UpscaleOriginalPlaneIntoExtra(false, /*onlyCoveredPixels=*/true);
     if (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) {
       GenerateExtraPlaneShadows(IDfound);
     }
