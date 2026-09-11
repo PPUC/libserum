@@ -2426,6 +2426,18 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   // has no HD statics the mask covers everything, so this is exactly the
   // whole-frame upscale -- one code path, not two.
   const bool respectCoverage = onlyCoveredPixels && scaledLayerCoverage;
+  // Does anything else write this plane?
+  //
+  // Ownership exists so natively rendered HD content can stand where the layer
+  // does not own a pixel. With no such content this composite is the only
+  // writer, and skipping a pixel leaves it holding the previous frame -- which
+  // is what rounding a corner into an unowned neighbour started doing. The HD
+  // pass clears extraPlaneIsDerived and sets the flag; a sprite compositing
+  // afterwards sees the flag set either way, so both are needed to tell the two
+  // apart.
+  const bool hdContentStands =
+      (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) && !extraPlaneIsDerived;
+  const bool coverageProtectsHd = respectCoverage && hdContentStands;
   // Only for the preserving algorithm, and only while a ROM frame of the same
   // geometry is in scope. Plain Scale2x must stay bit-identical to reference.
   const bool protectLitSource =
@@ -2521,7 +2533,7 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       // leaking into the letter next to it on Iron Man's settings screen.
       // Upscaling the whole frame at once, as an editor does, cannot do this
       // because there is no layer to be outside of.
-      if (respectCoverage && scaledLayerCoverage[own] == 0) continue;
+      if (coverageProtectsHd && scaledLayerCoverage[own] == 0) continue;
       // Always select on the COLOUR, never on an ownership-tagged key: the
       // scaled layer must round its edges exactly as a whole-frame upscale of
       // the same picture would, and tagging ownership into the comparison
@@ -2532,9 +2544,23 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
                          : FrameUtil::Helper::SelectUpscaled2xSourceIndex(
                                selectSource, srcWidth, srcHeight, x, y,
                                selectionAlgorithm);
-      // Outside the frame: black, and nothing to read parallel planes from.
-      // The layer simply does not paint here.
-      if (src == FrameUtil::Helper::kUpscaleSourceOutside) continue;
+      // Outside the frame: black, and no index to read the parallel planes
+      // from. Where HD content stands the layer simply does not paint. Where
+      // nothing else writes this plane it has to paint the black, or the pixel
+      // keeps the previous frame -- a whole-frame upscale puts black here, and
+      // this composite has to agree with it.
+      if (src == FrameUtil::Helper::kUpscaleSourceOutside) {
+        if (coverageProtectsHd) continue;
+        const uint32_t outsideDst = y * dstWidth + x;
+        mySerum.frame64[outsideDst] = 0;
+        if (hdDynaLayerMap) hdDynaLayerMap[outsideDst] = 0;
+        if (mySerum.rotationsinframe64) {
+          mySerum.rotationsinframe64[outsideDst * 2] = 0xffff;
+          mySerum.rotationsinframe64[outsideDst * 2 + 1] = 0xffff;
+        }
+        if (propagateModified) mySerum.modifiedelements64[outsideDst] = 0;
+        continue;
+      }
       // Scale2xPreserve, judged on the ROM rather than on the output colour.
       // See romFrameForUpscale: the library-side rule can only recognize an
       // unlit neighbour when the palette paints it black, so text on a
@@ -2552,7 +2578,7 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
         src = (uint32_t)own;
       // Coverage decides only what is painted. Where the selection lands on a
       // pixel the layer does not own, the natively rendered HD content stands.
-      if (respectCoverage && scaledLayerCoverage[src] == 0) continue;
+      if (coverageProtectsHd && scaledLayerCoverage[src] == 0) continue;
       const uint32_t dst = y * dstWidth + x;
       mySerum.frame64[dst] = mySerum.frame32[src];
       if (respectCoverage && sdDynaLayerMap && hdDynaLayerMap) {
@@ -2585,7 +2611,7 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       for (uint32_t sx = x0 / 2; sx <= x1 / 2 && sx < srcWidth; ++sx) {
         const uint32_t i = sy * srcWidth + sx;
         if (!separatorMask[i]) continue;
-        if (respectCoverage && scaledLayerCoverage[i] == 0) continue;
+        if (coverageProtectsHd && scaledLayerCoverage[i] == 0) continue;
         const uint16_t colour = mySerum.frame32[i];
         for (uint32_t dy = 0; dy < 2; ++dy)
           for (uint32_t dx = 0; dx < 2; ++dx) {
