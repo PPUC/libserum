@@ -2321,6 +2321,41 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
   return found;
 }
 
+// Is the corner Scale2x wants to round backed by solid glyph?
+//
+// A destination pixel sits in one of the four quadrants of its source pixel,
+// and Scale2x only ever chips the quadrant that points away from the glyph.
+// The three source pixels behind that quadrant -- the two orthogonal
+// neighbours on the far side and the diagonal between them -- are lit exactly
+// when the glyph is at least two pixels thick there. That is the whole
+// distinction Scale2xPreserve needs:
+//
+//   * A large digit's corner has that 2x2 behind it, so it rounds as reference
+//     Scale2x would, matching the chamfer the font already draws at the top.
+//   * Five-pixel text is one pixel per stroke, so nothing is ever behind the
+//     corner and every pixel is kept -- which is what makes S, R and C legible.
+//
+// Testing only the diagonal, as an earlier attempt did, is not enough: a
+// diagonal stroke has a lit diagonal neighbour by definition, so small letters
+// with curves were chipped anyway. Requiring both orthogonals as well is what
+// tells a solid corner from a diagonal one pixel wide.
+//
+// Off-frame counts as unlit, so a glyph touching the edge keeps its corner.
+static inline bool CornerIsSolid(const uint8_t* rom, uint32_t srcWidth,
+                                 uint32_t srcHeight, uint32_t destX,
+                                 uint32_t destY) {
+  // The quadrant points away from the glyph; step the opposite way.
+  const int32_t bx = (destX & 1) ? -1 : 1;
+  const int32_t by = (destY & 1) ? -1 : 1;
+  const int32_t sx = (int32_t)(destX >> 1) + bx;
+  const int32_t sy = (int32_t)(destY >> 1) + by;
+  if (sx < 0 || sy < 0 || sx >= (int32_t)srcWidth || sy >= (int32_t)srcHeight)
+    return false;
+  const size_t behind = (size_t)sy * srcWidth + (size_t)sx;
+  return rom[behind] && rom[behind - (size_t)by * srcWidth] &&
+         rom[behind - (size_t)bx];
+}
+
 // Derive the 64p output plane from the already composited 32p plane.
 //
 // Used when the caller requested 64p output but the matched frame carries no
@@ -2468,8 +2503,15 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       // unlit neighbour when the palette paints it black, so text on a
       // coloured background silently loses the protection. Here the source
       // frame is still in scope and says plainly which pixels the ROM lit.
+      //
+      // Protecting every lit pixel is too much, though: rounding a convex
+      // corner IS replacing one lit pixel with an unlit neighbour, so blanket
+      // protection leaves large digits square at the bottom while the font's
+      // own chamfer still tapers the top. What separates the two cases is
+      // whether the glyph is solid BEHIND the corner -- see CornerIsSolid().
       if (protectLitSource && src != own && romFrameForUpscale[own] &&
-          !romFrameForUpscale[src])
+          !romFrameForUpscale[src] &&
+          !CornerIsSolid(romFrameForUpscale, srcWidth, srcHeight, x, y))
         src = (uint32_t)own;
       // Coverage decides only what is painted. Where the selection lands on a
       // pixel the layer does not own, the natively rendered HD content stands.

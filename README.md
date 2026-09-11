@@ -123,16 +123,25 @@ shadow always follows the shape of the glyph it belongs to.
 
 Three algorithms are available:
 
-- **Scale2x preserve** (default) — Scale2x that never rounds a lit pixel's
-  corner away into emptiness. Reference Scale2x rounds a convex corner by
+- **Scale2x preserve** (default) — Scale2x that rounds a convex corner only
+  where the glyph is solid behind it. Reference Scale2x rounds a corner by
   taking a neighbour, and where that neighbour is empty one of the pixel's four
-  output pixels goes with it. Exhaustively that is never more than one of the
-  four, so a lit pixel cannot disappear — but DMD text is often five pixels
-  tall and almost nothing but corners, and there the single chipped corner
-  reads as a hole, to the point where `S`, `R` and `C` stop being readable.
-  This keeps the centre in exactly that case, so the result is the union of
-  Scale2x and line doubling. On artwork it changes well under 1% of pixels and
-  is invisible.
+  output pixels goes with it. On a large digit that single chip is the wanted
+  rounding, and it matches the chamfer the font already draws at the top. On
+  DMD text five pixels tall, where a stroke is one pixel wide and a glyph is
+  almost nothing but corners, the same chip reads as a hole — `S`, `R` and `C`
+  stop being readable.
+
+  The two are told apart by the three source pixels *behind* the corner: they
+  are lit exactly when the glyph is at least two pixels thick there. A large
+  glyph rounds; a one-pixel stroke never can, so it is kept whole. Testing only
+  the diagonal is not enough — a diagonal stroke has a lit diagonal neighbour
+  by definition, and small curved letters were chipped anyway.
+
+  The test is made on the ROM frame, not on the output colour: after
+  colorization an unlit pixel is only recognizable when the palette happens to
+  paint it black, so text on a coloured background would lose the protection
+  entirely.
 - **Scale2x** (AdvMAME2x) — the reference algorithm, unmodified
 - **line doubling** — each source pixel becomes a `2x2` block
 

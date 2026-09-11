@@ -535,10 +535,25 @@ values are authoritative there, matching how `pup.csv` and `skip-cromc.txt` are
 treated.
 
 `Scale2xPreserve` (value `2`) is the default. It is Scale2x with one change:
-where rounding a convex corner would replace a lit centre pixel with an empty
-neighbour, the centre is kept. Reference Scale2x loses that pixel, which eats
-five-pixel-tall DMD text. Value `0` is still reference Scale2x, unmodified, for
-a colorization that wants exactly what other players produce.
+a convex corner is rounded only where the glyph is solid behind it. Reference
+Scale2x always rounds, which eats five-pixel-tall DMD text; protecting every
+lit pixel, as an earlier version did, leaves large digits square at the bottom
+while the font's own chamfer still tapers the top.
+
+The decision is `CornerIsSolid()` in `serum-decode.cpp`: for the quadrant
+Scale2x wants to chip, the three source pixels behind it — both orthogonal
+neighbours on the far side and the diagonal between them — must be lit, which
+happens exactly when the glyph is two pixels thick there. Testing the diagonal
+alone is not sufficient: a diagonal stroke always has a lit diagonal neighbour,
+so small curved glyphs were chipped regardless.
+
+It is judged on the ROM frame (`romFrameForUpscale`), not on the output colour.
+libframeutil can only recognize an unlit neighbour when the palette paints it
+black, so a colorization with a coloured background — `afm_113b`'s
+`BALL`/`CREDITS` caption on dark blue — silently lost the protection.
+
+Value `0` is still reference Scale2x, unmodified, for a colorization that wants
+exactly what other players produce.
 The selector must never be gated on extra-plane geometry: the whole-frame upscale
 runs precisely when there is no extra plane, and gating there silently made every
 `32p`-only colorization fall back to line doubling.
