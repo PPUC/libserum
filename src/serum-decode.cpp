@@ -2660,7 +2660,7 @@ static void GenerateExtraPlaneShadows(uint32_t IDfound) {
   // walking the whole extra plane to discover the same thing.
   {
     bool anyDir = false;
-    for (int l = 0; l < MAX_DYNA_4COLS_PER_FRAME && !anyDir; ++l) {
+    for (int l = 0; l < MAX_DYNA_SETS_PER_FRAME_V2 && !anyDir; ++l) {
       if (shadowDir && shadowDir[l]) anyDir = true;
       if (shadowDirFb && shadowDirFb[l]) anyDir = true;
     }
@@ -2681,13 +2681,19 @@ static void GenerateExtraPlaneShadows(uint32_t IDfound) {
       const uint8_t entry = hdDynaLayerMap[y * w + x];
       if (entry == 0) continue;  // not lit dynamic content
       // A pixel this pass has already claimed as shadow. It is not a layer,
-      // and reading it as one indexed 254 entries into a 16-entry table: the
+      // and reading it as one indexed 254 entries into the table: the
       // direction bits and the colour both came back as whatever happened to
       // follow it in memory, so shadows cast further shadows in colours no
       // one chose. The claim marker has to be skipped, not decoded.
       if (entry == kShadowClaimed) continue;
       const uint8_t layer = (uint8_t)(entry - 1);
-      if (layer >= MAX_DYNA_4COLS_PER_FRAME) continue;
+      // MAX_DYNA_SETS_PER_FRAME_V2, which is what these tables are read with.
+      // MAX_DYNA_4COLS_PER_FRAME is the old v1 limit and half the size, so
+      // bounding on it silently dropped every layer from 16 up: a colorization
+      // using more than sixteen dynamic colour sets got its shadows at
+      // original resolution, where CheckDynaShadow() has no such bound, and
+      // none on the extra plane.
+      if (layer >= MAX_DYNA_SETS_PER_FRAME_V2) continue;
       uint8_t dirs = shadowDir ? shadowDir[layer] : 0;
       uint16_t colour = shadowCol ? shadowCol[layer] : 0;
       if (dirs == 0 && shadowDirFb) {
