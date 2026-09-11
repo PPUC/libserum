@@ -2576,6 +2576,17 @@ static void GenerateExtraPlaneShadows(uint32_t IDfound) {
   const uint8_t* shadowDirFb = g_serumData.dynashadowsdir_extra[IDfound];
   const uint16_t* shadowColFb = g_serumData.dynashadowscol_extra[IDfound];
   if (!shadowDir && !shadowDirFb) return;
+  // A frame can carry the arrays with every direction cleared, which is most
+  // of them. Checking the handful of layer entries costs nothing next to
+  // walking the whole extra plane to discover the same thing.
+  {
+    bool anyDir = false;
+    for (int l = 0; l < MAX_DYNA_4COLS_PER_FRAME && !anyDir; ++l) {
+      if (shadowDir && shadowDir[l]) anyDir = true;
+      if (shadowDirFb && shadowDirFb[l]) anyDir = true;
+    }
+    if (!anyDir) return;
+  }
 
   const uint32_t w = g_serumData.fwidth * 2;
   const uint32_t h = g_serumData.fheight * 2;
@@ -2837,9 +2848,14 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
     separatorTextFrame = (uint16_t*)malloc(
         (size_t)g_serumData.fwidth * g_serumData.fheight * sizeof(uint16_t));
     AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
-    sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-    hdDynaLayerMap =
-        (uint8_t*)malloc(g_serumData.fwidth * 2 * g_serumData.fheight * 2);
+    // Zeroed, not just allocated: the separator filter reads this to tell
+    // dynamic content from artwork, and it is only cleared per frame once a
+    // layer-mode render begins. Before that it would be reading whatever the
+    // allocator handed back.
+    sdDynaLayerMap =
+        (uint8_t*)calloc(g_serumData.fwidth * g_serumData.fheight, 1);
+    hdDynaLayerMap = (uint8_t*)calloc(
+        (size_t)g_serumData.fwidth * 2 * g_serumData.fheight * 2, 1);
     if (!frameshape) {
       Serum_free();
       enabled = false;
@@ -2997,9 +3013,10 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
                                         g_serumData.fheight * sizeof(uint32_t));
   separatorDescends = (uint8_t*)malloc(g_serumData.fwidth);
   AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
-  sdDynaLayerMap = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-  hdDynaLayerMap =
-      (uint8_t*)malloc(g_serumData.fwidth * 2 * g_serumData.fheight * 2);
+  sdDynaLayerMap =
+      (uint8_t*)calloc(g_serumData.fwidth * g_serumData.fheight, 1);
+  hdDynaLayerMap = (uint8_t*)calloc(
+      (size_t)g_serumData.fwidth * 2 * g_serumData.fheight * 2, 1);
 
   if (Allocate32OutputPlane(runtimeFlags)) {
     mySerum.width32 = (g_serumData.fheight == 32) ? g_serumData.fwidth
