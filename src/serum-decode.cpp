@@ -246,22 +246,6 @@ static bool IsLoadTimingEnabled() {
   return IsEnvFlagEnabled("SERUM_PROFILE_LOAD_TIMES");
 }
 
-static uint32_t GetEnvUintClamped(const char* name, uint32_t maxValue) {
-  const char* value = std::getenv(name);
-  if (!value || value[0] == '\0') {
-    return 0;
-  }
-  char* endPtr = nullptr;
-  unsigned long parsed = std::strtoul(value, &endPtr, 10);
-  if (endPtr == value || *endPtr != '\0') {
-    return 0;
-  }
-  if (parsed > maxValue) {
-    parsed = maxValue;
-  }
-  return static_cast<uint32_t>(parsed);
-}
-
 static bool g_profileDynamicHotPaths = false;
 static bool g_profileDynamicHotPathsWindowed = false;
 static bool g_profileSparseVectors = false;
@@ -325,7 +309,6 @@ bool monochromePaletteMode = false;
 bool showStatusMessages = false;
 bool keepTriggersInternal = false;
 
-const int pathbuflen = 4096;
 const uint32_t MAX_FRAME_WIDTH = 256;
 const uint32_t MAX_FRAME_HEIGHT = 64;
 
@@ -1218,28 +1201,6 @@ static uint64_t DebugHashBytesFNV1a64(const void* data, size_t size) {
   for (size_t i = 0; i < size; ++i) {
     hash ^= bytes[i];
     hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-
-static uint64_t DebugHashFrameRegionFNV1a64(const uint16_t* frame,
-                                            uint32_t stride, uint16_t x,
-                                            uint16_t y, uint16_t width,
-                                            uint16_t height) {
-  if (!frame || width == 0 || height == 0) {
-    return 1469598103934665603ull;
-  }
-  uint64_t hash = 1469598103934665603ull;
-  for (uint16_t row = 0; row < height; ++row) {
-    const uint16_t* src = frame + static_cast<size_t>(y + row) * stride + x;
-    for (uint16_t col = 0; col < width; ++col) {
-      const uint16_t value = src[col];
-      const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&value);
-      hash ^= bytes[0];
-      hash *= 1099511628211ull;
-      hash ^= bytes[1];
-      hash *= 1099511628211ull;
-    }
   }
   return hash;
 }
