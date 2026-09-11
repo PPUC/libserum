@@ -2788,15 +2788,6 @@ static void ReplayOriginalPlaneShadows(void) {
   }
 }
 
-// Fill the 64p output by upscaling, but only when this call rendered the
-// original plane and did not render a native extra plane for the frame.
-static void MaybeUpscaleOriginalPlaneIntoExtra(void) {
-  if (!upscaleExtraFromOriginal) return;
-  if (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) return;
-  if (!(mySerum.flags & FLAG_RETURNED_32P_FRAME_OK)) return;
-  UpscaleOriginalPlaneIntoExtra(false);
-}
-
 // Composite one sprite's contribution to the scaled layer, bounded to the
 // region it touched. Done per sprite rather than once after the whole sprite
 // loop so that z-order is preserved exactly: each sprite's scaled pixels land
@@ -6752,7 +6743,6 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                   .count();
         }
       }
-      MaybeUpscaleOriginalPlaneIntoExtra();
       FinishProfileRenderedFrameOperationMaybe();
 
       bool allowParallelRotations =
