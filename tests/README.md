@@ -49,7 +49,11 @@ explains the rule; if the test fails, read that commit message first.
 | `shadow/replay_yields_to_lit_content` | the replay keyed on `sdDynaLayerMap`, not on the reused `isdynapix` |
 | `rotation/no_rotation_writes_both_halves` | `effef51` — the offset is written too, or the output differs between runs |
 | `hash/frame_dword_slot_uses_high_bits` | Fibonacci hashing carries its entropy upwards |
-| `separator/not_fused_with_digit` | a thousands separator is stamped back line-doubled, not bridged to the digit |
+| `separator/not_fused_with_digit` | a thousands separator is taken out of the picture before scaling, so it cannot bridge to the digit |
+| `separator/scaled_as_its_own_shape` | it is put back by scaling it by itself, so its own diagonal rounds instead of being stamped flat |
+| `separator/touching_a_digit_is_not_grown` | one drawn hard against a digit keeps its square tail rather than growing into the digit |
+| `separator/still_casts_a_shadow` | it carries its dyna layer, so the shadow pass still gives it a shadow, following the rounded shape |
+| `separator/identical_treated_alike` | the same separator drawn twice on one line is treated the same way, whatever digits sit beside it |
 
 Not everything here is a past bug. The rest covers behaviour that had no test at
 all and would fail quietly — a misparsed `scaling.txt` falls back to a default
@@ -58,7 +62,7 @@ and a packing bug corrupts every colorization at once.
 
 | test | what it pins |
 |---|---|
-| `separator/envelope_is_fixed` | what the filter accepts as a separator, and — as a known limitation — that the envelope does not follow the font |
+| `separator/envelope_follows_the_font` | how tall a separator may be follows the height of the text it belongs to; the width bound is still fixed, and the test says so |
 | `sidecar/spellings` | every spelling `scaling.txt` advertises, bare and under `scaling:`/`algorithm:` |
 | `sidecar/shadow_offset` | `native`/`proportional`/`1`/`2`, and both keys in one file |
 | `sidecar/tolerance` | comments, blank lines, padding, case; an unknown key or value leaves the stored choice alone rather than replacing it with a default |
