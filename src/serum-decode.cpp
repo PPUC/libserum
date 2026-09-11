@@ -694,6 +694,14 @@ uint8_t* frameLayerCoverage = NULL;
 // to, and the separator keeps its exact shape.
 uint8_t* separatorMask = NULL;
 uint16_t* separatorFreeFrame = NULL;
+// The separators alone, everything else zero, for scaling them by themselves.
+uint16_t* separatorOnlyFrame = NULL;
+// Where the marked pixels are. A frame has a handful, and the stamp-back would
+// otherwise scan the whole plane three times looking for them -- once per
+// upscale, and sprites upscale again per sprite.
+static const uint32_t kSeparatorMaxPixels = 256;
+uint32_t separatorPixels[kSeparatorMaxPixels];
+uint32_t separatorPixelCount = 0;
 // Scratch for DetectSeparators(), allocated once. It runs on every upscale
 // call -- once per frame plus once per sprite -- so per-call heap traffic here
 // would be paid dozens of times a frame on the Pi.
@@ -703,6 +711,9 @@ uint8_t* separatorDescends = NULL;
 static const uint32_t kSeparatorMaxColors = 64;
 // Pixels a bottom line must carry before it can hold a separator.
 static const uint32_t kSeparatorMinBaseline = 8;
+// A separator is a handful of pixels; anything that grows past this is not
+// one, and only its descending columns are taken.
+static const uint32_t kSeparatorMaxComponent = 12;
 uint16_t* separatorColors = NULL;
 uint8_t* separatorColPresent = NULL;  // kSeparatorMaxColors blocks of W
 uint16_t* separatorTextFrame = NULL;  // the 32p plane, lit dynamic pixels only
@@ -1668,6 +1679,7 @@ void Serum_free(void) {
   Free_element((void**)&frameLayerCoverage);
   Free_element((void**)&separatorMask);
   Free_element((void**)&separatorFreeFrame);
+  Free_element((void**)&separatorOnlyFrame);
   Free_element((void**)&separatorRowCount);
   Free_element((void**)&separatorDescends);
   Free_element((void**)&separatorColors);
@@ -2105,6 +2117,7 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
   if (!separatorRowCount || !separatorDescends || !separatorColors) return 0;
   if (!separatorColPresent) return 0;
   memset(separatorMask, 0, (size_t)W * H);
+  separatorPixelCount = 0;
   if (!separatorTextFrame || !sdDynaLayerMap) return 0;
 
   // Only lit dynamic content is considered.
@@ -2311,10 +2324,72 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
                     if (y > bottom) bottom = y;
                   }
               if (bottom - top + 1 <= maxRise + 2) {
+                // Take the whole separator, not just the columns that reach
+                // below the bottom line. A comma's body sits ON that line, so
+                // its column does not descend and was left out -- half of it
+                // stamped back and half of it scaled, meeting at a corner.
+                // Both halves have to be in the mask for it to be scaled as
+                // one shape.
+                //
+                // Grown by connection rather than guessed: the pixel beside a
+                // comma's tail is as often a digit as it is the comma. If the
+                // shape it grows into does not fit what a separator can be, it
+                // is something else -- a descender joined to its letter -- and
+                // only the descending columns are taken, as before.
+                uint32_t comp[kSeparatorMaxComponent];
+                uint32_t n = 0;
+                bool tooBig = false;
+                const auto push = [&](uint32_t idx) {
+                  for (uint32_t k = 0; k < n; ++k)
+                    if (comp[k] == idx) return;
+                  if (n == kSeparatorMaxComponent) {
+                    tooBig = true;
+                    return;
+                  }
+                  comp[n++] = idx;
+                };
                 for (uint32_t x = c0; x <= c1; ++x)
                   for (uint32_t y = r0; y <= r1; ++y)
                     if (f[(size_t)y * W + x] == color)
-                      separatorMask[(size_t)y * W + x] = 1;
+                      push((uint32_t)(y * W + x));
+                for (uint32_t k = 0; k < n && !tooBig; ++k) {
+                  const uint32_t cx = comp[k] % W, cy = comp[k] / W;
+                  for (int oy = -1; oy <= 1; ++oy)
+                    for (int ox = -1; ox <= 1; ++ox) {
+                      const int32_t nx = (int32_t)cx + ox,
+                                    ny = (int32_t)cy + oy;
+                      if (nx < 0 || ny < 0 || nx >= (int32_t)W ||
+                          ny >= (int32_t)H)
+                        continue;
+                      if (f[(size_t)ny * W + nx] == color)
+                        push((uint32_t)(ny * W + nx));
+                    }
+                }
+                uint32_t cminx = W, cmaxx = 0, cminy = H, cmaxy = 0;
+                for (uint32_t k = 0; k < n; ++k) {
+                  const uint32_t cx = comp[k] % W, cy = comp[k] / W;
+                  if (cx < cminx) cminx = cx;
+                  if (cx > cmaxx) cmaxx = cx;
+                  if (cy < cminy) cminy = cy;
+                  if (cy > cmaxy) cmaxy = cy;
+                }
+                const bool wholeShapeFits = !tooBig &&
+                                            (cmaxx - cminx + 1) <= 2 &&
+                                            (cmaxy - cminy + 1) <= maxRise + 2;
+                const auto mark = [&](uint32_t idx) {
+                  if (separatorMask[idx]) return;
+                  separatorMask[idx] = 1;
+                  if (separatorPixelCount < kSeparatorMaxPixels)
+                    separatorPixels[separatorPixelCount++] = idx;
+                };
+                if (wholeShapeFits) {
+                  for (uint32_t k = 0; k < n; ++k) mark(comp[k]);
+                } else {
+                  for (uint32_t x = c0; x <= c1; ++x)
+                    for (uint32_t y = r0; y <= r1; ++y)
+                      if (f[(size_t)y * W + x] == color)
+                        mark((uint32_t)(y * W + x));
+                }
                 found++;
               }
             }
@@ -2598,33 +2673,75 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
     }
   }
 
-  // Put the separators back, line doubled, so each keeps exactly the shape the
-  // ROM drew. Only where the layer owns them, so this cannot paint over HD art.
-  if (separatorsFound) {
-    for (uint32_t sy = y0 / 2; sy <= y1 / 2 && sy < srcHeight; ++sy) {
-      for (uint32_t sx = x0 / 2; sx <= x1 / 2 && sx < srcWidth; ++sx) {
-        const uint32_t i = sy * srcWidth + sx;
-        if (!separatorMask[i]) continue;
-        if (coverageProtectsHd && scaledLayerCoverage[i] == 0) continue;
-        const uint16_t colour = mySerum.frame32[i];
-        for (uint32_t dy = 0; dy < 2; ++dy)
-          for (uint32_t dx = 0; dx < 2; ++dx) {
-            const uint32_t dst = (sy * 2 + dy) * dstWidth + sx * 2 + dx;
-            mySerum.frame64[dst] = colour;
-            // Carry the dyna layer so GenerateExtraPlaneShadows() still gives
-            // the separator its shadow, exactly as for the digits.
-            if (respectCoverage && sdDynaLayerMap && hdDynaLayerMap) {
-              hdDynaLayerMap[dst] = sdDynaLayerMap[i];
-            }
-            if (mySerum.rotationsinframe64 && mySerum.rotationsinframe32) {
-              mySerum.rotationsinframe64[dst * 2] =
-                  mySerum.rotationsinframe32[i * 2];
-              mySerum.rotationsinframe64[dst * 2 + 1] =
-                  mySerum.rotationsinframe32[i * 2 + 1];
-            }
+  // Put the separators back by scaling them BY THEMSELVES.
+  //
+  // Line doubling them was what kept them from bridging to a digit, and it also
+  // squared off the separator's own shape: a comma is a body of one or two
+  // pixels with its tail one row down and one column across, and the diagonal
+  // between those is exactly what the scaler is for. Stamping it flat left the
+  // two halves meeting at a corner while every glyph beside it was smoothed.
+  //
+  // Scaling a picture that holds nothing but the separators keeps both: there
+  // is no digit in it to bridge to, and the separator's own diagonal rounds.
+  // Nothing of it is lost either -- an isolated stroke has matching neighbours
+  // on one axis, which is Scale2x's own condition for leaving a pixel alone --
+  // so this only ever adds the corner pixels that line doubling omitted.
+  if (separatorsFound && separatorOnlyFrame &&
+      separatorPixelCount <= kSeparatorMaxPixels) {
+    for (uint32_t k = 0; k < separatorPixelCount; ++k)
+      separatorOnlyFrame[separatorPixels[k]] =
+          mySerum.frame32[separatorPixels[k]];
+    // A destination a step outside the separator's own block can still be one
+    // of the corner pixels, so each marked pixel is painted together with the
+    // four source pixels around it. Only those four: the scaler picks the
+    // centre or one of its orthogonal neighbours, so a source touching the
+    // separator only at a corner can never resolve to it.
+    static const int8_t kAroundX[5] = {0, -1, 1, 0, 0};
+    static const int8_t kAroundY[5] = {0, 0, 0, -1, 1};
+    for (uint32_t k = 0; k < separatorPixelCount; ++k) {
+      const uint32_t sx = separatorPixels[k] % srcWidth;
+      const uint32_t sy = separatorPixels[k] / srcWidth;
+      for (int around = 0; around < 5; ++around) {
+        const int32_t nxi = (int32_t)sx + kAroundX[around];
+        const int32_t nyi = (int32_t)sy + kAroundY[around];
+        if (nxi < 0 || nyi < 0 || nxi >= (int32_t)srcWidth ||
+            nyi >= (int32_t)srcHeight)
+          continue;
+        const uint32_t nx = (uint32_t)nxi, ny = (uint32_t)nyi;
+        {
+          {
+            for (uint32_t dy = 0; dy < 2; ++dy)
+              for (uint32_t dx = 0; dx < 2; ++dx) {
+                const uint32_t px2 = nx * 2 + dx, py2 = ny * 2 + dy;
+                if (px2 < x0 || px2 > x1 || py2 < y0 || py2 > y1) continue;
+                const uint32_t src =
+                    FrameUtil::Helper::SelectUpscaled2xSourceIndex(
+                        separatorOnlyFrame, srcWidth, srcHeight, px2, py2,
+                        selectionAlgorithm);
+                if (src == FrameUtil::Helper::kUpscaleSourceOutside) continue;
+                if (!separatorOnlyFrame[src]) continue;
+                if (coverageProtectsHd && scaledLayerCoverage[src] == 0)
+                  continue;
+                const uint32_t dst = py2 * dstWidth + px2;
+                mySerum.frame64[dst] = separatorOnlyFrame[src];
+                // Carry the dyna layer so GenerateExtraPlaneShadows() still
+                // gives the separator its shadow, and gives it the shape that
+                // was actually drawn rather than the square one.
+                if (respectCoverage && sdDynaLayerMap && hdDynaLayerMap)
+                  hdDynaLayerMap[dst] = sdDynaLayerMap[src];
+                if (mySerum.rotationsinframe64 && mySerum.rotationsinframe32) {
+                  mySerum.rotationsinframe64[dst * 2] =
+                      mySerum.rotationsinframe32[src * 2];
+                  mySerum.rotationsinframe64[dst * 2 + 1] =
+                      mySerum.rotationsinframe32[src * 2 + 1];
+                }
+              }
           }
+        }
       }
     }
+    for (uint32_t k = 0; k < separatorPixelCount; ++k)
+      separatorOnlyFrame[separatorPixels[k]] = 0;
   }
 
   masterPlaneWidth32 = srcWidth;
@@ -2635,10 +2752,10 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   // already advertised the plane, so there is nothing further to do.
   //
   // Without HD content there is no HD pass, and this composite is what
-  // produced the plane -- it has to advertise it here. Leaving that to a later
-  // stage is not equivalent: GenerateExtraPlaneShadows() runs immediately
-  // after this and is gated on the flag, so the dynamic shadows were silently
-  // skipped and shadow-offset had nothing to act on.
+  // produced the plane -- it has to advertise it here. Leaving that to a
+  // later stage is not equivalent: GenerateExtraPlaneShadows() runs
+  // immediately after this and is gated on the flag, so the dynamic shadows
+  // were silently skipped and shadow-offset had nothing to act on.
   if (respectCoverage && (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK)) return;
 
   extraPlaneIsDerived = true;
@@ -2646,8 +2763,8 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   mySerum.width64 = dstWidth;
 
   // The original plane was rendered as the upscale source. Only advertise it
-  // if the caller actually asked for it, so a 64p-only client is not tempted to
-  // pick the 32p frame up.
+  // if the caller actually asked for it, so a 64p-only client is not tempted
+  // to pick the 32p frame up.
   if (!originalPlaneRequestedByCaller) {
     mySerum.flags &= ~FLAG_RETURNED_32P_FRAME_OK;
     mySerum.width32 = 0;
@@ -2665,12 +2782,12 @@ static uint32_t OriginalPlaneWidth(void) {
 // upscale gets the geometry wrong twice over. The shadow's own outline is
 // rounded independently of the glyph's, so the two do not line up; and a
 // one-pixel original-resolution shadow becomes a two-pixel one, which on a
-// tight glyph such as "8" closes the gap between its loops. Deriving the shadow
-// here, from the finished shape, cannot disagree with that shape -- and the
-// offset becomes an explicit choice rather than a side effect of scaling.
-// Marks an extra-plane pixel this pass has painted as shadow, so a later
-// shadow does not overwrite it -- the first shadow wins, as at SD. Chosen
-// outside the range of any layer entry, which are stored as layer + 1.
+// tight glyph such as "8" closes the gap between its loops. Deriving the
+// shadow here, from the finished shape, cannot disagree with that shape --
+// and the offset becomes an explicit choice rather than a side effect of
+// scaling. Marks an extra-plane pixel this pass has painted as shadow, so a
+// later shadow does not overwrite it -- the first shadow wins, as at SD.
+// Chosen outside the range of any layer entry, which are stored as layer + 1.
 static const uint8_t kShadowClaimed = 0xff;
 
 static void GenerateExtraPlaneShadows(uint32_t IDfound) {
@@ -2714,10 +2831,10 @@ static void GenerateExtraPlaneShadows(uint32_t IDfound) {
       const uint8_t layer = (uint8_t)(entry - 1);
       // MAX_DYNA_SETS_PER_FRAME_V2, which is what these tables are read with.
       // MAX_DYNA_4COLS_PER_FRAME is the old v1 limit and half the size, so
-      // bounding on it silently dropped every layer from 16 up: a colorization
-      // using more than sixteen dynamic colour sets got its shadows at
-      // original resolution, where CheckDynaShadow() has no such bound, and
-      // none on the extra plane.
+      // bounding on it silently dropped every layer from 16 up: a
+      // colorization using more than sixteen dynamic colour sets got its
+      // shadows at original resolution, where CheckDynaShadow() has no such
+      // bound, and none on the extra plane.
       if (layer >= MAX_DYNA_SETS_PER_FRAME_V2) continue;
       uint8_t dirs = shadowDir ? shadowDir[layer] : 0;
       uint16_t colour = shadowCol ? shadowCol[layer] : 0;
@@ -2758,17 +2875,18 @@ static void GenerateExtraPlaneShadows(uint32_t IDfound) {
 // did not ask for the 32p plane never sees this, so it is skipped.
 //
 // sdDynaLayerMap decides what a shadow may not cover: a pixel that turned out
-// to be lit dynamic content keeps the content. Painting in place got that from
-// the raster order, since the glyph was written after the shadow; here the
-// whole frame is known, which is the same answer.
+// to be lit dynamic content keeps the content. Painting in place got that
+// from the raster order, since the glyph was written after the shadow; here
+// the whole frame is known, which is the same answer.
 //
-// Not isdynapix: the extra-plane pass clears and refills that same array, so by
-// the time this runs it no longer describes the original plane. sdDynaLayerMap
-// is written beside it for exactly the lit dynamic pixels and is not reused.
-// Writing to the 32p plane normally invalidates the separator mask, but not
-// here: DetectSeparators() reads the plane only where sdDynaLayerMap is set,
-// and this writes only where it is not. The two never touch the same pixel, so
-// a sprite compositing afterwards can keep using the mask it already has.
+// Not isdynapix: the extra-plane pass clears and refills that same array, so
+// by the time this runs it no longer describes the original plane.
+// sdDynaLayerMap is written beside it for exactly the lit dynamic pixels and
+// is not reused. Writing to the 32p plane normally invalidates the separator
+// mask, but not here: DetectSeparators() reads the plane only where
+// sdDynaLayerMap is set, and this writes only where it is not. The two never
+// touch the same pixel, so a sprite compositing afterwards can keep using the
+// mask it already has.
 static void ReplayOriginalPlaneShadows(void) {
   if (!sdShadowClaimAny) return;
   if (!sdShadowClaim || !sdShadowColour || !mySerum.frame32) return;
@@ -2805,8 +2923,8 @@ static void CompositeSpriteScaledLayer(uint16_t frx, uint16_t fry, uint16_t wid,
 
 // True when the extra plane is the higher-resolution one, so original
 // resolution values have to be upscaled into it. This is the branch condition
-// at the render sites and keeps the historical `tl = tj / 2 * fwidth + ti / 2`
-// mapping for any geometry.
+// at the render sites and keeps the historical `tl = tj / 2 * fwidth + ti /
+// 2` mapping for any geometry.
 static inline bool ExtraPlaneNeedsUpscaling(void) {
   return g_serumData.fheight_extra > g_serumData.fheight;
 }
@@ -2872,8 +2990,8 @@ bool Serum_SaveConcentrate(const char* filename) {
   if (!cromloaded || is_real_machine()) return false;
   // A save always produces the current concentrate format, no matter which
   // version the in-memory model was loaded from. This has to happen before
-  // BuildFrameLookupVectors() because derived lookup generation is gated on the
-  // concentrate version.
+  // BuildFrameLookupVectors() because derived lookup generation is gated on
+  // the concentrate version.
   g_serumData.concentrateFileVersion = SERUM_CONCENTRATE_VERSION;
   if (g_serumData.sceneGenerator && g_serumData.sceneGenerator->isActive()) {
     g_serumData.sceneGenerator->setDepth(g_serumData.nocolors == 16 ? 4 : 2);
@@ -2904,6 +3022,8 @@ static bool AllocateFrameWorkBuffers(void) {
   frameLayerCoverage = (uint8_t*)malloc(px);
   separatorMask = (uint8_t*)malloc(px);
   separatorFreeFrame = (uint16_t*)malloc(px * sizeof(uint16_t));
+  // Zeroed and kept that way: each use clears what it wrote.
+  separatorOnlyFrame = (uint16_t*)calloc(px, sizeof(uint16_t));
   // One block of fheight counters per colour, plus one more used as scratch
   // for the per-column-group row counts.
   separatorRowCount = (uint32_t*)malloc((kSeparatorMaxColors + 1) *
@@ -2916,8 +3036,8 @@ static bool AllocateFrameWorkBuffers(void) {
   upscaleIndexPlane = (uint32_t*)malloc(px * 4 * sizeof(uint32_t));
   AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
   // Zeroed, not just allocated: the separator filter reads sdDynaLayerMap to
-  // tell dynamic content from artwork, and it is only cleared per frame once a
-  // layer-mode render begins. Before that it would be reading whatever the
+  // tell dynamic content from artwork, and it is only cleared per frame once
+  // a layer-mode render begins. Before that it would be reading whatever the
   // allocator handed back.
   sdDynaLayerMap = (uint8_t*)calloc(px, 1);
   sdShadowColour = (uint16_t*)calloc(px, sizeof(uint16_t));
@@ -2926,8 +3046,8 @@ static bool AllocateFrameWorkBuffers(void) {
   return frameshape && scaledLayerCoverage && frameLayerCoverage &&
          separatorMask && separatorFreeFrame && separatorRowCount &&
          separatorDescends && separatorColors && separatorColPresent &&
-         separatorTextFrame && upscaleIndexPlane && sdDynaLayerMap &&
-         sdShadowColour && sdShadowClaim && hdDynaLayerMap;
+         separatorTextFrame && separatorOnlyFrame && upscaleIndexPlane &&
+         sdDynaLayerMap && sdShadowColour && sdShadowClaim && hdDynaLayerMap;
 }
 
 static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
@@ -3038,9 +3158,9 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
   } else {
     mySerum.ntriggers = 0;
     for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
-      // Every trigger ID greater than PUP_TRIGGER_MAX_THRESHOLD is an internal
-      // trigger for rotation scenes and must not be communicated to the PUP
-      // Player.
+      // Every trigger ID greater than PUP_TRIGGER_MAX_THRESHOLD is an
+      // internal trigger for rotation scenes and must not be communicated to
+      // the PUP Player.
       if (g_serumData.triggerIDs[ti][0] < PUP_TRIGGER_MAX_THRESHOLD)
         mySerum.ntriggers++;
     }
@@ -3742,8 +3862,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   if (!realMachine) {
     csvFoundFile =
         find_case_insensitive_file(pathbuf, std::string(romname) + ".pup.csv");
-    // Authoring-time override of the algorithm stored in the cROMc header. On a
-    // real machine only the cROMc header value is used.
+    // Authoring-time override of the algorithm stored in the cROMc header. On
+    // a real machine only the cROMc header value is used.
     requestedScaling = read_scaling_sidecar(pathbuf);
   }
   NoteStartupRssSample("after-file-scan");
@@ -4026,16 +4146,17 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
           g_serumData.concentrateFileVersion, g_serumData.SerumVersion);
     }
     ResetDynamicHotPathProfile();
-    // Selects the algorithm only. Do NOT gate this on the extra-plane geometry:
-    // the whole-frame upscale path exists precisely when there is no extra
-    // plane, and every consult site carries its own geometry guard already.
+    // Selects the algorithm only. Do NOT gate this on the extra-plane
+    // geometry: the whole-frame upscale path exists precisely when there is
+    // no extra plane, and every consult site carries its own geometry guard
+    // already.
     runtimeScalingAlgorithm = g_serumData.scalingAlgorithm;
     shadowOffsetModeRuntime = g_serumData.shadowOffsetMode;
     if (upscaleExtraFromOriginal && g_serumData.SerumVersion == SERUM_V2) {
       // Report where this colorization actually keeps its dynamic-shadow
-      // configuration. Dynamic content is rendered at SD now, so a colorization
-      // that only has shadows in the extra tables relies on the per-layer
-      // fallback in CheckDynaShadow().
+      // configuration. Dynamic content is rendered at SD now, so a
+      // colorization that only has shadows in the extra tables relies on the
+      // per-layer fallback in CheckDynaShadow().
       uint32_t sdOnly = 0, hdOnly = 0, both = 0;
       for (uint32_t f = 0; f < g_serumData.nframes; ++f) {
         if (f < g_serumData.frameHasDynamic.size() &&
@@ -4422,7 +4543,8 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
         for (uint32_t ti : sigIt->second) {
           if (DebugIdentifyVerboseEnabled() &&
               DebugTraceMatches(inputCrc, ti)) {
-            Log("Serum debug identify scene candidate: inputCrc=%u frameId=%u "
+            Log("Serum debug identify scene candidate: inputCrc=%u "
+                "frameId=%u "
                 "mask=%u shape=%u hash=%u storedHash=%u lastfound=%u",
                 inputCrc, ti, mask, Shape, Hashc, g_serumData.hashcodes[ti][0],
                 lastfound_stream);
@@ -4681,8 +4803,8 @@ bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
                 phei[*nspr] = std::min((uint16_t)(maxyBB - pfry[*nspr] + 1),
                                        (uint16_t)sph);
               }
-              // we check the identical sprites as there may be duplicate due to
-              // the multi detection zones
+              // we check the identical sprites as there may be duplicate due
+              // to the multi detection zones
               bool identicalfound = false;
               for (uint8_t tk = 0; tk < *nspr; tk++) {
                 if ((pquelsprites[*nspr] == pquelsprites[tk]) &&
@@ -4721,9 +4843,10 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
   auto buildFrameDwords = [&]() {
     if (frameDwordsBuilt) return;
     frameDwordsBuilt = true;
-    // The load paths that can reach v2 sprite detection all allocate this, but
-    // returning "not present" from a missing table would silently drop every
-    // sprite rather than fail loudly, so allocate rather than trust that.
+    // The load paths that can reach v2 sprite detection all allocate this,
+    // but returning "not present" from a missing table would silently drop
+    // every sprite rather than fail loudly, so allocate rather than trust
+    // that.
     if (!frameDwordKeys || !frameDwordStamps) {
       Free_element((void**)&frameDwordKeys);
       Free_element((void**)&frameDwordStamps);
@@ -4882,8 +5005,8 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                 (short)tx;  // position in the frame of the detection dword
             short fray = (short)ty;
             short sprx =
-                (short)(sddp % MAX_SPRITE_WIDTH);  // position in the sprite of
-                                                   // the detection dword
+                (short)(sddp % MAX_SPRITE_WIDTH);  // position in the sprite
+                                                   // of the detection dword
             short spry = (short)(sddp / MAX_SPRITE_WIDTH);
             // details of the det area:
             const short detx = static_cast<short>(detMeta.detectX);
@@ -5024,8 +5147,8 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                 phei[*nspr] = std::min((uint16_t)(maxyBB - pfry[*nspr] + 1),
                                        (uint16_t)sph);
               }
-              // we check the identical sprites as there may be duplicate due to
-              // the multi detection zones
+              // we check the identical sprites as there may be duplicate due
+              // to the multi detection zones
               bool identicalfound = false;
               for (uint8_t tk = 0; tk < *nspr; tk++) {
                 if ((pquelsprites[*nspr] == pquelsprites[tk]) &&
@@ -5125,15 +5248,16 @@ bool ColorInRotation(uint32_t IDfound, uint16_t col, uint16_t* norot,
   return false;
 }
 
-// shadowDir/ColorFallback: consulted per layer when the primary tables say this
-// layer casts no shadow.
+// shadowDir/ColorFallback: consulted per layer when the primary tables say
+// this layer casts no shadow.
 //
-// Unlike the dynamic *masks*, these tables carry no spatial information -- they
-// are an 8-direction bitmask and a colour per dyna layer, equally meaningful at
-// either resolution. Colorizations authored in the HD editor can end up with
-// their shadow configuration only in the extra tables, so rendering dynamic
-// content at SD would silently drop every shadow. Falling back keeps the
-// author's configuration without reintroducing any HD spatial data.
+// Unlike the dynamic *masks*, these tables carry no spatial information --
+// they are an 8-direction bitmask and a colour per dyna layer, equally
+// meaningful at either resolution. Colorizations authored in the HD editor
+// can end up with their shadow configuration only in the extra tables, so
+// rendering dynamic content at SD would silently drop every shadow. Falling
+// back keeps the author's configuration without reintroducing any HD spatial
+// data.
 //
 // defer: record the shadow instead of painting it, leaving the pixel to be
 // rendered as background so the upscale reads a shadow-free picture. See
@@ -5187,8 +5311,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
   // frames
   // Layer mode: 32p content with a 64p output request. The frame is rendered
   // once at SD as a "scaled layer" and composited over natively rendered HD
-  // statics. Outside layer mode -- notably 64p-native content, where the extra
-  // plane is a downscale rather than an upscale -- the historical
+  // statics. Outside layer mode -- notably 64p-native content, where the
+  // extra plane is a downscale rather than an upscale -- the historical
   // all-or-nothing path is kept unchanged.
   const bool layerMode = upscaleExtraFromOriginal;
   // Record dynamic shadows rather than painting them; see sdShadowColour.
@@ -5213,10 +5337,10 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
   const bool renderOriginal = layerMode || isoriginalrequested ||
                               (isoriginalfallbackrequested && !isextra);
   // Static SD content is pure waste when HD statics will cover it. Render it
-  // only when it will actually be read: as the scaled layer (no HD statics) or
-  // as the caller's own 32p output.
-  // The SD statics are ALWAYS rendered, even when HD statics will cover them
-  // and the caller never asked for the 32p plane.
+  // only when it will actually be read: as the scaled layer (no HD statics)
+  // or as the caller's own 32p output. The SD statics are ALWAYS rendered,
+  // even when HD statics will cover them and the caller never asked for the
+  // 32p plane.
   //
   // They are not drawn for their own sake there -- they are the comparison
   // domain for the upscale. Skipping them was an obvious-looking optimization
@@ -5224,8 +5348,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
   // ownership-tagged key, which makes black OUTSIDE the layer (unowned, 0)
   // compare unequal to black INSIDE it (owned, 0x00010000). Scale2x's guard
   // `b == h` is exactly what preserves a glyph pixel sitting on the layer
-  // boundary, and that inequality defeated it, shaving the tops off every glyph
-  // whose top row coincided with the top of a dynamic zone.
+  // boundary, and that inequality defeated it, shaving the tops off every
+  // glyph whose top row coincided with the top of a dynamic zone.
   const bool sdRendersStatics = true;
   // ...and it only belongs to the scaled layer when there are no HD statics.
   const bool sdOwnsStatics = !layerMode || !isextra;
@@ -5377,13 +5501,14 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                 pfr[tk] = dynamicColor;
                 MarkScaledLayer(tk);
                 if (layerMode && sdDynaLayerMap) {
-                  // Remember which dyna layer this lit pixel belongs to, so the
-                  // extra plane can generate its shadow after upscaling.
+                  // Remember which dyna layer this lit pixel belongs to, so
+                  // the extra plane can generate its shadow after upscaling.
                   sdDynaLayerMap[tk] = (uint8_t)(dynacouche + 1);
                 }
               }
               // A pixel suppressed by FLAG_SCENE_REPLACE_DYNAMIC_BLACK is
-              // deliberately left unowned, so the HD background shows through.
+              // deliberately left unowned, so the HD background shows
+              // through.
             } else if (isdynapix[tk] == 0) {
               pfr[tk] = frameDynaColors[dynacouche * g_serumData.nocolors +
                                         frame[tk]];
@@ -5476,19 +5601,20 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     for (tj = 0; tj < g_serumData.fheight_extra; tj++) {
       for (ti = 0; ti < g_serumData.fwidth_extra; ti++) {
         uint16_t tk = tj * g_serumData.fwidth_extra + ti;
-        // The uncolorized ROM frame only exists at original resolution, so the
-        // source shade for this extra-plane pixel has to be scaled.
+        // The uncolorized ROM frame only exists at original resolution, so
+        // the source shade for this extra-plane pixel has to be scaled.
         const uint8_t srcShade =
             upscaleExtra ? SampleUpscaled2x(frame, g_serumData.fwidth,
                                             g_serumData.fheight, ti, tj)
                          : frame[tj * 2 * g_serumData.fwidth + ti * 2];
 
         // A pixel whose SD source is inside a dynamic zone is underlay: the
-        // layer will paint over it. Deciding it by srcShade instead makes this
-        // pass stamp cframes_v2_extra (often black) in the glyph footprint,
-        // computed by Scale2x on the SHADE field -- while the composite rounds
-        // the glyph by Scale2x on the COLOUR key. The two footprints disagree,
-        // and every disagreement leaves a black pixel inside the glyph.
+        // layer will paint over it. Deciding it by srcShade instead makes
+        // this pass stamp cframes_v2_extra (often black) in the glyph
+        // footprint, computed by Scale2x on the SHADE field -- while the
+        // composite rounds the glyph by Scale2x on the COLOUR key. The two
+        // footprints disagree, and every disagreement leaves a black pixel
+        // inside the glyph.
         const bool srcIsDynamicZone =
             sdDynaActive &&
             sdDynaActive[(tj >> 1) * g_serumData.fwidth + (ti >> 1)] != 0;
@@ -5605,8 +5731,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     // back. Before the upscale would have put them in the picture it reads.
     if (deferSdShadows && originalPlaneRequestedByCaller)
       ReplayOriginalPlaneShadows();
-    // Sprites render next and each scopes the mask to itself; remember what the
-    // frame owns so they can restore it rather than lose it.
+    // Sprites render next and each scopes the mask to itself; remember what
+    // the frame owns so they can restore it rather than lose it.
     if (frameLayerCoverage && scaledLayerCoverage) {
       memcpy(frameLayerCoverage, scaledLayerCoverage,
              (size_t)g_serumData.fwidth * g_serumData.fheight);
@@ -5669,13 +5795,15 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
   const bool hasColor = g_serumData.spritecolored.hasData(nosprite);
   const bool hasColorExtra = g_serumData.spritecolored_extra.hasData(nosprite);
   // Layer mode: dynamic sprite content is rendered at SD with everything else
-  // and upscaled once; only genuinely HD-authored static art is drawn natively.
+  // and upscaled once; only genuinely HD-authored static art is drawn
+  // natively.
   const bool layerMode = upscaleExtraFromOriginal;
   const bool spriteHasHdArt =
       hasColorExtra && g_serumData.spritemask_extra_opaque.hasData(nosprite);
   if (!hasOpaque) {
     if (traceSprite) {
-      Log("Serum debug sprite render skip: frameId=%u inputCrc=%u spriteId=%u "
+      Log("Serum debug sprite render skip: frameId=%u inputCrc=%u "
+          "spriteId=%u "
           "reason=missing-base-opaque-sidecar",
           IDfound, g_debugCurrentInputCrc, nosprite);
     }
@@ -5689,7 +5817,8 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
   if (hasDyna != hasDynaActive || (hasDyna && spriteDyna == nullptr) ||
       (hasDynaActive && spriteDynaActive == nullptr)) {
     if (traceSprite) {
-      Log("Serum debug sprite render skip: frameId=%u inputCrc=%u spriteId=%u "
+      Log("Serum debug sprite render skip: frameId=%u inputCrc=%u "
+          "spriteId=%u "
           "reason=inconsistent-base-dynamic-sidecars hasDyna=%s "
           "hasDynaActive=%s ptrDyna=%s ptrDynaActive=%s",
           IDfound, g_debugCurrentInputCrc, nosprite, hasDyna ? "true" : "false",
@@ -5699,7 +5828,8 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
     return;
   }
   if (traceSprite) {
-    Log("Serum debug sprite render source: frameId=%u inputCrc=%u spriteId=%u "
+    Log("Serum debug sprite render source: frameId=%u inputCrc=%u "
+        "spriteId=%u "
         "frame=(%u,%u) sprite=(%u,%u) size=%ux%u hasOpaque=%s hasColor=%s "
         "hasDyna=%s hasDynaActive=%s hasExtraColor=%s",
         IDfound, g_debugCurrentInputCrc, nosprite, frx, fry, spx, spy, wid, hei,
@@ -5708,8 +5838,8 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
         hasColorExtra ? "true" : "false");
   }
   if (layerMode && scaledLayerCoverage) {
-    // Scope the mask to this sprite so its composite cannot re-paint an earlier
-    // sprite's pixels over later HD art.
+    // Scope the mask to this sprite so its composite cannot re-paint an
+    // earlier sprite's pixels over later HD art.
     for (uint16_t ty = 0; ty < hei; ty++) {
       const uint32_t row = (uint32_t)(fry + ty) * g_serumData.fwidth + frx;
       if (fry + ty >= g_serumData.fheight) break;
@@ -5743,9 +5873,9 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
         uint16_t tk = (fry + tj) * g_serumData.fwidth + frx + ti;
         uint32_t tl = (tj + spy) * MAX_SPRITE_WIDTH + ti + spx;
         if (spriteOpaque[tl] > 0) {
-          // A sprite with HD artwork contributes only its DYNAMIC pixels to the
-          // scaled layer; its static art is drawn natively at 64p on top. A
-          // sprite without HD artwork contributes everything.
+          // A sprite with HD artwork contributes only its DYNAMIC pixels to
+          // the scaled layer; its static art is drawn natively at 64p on top.
+          // A sprite without HD artwork contributes everything.
           if (layerMode &&
               (!spriteHasHdArt || (hasDynaActive && spriteDynaActive[tl] != 0)))
             MarkScaledLayer(tk);
@@ -5875,11 +6005,11 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
           //
           // The two disagree, and a pixel that falls in the gap is drawn by
           // NEITHER layer: static in the SD mask, so the scaled layer never
-          // claimed it (see MarkScaledLayer above), and dynamic in the HD mask,
-          // so this pass skips it. It stays black. Authors hit this with digit
-          // sprites whose dark outline is static at SD but marked dynamic in
-          // the HD mask -- the outline, which reads as the digit's shadow,
-          // simply vanished at 64p while looking right at 32p.
+          // claimed it (see MarkScaledLayer above), and dynamic in the HD
+          // mask, so this pass skips it. It stays black. Authors hit this
+          // with digit sprites whose dark outline is static at SD but marked
+          // dynamic in the HD mask -- the outline, which reads as the digit's
+          // shadow, simply vanished at 64p while looking right at 32p.
           //
           // Deciding from the SD mask is also just rule 5 again: all dynamic
           // matching belongs on the SD original, and dynaspritemasks_extra is
@@ -5896,8 +6026,8 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
             spritePixelIsDynamic =
                 hasExtraDynaActive && spriteExtraDynaActive[spritePixel] != 0;
           }
-          // In layer mode the sprite's dynamic pixels were composited from the
-          // scaled layer already; leave them alone so that content shows.
+          // In layer mode the sprite's dynamic pixels were composited from
+          // the scaled layer already; leave them alone so that content shows.
           if (layerMode && spritePixelIsDynamic) continue;
           if (!spritePixelIsDynamic) {
             pfr[tk] =
@@ -5965,8 +6095,9 @@ SERUM_API uint8_t Serum_GetScalingAlgorithm(void) {
   SERUM_API_GUARD_START("Serum_GetScalingAlgorithm")
   // Report what the colorization asks for, not what this load ended up using.
   // runtimeScalingAlgorithm is additionally forced off when there is no 2x
-  // extra plane to render into, but a caller scaling the finished frame for its
-  // own display still has to honour the authored choice in exactly that case.
+  // extra plane to render into, but a caller scaling the finished frame for
+  // its own display still has to honour the authored choice in exactly that
+  // case.
   return g_serumData.scalingAlgorithm;
   SERUM_API_GUARD_END("Serum_GetScalingAlgorithm",
                       (uint8_t)SERUM_SCALING_SCALE2X)
@@ -6027,7 +6158,8 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
     return 0;
   }
 
-  // Let's first identify the incoming frame among the ones we have in the crom
+  // Let's first identify the incoming frame among the ones we have in the
+  // crom
   const uint32_t inputCrc =
       (frame && g_serumData.fwidth > 0 && g_serumData.fheight > 0)
           ? crc32_fast(frame, g_serumData.fwidth * g_serumData.fheight)
@@ -6172,8 +6304,8 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
     return 0;  // new but not colorized frame, return true
   }
 
-  return IDENTIFY_NO_FRAME;  // no new frame, return false, client has to update
-                             // rotations!
+  return IDENTIFY_NO_FRAME;  // no new frame, return false, client has to
+                             // update rotations!
 }
 
 uint32_t Calc_Next_Rotationv2(uint32_t now) {
@@ -6299,9 +6431,10 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   mySerum.triggerID = 0xffffffff;
   mySerum.frameID = IDENTIFY_NO_FRAME;
   g_debugCurrentInputCrc = 0;
-  // Scale2xPreserve consults this to tell a lit source pixel from an unlit one
-  // without going through the palette. Valid for this call only; the upscale
-  // runs inside it, including once per sprite and once after the sprite loop.
+  // Scale2xPreserve consults this to tell a lit source pixel from an unlit
+  // one without going through the palette. Valid for this call only; the
+  // upscale runs inside it, including once per sprite and once after the
+  // sprite loop.
   romFrameForUpscale = frame;
   struct RomFrameScope {
     ~RomFrameScope() { romFrameForUpscale = NULL; }
@@ -6754,11 +6887,11 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
         }
         if (extraPlaneIsDerived) {
           // The upscaled plane carries rotation indices that were resolved
-          // against the ORIGINAL plane's table, so it has to be driven by that
-          // table. Without this the extra table is used instead -- and for a
-          // colorization with no extra content that table reads as all zeros,
-          // which makes every slot look inactive and the plane silently stops
-          // rotating.
+          // against the ORIGINAL plane's table, so it has to be driven by
+          // that table. Without this the extra table is used instead -- and
+          // for a colorization with no extra content that table reads as all
+          // zeros, which makes every slot look inactive and the plane
+          // silently stops rotating.
           pcr64 = pcr32;
         }
 
@@ -6960,11 +7093,11 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     if (upscaleExtraFromOriginal &&
         !(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) &&
         (mySerum.flags & FLAG_RETURNED_32P_FRAME_OK)) {
-      // No authored extra plane to render monochrome into, but the caller asked
-      // for 64p output. Derive it from the monochrome original plane so the
-      // output resolution stays stable across colorized and uncolorized frames.
-      // Monochrome output never rotates, so the rotation plane is neutralized
-      // rather than carried.
+      // No authored extra plane to render monochrome into, but the caller
+      // asked for 64p output. Derive it from the monochrome original plane so
+      // the output resolution stays stable across colorized and uncolorized
+      // frames. Monochrome output never rotates, so the rotation plane is
+      // neutralized rather than carried.
       UpscaleOriginalPlaneIntoExtra(false);
     }
     mySerum.frameID = 0xfffffffd;  // monochrome frame ID
@@ -7042,8 +7175,8 @@ uint32_t Serum_ApplyRotationsv1(void) {
     }
   }
   mySerum.rotationtimer = (uint16_t)Calc_Next_Rotationv1(
-      now);  // can't be more than 65s, so val is contained in the lower word of
-             // val
+      now);  // can't be more than 65s, so val is contained in the lower word
+             // of val
   return ((uint32_t)mySerum.rotationtimer |
           isrotation);  // if there was a rotation, returns the next time in ms
                         // to the next one and set high dword to 1
@@ -7112,7 +7245,8 @@ uint32_t Serum_RenderScene(void) {
         case 0:  // keep the last frame of the scene
         default:
           if (sceneEndHoldDurationMs > 0 && !sceneInterruptable) {
-            // autoStart+flag0 for non-interruptable scene means timed end-hold.
+            // autoStart+flag0 for non-interruptable scene means timed
+            // end-hold.
             break;
           }
           if (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) {
@@ -7261,7 +7395,8 @@ uint32_t Serum_RenderScene(void) {
         case 0:  // keep the last frame of the scene
         default:
           if (sceneEndHoldDurationMs > 0 && !sceneInterruptable) {
-            // autoStart+flag0 for non-interruptable scene means timed end-hold.
+            // autoStart+flag0 for non-interruptable scene means timed
+            // end-hold.
             break;
           }
           if (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) {

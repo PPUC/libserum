@@ -161,8 +161,19 @@ a score that is exactly what fuses a comma to the digit beside it: the comma's
 tail sits one row below the text and one column across, so the scaler runs a
 diagonal between the two and they become one shape.
 
-libserum finds those separators before scaling and stamps them back afterwards
-by line doubling, so the digits have nothing adjacent to bridge to. The search
+libserum takes those separators out of the picture before scaling and puts them
+back afterwards by scaling them **by themselves**, so the digits have nothing
+adjacent to bridge to while the separator's own diagonal — a comma is a body
+with its tail one row down and one column across — still rounds like everything
+around it. Line doubling them instead kept the bridge away but squared the comma
+off, leaving its two halves meeting at a corner in the middle of smoothed text.
+
+What is taken is the whole separator, grown from the columns that reach below
+the bottom line to whatever they connect to. If that shape turns out to be too
+large or too wide to be a separator — a descender joined to its letter, or a
+comma drawn hard against the digit beside it — only the descending columns are
+taken, which is the conservative answer: the comma keeps a square tail and the
+letter is left alone. The search
 runs one shade of the **ROM frame** at a time, not one colour of the finished
 picture. That is not an optimization: a colorization that paints a background
 behind its score — most of them — has no empty row anywhere for a whole-frame

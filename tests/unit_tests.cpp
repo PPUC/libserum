@@ -601,6 +601,108 @@ static void Test_IdenticalSeparatorsAreTreatedAlike(void) {
   TearDownFrame();
 }
 
+// A separator is scaled as a shape of its own, not stamped flat.
+//
+// A comma is a body with its tail one row down and one column across, and the
+// diagonal between those is exactly what the scaler is for. Line doubling it --
+// which is how it was kept from bridging to the digit beside it -- left the two
+// halves meeting at a corner while every glyph around them was smoothed.
+// Scaling a picture holding nothing but the separators keeps both properties.
+// Lays out a score line: four digits, a comma, four more. `gap` is how many
+// empty columns separate the comma from the digit before it.
+static uint32_t g_commaBodyX = 0, g_commaTailX = 0, g_commaBottom = 0;
+static void BuildScoreWithComma(uint32_t gap) {
+  const uint16_t kText = 0xffe0;
+  const uint32_t top = 8, bottom = 17;
+  const auto lit = [&](uint32_t x, uint32_t y) {
+    Px(x, y, 15, kText);
+    sdDynaLayerMap[(size_t)y * g_serumData.fwidth + x] = 1;
+  };
+  uint32_t x = 2;
+  for (int d = 0; d < 4; ++d, x += 3)
+    for (uint32_t y = top; y <= bottom; ++y) {
+      lit(x, y);
+      lit(x + 1, y);
+    }
+  // The comma: a body of two pixels on the bottom line, its tail one row below
+  // and one column across.
+  const uint32_t tailX = x - 1 + gap, bodyX = tailX + 1;
+  lit(bodyX, bottom - 1);
+  lit(bodyX, bottom);
+  lit(tailX, bottom + 1);
+  x = bodyX + 2;
+  for (int d = 0; d < 4; ++d, x += 3)
+    for (uint32_t y = top; y <= bottom; ++y) {
+      lit(x, y);
+      lit(x + 1, y);
+    }
+  g_commaBodyX = bodyX;
+  g_commaTailX = tailX;
+  g_commaBottom = bottom;
+  separatorMaskValid = false;
+}
+
+static void Test_SeparatorIsScaledAsItsOwnShape(void) {
+  SetUpFrame(64, 32);
+  BuildScoreWithComma(1);
+  const uint32_t W = 64, bottom = g_commaBottom;
+  CHECK(DetectSeparators(64, 32) > 0);
+  // The whole comma, both halves, or there is nothing to round.
+  CHECK_EQ(separatorMask[(size_t)(bottom - 1) * W + g_commaBodyX], 1);
+  CHECK_EQ(separatorMask[(size_t)bottom * W + g_commaBodyX], 1);
+  CHECK_EQ(separatorMask[(size_t)(bottom + 1) * W + g_commaTailX], 1);
+
+  UpscaleOriginalPlaneIntoExtra(false, /*onlyCoveredPixels=*/true);
+
+  // These columns hold the comma and nothing else, so everything counted here
+  // is the separator. Line doubling its three source pixels gives twelve
+  // extra-plane pixels; the corner between body and tail is filled from both
+  // sides, so there are fourteen.
+  unsigned painted = 0;
+  for (uint32_t y = (bottom - 1) * 2; y <= (bottom + 1) * 2 + 1; ++y)
+    for (uint32_t x2 = g_commaTailX * 2; x2 <= g_commaBodyX * 2 + 1; ++x2)
+      if (mySerum.frame64[(size_t)y * 128 + x2] == 0xffe0) ++painted;
+  CHECK_EQ(painted, 14);
+  TearDownFrame();
+}
+
+// A separator touching the digit beside it is exactly what the filter exists
+// for, and there the shape cannot be grown: following the connection would
+// swallow the digit and line double it. Only the descending columns are taken,
+// as before, so the comma keeps its square tail and the digit is untouched.
+static void Test_SeparatorTouchingADigitIsNotGrown(void) {
+  SetUpFrame(64, 32);
+  BuildScoreWithComma(0);  // the tail now sits diagonally against the digit
+  const uint32_t W = 64, bottom = g_commaBottom;
+  CHECK(DetectSeparators(64, 32) > 0);
+  CHECK_EQ(separatorMask[(size_t)(bottom + 1) * W + g_commaTailX], 1);
+  CHECK_EQ(separatorMask[(size_t)bottom * W + g_commaBodyX], 0);
+  CHECK_EQ(separatorMask[(size_t)(bottom - 1) * W + g_commaBodyX], 0);
+  // And nothing of the digit before it.
+  for (uint32_t y = 8; y <= bottom; ++y)
+    CHECK_EQ(separatorMask[(size_t)y * W + g_commaTailX - 1], 0);
+  TearDownFrame();
+}
+
+// ...and it still carries its dyna layer, so the shadow pass gives it a shadow
+// like any other dynamic pixel -- following the shape that was drawn, corner
+// pixels included, rather than a square one.
+static void Test_SeparatorStillCastsAShadow(void) {
+  SetUpFrame(64, 32);
+  BuildScoreWithComma(1);
+  CHECK(DetectSeparators(64, 32) > 0);
+  UpscaleOriginalPlaneIntoExtra(false, /*onlyCoveredPixels=*/true);
+  // Every extra-plane pixel the tail painted names the layer it belongs to,
+  // which is what GenerateExtraPlaneShadows() works from.
+  unsigned withLayer = 0;
+  for (uint32_t y = (g_commaBottom + 1) * 2; y <= (g_commaBottom + 1) * 2 + 1;
+       ++y)
+    for (uint32_t x2 = g_commaTailX * 2; x2 < g_commaTailX * 2 + 2; ++x2)
+      if (hdDynaLayerMap[(size_t)y * 128 + x2] == 1) ++withLayer;
+  CHECK_EQ(withLayer, 4);
+  TearDownFrame();
+}
+
 // ---------------------------------------------------------------------------
 // scaling.txt, the per-colorization override
 // ---------------------------------------------------------------------------
@@ -895,6 +997,10 @@ static const TestCase kTests[] = {
      Test_SeparatorEnvelopeFollowsTheFont},
     {"separator/identical_treated_alike",
      Test_IdenticalSeparatorsAreTreatedAlike},
+    {"separator/scaled_as_its_own_shape", Test_SeparatorIsScaledAsItsOwnShape},
+    {"separator/touching_a_digit_is_not_grown",
+     Test_SeparatorTouchingADigitIsNotGrown},
+    {"separator/still_casts_a_shadow", Test_SeparatorStillCastsAShadow},
     {"sidecar/spellings", Test_ScalingSidecarSpellings},
     {"sidecar/shadow_offset", Test_ScalingSidecarShadowOffset},
     {"sidecar/tolerance", Test_ScalingSidecarTolerance},
