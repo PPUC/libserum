@@ -719,6 +719,17 @@ static const uint32_t kSeparatorMinBaseline = 8;
 uint16_t* separatorColors = NULL;
 uint8_t* separatorColPresent = NULL;  // kSeparatorMaxColors blocks of W
 uint16_t* separatorTextFrame = NULL;  // the 32p plane, lit dynamic pixels only
+// The ROM frame currently being colorized, or NULL outside a colorize call.
+//
+// Scale2xPreserve needs it. Its rule is that a pixel the source lit must not be
+// rounded away, but it is implemented in libframeutil against the output
+// colour, where "not lit" can only mean colour zero. A colorization whose
+// background is not black therefore loses the protection completely: on
+// afm_113b the "BALL"/"CREDITS" caption sits on dark blue, and every eaten
+// pixel was a ROM shade 3 replaced by a neighbouring shade 0 -- lit source,
+// unlit neighbour, exactly what the rule exists to prevent. The ROM frame is
+// the only place that distinction survives colorization.
+const uint8_t* romFrameForUpscale = NULL;
 // Source index per destination pixel, for the whole-frame upscale.
 //
 // The composite below needs the index Scale2x selected, not just the colour:
@@ -1680,6 +1691,7 @@ void Serum_free(void) {
   Free_element((void**)&separatorColors);
   Free_element((void**)&separatorColPresent);
   Free_element((void**)&separatorTextFrame);
+  romFrameForUpscale = NULL;
   Free_element((void**)&upscaleIndexPlane);
   separatorMaskValid = false;
   separatorMaskCount = 0;
@@ -2357,6 +2369,11 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   // has no HD statics the mask covers everything, so this is exactly the
   // whole-frame upscale -- one code path, not two.
   const bool respectCoverage = onlyCoveredPixels && scaledLayerCoverage;
+  // Only for the preserving algorithm, and only while a ROM frame of the same
+  // geometry is in scope. Plain Scale2x must stay bit-identical to reference.
+  const bool protectLitSource =
+      algorithm == FrameUtil::ScalingAlgorithm::Scale2xPreserve &&
+      romFrameForUpscale != NULL;
 
   // Take thousands separators out of the picture before scaling; see
   // DetectSeparators().
@@ -2435,13 +2452,23 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       // the same picture would, and tagging ownership into the comparison
       // changes those decisions along every layer boundary. frame32 is a
       // complete picture here -- see sdRendersStatics.
-      const uint32_t src =
+      uint32_t src =
           indexPlane ? indexPlane[(size_t)y * dstWidth + x]
                      : FrameUtil::Helper::SelectUpscaled2xSourceIndex(
                            selectSource, srcWidth, srcHeight, x, y, algorithm);
       // Outside the frame: black, and nothing to read parallel planes from.
       // The layer simply does not paint here.
       if (src == FrameUtil::Helper::kUpscaleSourceOutside) continue;
+      // Scale2xPreserve, judged on the ROM rather than on the output colour.
+      // See romFrameForUpscale: the library-side rule can only recognize an
+      // unlit neighbour when the palette paints it black, so text on a
+      // coloured background silently loses the protection. Here the source
+      // frame is still in scope and says plainly which pixels the ROM lit.
+      if (protectLitSource) {
+        const uint32_t own = (size_t)(y >> 1) * srcWidth + (x >> 1);
+        if (src != own && romFrameForUpscale[own] && !romFrameForUpscale[src])
+          src = own;
+      }
       // Coverage decides only what is painted. Where the selection lands on a
       // pixel the layer does not own, the natively rendered HD content stands.
       if (respectCoverage && scaledLayerCoverage[src] == 0) continue;
@@ -6077,6 +6104,13 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   mySerum.triggerID = 0xffffffff;
   mySerum.frameID = IDENTIFY_NO_FRAME;
   g_debugCurrentInputCrc = 0;
+  // Scale2xPreserve consults this to tell a lit source pixel from an unlit one
+  // without going through the palette. Valid for this call only; the upscale
+  // runs inside it, including once per sprite and once after the sprite loop.
+  romFrameForUpscale = frame;
+  struct RomFrameScope {
+    ~RomFrameScope() { romFrameForUpscale = NULL; }
+  } romFrameScope;
   bool backgroundScenePrimedThisCall = false;
   if (g_profileDynamicHotPaths && !sceneFrameRequested &&
       knownFrameId >= g_serumData.nframes) {
