@@ -2448,16 +2448,16 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   // Take thousands separators out of the picture before scaling; see
   // DetectSeparators().
   //
-  // NOTE (unoptimized on purpose): detection runs on every call, so a frame is
-  // scanned once for itself and again for each sprite composited on top --
   // The mask is derived on demand and reused until something writes to the 32p
   // plane, which is what MarkScaledLayer() invalidates. Sprite compositing
   // invokes this again per sprite to keep z-order, so without the cache the
   // whole-frame mask was rebuilt for every sprite -- more than the upscale it
   // was serving -- and with an unconditional cache a separator drawn by a
-  // sprite would have been missed. Selecting on a copy
-  // with the separators removed means the digits have nothing adjacent to
-  // bridge to, and they are stamped back afterwards at their exact shape.
+  // sprite would have been missed.
+  //
+  // Selecting on a copy with the separators removed means the digits have
+  // nothing adjacent to bridge to, and they are stamped back afterwards at
+  // their exact shape.
   const uint16_t* selectSource = mySerum.frame32;
   uint32_t separatorsFound = 0;
   if (separatorMask && separatorFreeFrame) {
