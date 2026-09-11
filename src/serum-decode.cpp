@@ -2569,6 +2569,11 @@ static uint32_t OriginalPlaneWidth(void) {
 // tight glyph such as "8" closes the gap between its loops. Deriving the shadow
 // here, from the finished shape, cannot disagree with that shape -- and the
 // offset becomes an explicit choice rather than a side effect of scaling.
+// Marks an extra-plane pixel this pass has painted as shadow, so a later
+// shadow does not overwrite it -- the first shadow wins, as at SD. Chosen
+// outside the range of any layer entry, which are stored as layer + 1.
+static const uint8_t kShadowClaimed = 0xff;
+
 static void GenerateExtraPlaneShadows(uint32_t IDfound) {
   if (!hdDynaLayerMap || !mySerum.frame64) return;
   const uint8_t* shadowDir = g_serumData.dynashadowsdir[IDfound];
@@ -2601,7 +2606,14 @@ static void GenerateExtraPlaneShadows(uint32_t IDfound) {
     for (uint32_t x = 0; x < w; ++x) {
       const uint8_t entry = hdDynaLayerMap[y * w + x];
       if (entry == 0) continue;  // not lit dynamic content
+      // A pixel this pass has already claimed as shadow. It is not a layer,
+      // and reading it as one indexed 254 entries into a 16-entry table: the
+      // direction bits and the colour both came back as whatever happened to
+      // follow it in memory, so shadows cast further shadows in colours no
+      // one chose. The claim marker has to be skipped, not decoded.
+      if (entry == kShadowClaimed) continue;
       const uint8_t layer = (uint8_t)(entry - 1);
+      if (layer >= MAX_DYNA_4COLS_PER_FRAME) continue;
       uint8_t dirs = shadowDir ? shadowDir[layer] : 0;
       uint16_t colour = shadowCol ? shadowCol[layer] : 0;
       if (dirs == 0 && shadowDirFb) {
@@ -2618,13 +2630,12 @@ static void GenerateExtraPlaneShadows(uint32_t IDfound) {
           if (nx < 0 || ny < 0 || nx >= (int32_t)w || ny >= (int32_t)h)
             continue;
           const uint32_t n = (uint32_t)ny * w + (uint32_t)nx;
-          // Never overwrite lit dynamic content, and let the first shadow win,
-          // matching the original-resolution behaviour.
-          // Non-zero covers both lit dynamic content and an already-claimed
-          // shadow pixel (0xff), so the first shadow wins -- as at SD.
+          // Never overwrite lit dynamic content, and let the first shadow
+          // win, matching the original-resolution behaviour. Non-zero covers
+          // both a layer entry and a pixel already claimed as shadow.
           if (hdDynaLayerMap[n] != 0) continue;
           mySerum.frame64[n] = colour;
-          hdDynaLayerMap[n] = 0xff;  // mark as shadow, claimed
+          hdDynaLayerMap[n] = kShadowClaimed;
           if (mySerum.rotationsinframe64) {
             mySerum.rotationsinframe64[n * 2] = 0xffff;
             mySerum.rotationsinframe64[n * 2 + 1] = 0xffff;
