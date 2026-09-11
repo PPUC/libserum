@@ -2433,7 +2433,13 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   }
 
   for (uint32_t y = y0; y <= y1; y++) {
+    // Index of the source pixel this destination row belongs to. Both the
+    // coverage test and the preserve guard want it, so it is formed once per
+    // row and advanced by a shift rather than multiplied per pixel.
+    const size_t ownRow = (size_t)(y >> 1) * srcWidth;
+    const size_t dstRow = (size_t)y * dstWidth;
     for (uint32_t x = x0; x <= x1; x++) {
+      const size_t own = ownRow + (x >> 1);
       // The layer paints only destination pixels it owns.
       //
       // Gating on the SELECTED source alone was not enough: where the
@@ -2444,16 +2450,14 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       // leaking into the letter next to it on Iron Man's settings screen.
       // Upscaling the whole frame at once, as an editor does, cannot do this
       // because there is no layer to be outside of.
-      if (respectCoverage &&
-          scaledLayerCoverage[(size_t)(y >> 1) * srcWidth + (x >> 1)] == 0)
-        continue;
+      if (respectCoverage && scaledLayerCoverage[own] == 0) continue;
       // Always select on the COLOUR, never on an ownership-tagged key: the
       // scaled layer must round its edges exactly as a whole-frame upscale of
       // the same picture would, and tagging ownership into the comparison
       // changes those decisions along every layer boundary. frame32 is a
       // complete picture here -- see sdRendersStatics.
       uint32_t src =
-          indexPlane ? indexPlane[(size_t)y * dstWidth + x]
+          indexPlane ? indexPlane[dstRow + x]
                      : FrameUtil::Helper::SelectUpscaled2xSourceIndex(
                            selectSource, srcWidth, srcHeight, x, y, algorithm);
       // Outside the frame: black, and nothing to read parallel planes from.
@@ -2464,11 +2468,9 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       // unlit neighbour when the palette paints it black, so text on a
       // coloured background silently loses the protection. Here the source
       // frame is still in scope and says plainly which pixels the ROM lit.
-      if (protectLitSource) {
-        const uint32_t own = (size_t)(y >> 1) * srcWidth + (x >> 1);
-        if (src != own && romFrameForUpscale[own] && !romFrameForUpscale[src])
-          src = own;
-      }
+      if (protectLitSource && src != own && romFrameForUpscale[own] &&
+          !romFrameForUpscale[src])
+        src = (uint32_t)own;
       // Coverage decides only what is painted. Where the selection lands on a
       // pixel the layer does not own, the natively rendered HD content stands.
       if (respectCoverage && scaledLayerCoverage[src] == 0) continue;
