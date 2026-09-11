@@ -5128,8 +5128,7 @@ bool ColorInRotation(uint32_t IDfound, uint16_t col, uint16_t* norot,
 void CheckDynaShadow(uint16_t* pfr, const uint8_t* shadowDirByLayer,
                      const uint16_t* shadowColorByLayer, uint8_t dynacouche,
                      uint8_t* isdynapix, uint16_t fx, uint16_t fy, uint32_t fw,
-                     uint32_t fh, bool markCoverage = false,
-                     const uint8_t* shadowDirFallback = nullptr,
+                     uint32_t fh, const uint8_t* shadowDirFallback = nullptr,
                      const uint16_t* shadowColorFallback = nullptr,
                      bool defer = false) {
   uint8_t dsdir = shadowDirByLayer ? shadowDirByLayer[dynacouche] : 0;
@@ -5160,11 +5159,6 @@ void CheckDynaShadow(uint16_t* pfr, const uint8_t* shadowDirByLayer,
     }
     isdynapix[neighborIndex] = 1;
     pfr[neighborIndex] = tcol;
-    // A shadow is generated from dynamic content, so it belongs to the scaled
-    // layer and must be composited with it. Without this the shadow is written
-    // into frame32 but never owned, so the composite skips it and every dynamic
-    // shadow silently disappears from the 64p output.
-    if (markCoverage) MarkScaledLayer(neighborIndex);
   }
 }
 
@@ -5362,8 +5356,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                 CheckDynaShadow(pfr, frameShadowDir, frameShadowColor,
                                 dynacouche, isdynapix, ti, tj,
                                 g_serumData.fwidth, g_serumData.fheight,
-                                /*markCoverage=*/false, shadowDirFallback,
-                                shadowColorFallback,
+                                shadowDirFallback, shadowColorFallback,
                                 /*defer=*/deferSdShadows);
                 isdynapix[tk] = 1;
                 pfr[tk] = dynamicColor;
