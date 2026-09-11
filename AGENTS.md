@@ -571,6 +571,15 @@ libframeutil can only recognize an unlit neighbour when the palette paints it
 black, so a colorization with a coloured background — `afm_113b`'s
 `BALL`/`CREDITS` caption on dark blue — silently lost the protection.
 
+Because libserum applies the rule itself, it asks libframeutil to select with
+plain **`Scale2x`** (`selectionAlgorithm` in `UpscaleOriginalPlaneIntoExtra()`).
+libframeutil's own `Scale2xPreserve` decides first and returns the centre
+whenever the neighbour it would have taken is colour zero, so `src == own` and
+`CornerIsSolid()` never runs — which reinstated the blocky corners on every glyph
+sitting on black: 325 of `spagb_100`'s 364 solid corners and all 174 of
+`im_185ve`'s. The enum value stays the user-facing setting, and libframeutil's
+implementation is still what hosts without a ROM frame use.
+
 Value `0` is still reference Scale2x, unmodified, for a colorization that wants
 exactly what other players produce.
 The selector must never be gated on extra-plane geometry: the whole-frame upscale

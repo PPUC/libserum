@@ -2431,6 +2431,19 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   const bool protectLitSource =
       algorithm == FrameUtil::ScalingAlgorithm::Scale2xPreserve &&
       romFrameForUpscale != NULL;
+  // Which algorithm libframeutil is asked to select with.
+  //
+  // Its own Scale2xPreserve judges "unlit" on the output colour and decides
+  // before this code ever sees the pixel: it returns the centre whenever the
+  // neighbour it would have taken is colour zero, so src == own and the corner
+  // test below never runs. That silently reinstated the blocky corners on every
+  // glyph sitting on black -- 325 of spagb_100's 364 solid corners, and all 174
+  // of im_185ve's. Where the ROM frame is in scope libserum applies the
+  // preserving rule itself, better informed and able to tell a corner worth
+  // rounding from a one-pixel stroke, so ask for plain Scale2x and decide here.
+  // It is also the cheaper selection.
+  const FrameUtil::ScalingAlgorithm selectionAlgorithm =
+      protectLitSource ? FrameUtil::ScalingAlgorithm::Scale2x : algorithm;
 
   // Take thousands separators out of the picture before scaling; see
   // DetectSeparators().
@@ -2485,7 +2498,8 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
   const uint32_t* indexPlane = NULL;
   if (!srcBounds && upscaleIndexPlane) {
     FrameUtil::Helper::SelectUpscaled2xSourceIndices(
-        upscaleIndexPlane, selectSource, srcWidth, srcHeight, algorithm);
+        upscaleIndexPlane, selectSource, srcWidth, srcHeight,
+        selectionAlgorithm);
     indexPlane = upscaleIndexPlane;
   }
 
@@ -2513,10 +2527,11 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       // the same picture would, and tagging ownership into the comparison
       // changes those decisions along every layer boundary. frame32 is a
       // complete picture here -- see sdRendersStatics.
-      uint32_t src =
-          indexPlane ? indexPlane[dstRow + x]
-                     : FrameUtil::Helper::SelectUpscaled2xSourceIndex(
-                           selectSource, srcWidth, srcHeight, x, y, algorithm);
+      uint32_t src = indexPlane
+                         ? indexPlane[dstRow + x]
+                         : FrameUtil::Helper::SelectUpscaled2xSourceIndex(
+                               selectSource, srcWidth, srcHeight, x, y,
+                               selectionAlgorithm);
       // Outside the frame: black, and nothing to read parallel planes from.
       // The layer simply does not paint here.
       if (src == FrameUtil::Helper::kUpscaleSourceOutside) continue;
