@@ -2739,6 +2739,10 @@ static void GenerateExtraPlaneShadows(uint32_t IDfound) {
 // Not isdynapix: the extra-plane pass clears and refills that same array, so by
 // the time this runs it no longer describes the original plane. sdDynaLayerMap
 // is written beside it for exactly the lit dynamic pixels and is not reused.
+// Writing to the 32p plane normally invalidates the separator mask, but not
+// here: DetectSeparators() reads the plane only where sdDynaLayerMap is set,
+// and this writes only where it is not. The two never touch the same pixel, so
+// a sprite compositing afterwards can keep using the mask it already has.
 static void ReplayOriginalPlaneShadows(void) {
   if (!sdShadowClaimAny) return;
   if (!sdShadowClaim || !sdShadowColour || !mySerum.frame32) return;
@@ -2748,9 +2752,6 @@ static void ReplayOriginalPlaneShadows(void) {
     if (!sdShadowClaim[i]) continue;
     if (sdDynaLayerMap[i]) continue;
     mySerum.frame32[i] = sdShadowColour[i];
-    // The separator mask describes the 32p plane; this writes to it. Sprites
-    // upscale again afterwards and would otherwise reuse a stale mask.
-    separatorMaskValid = false;
     // A shadow is a flat colour and takes no part in a rotation. Painting in
     // place left whatever the static pass had put here, which could still
     // name a rotation slot.
