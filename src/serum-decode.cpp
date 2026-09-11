@@ -5133,7 +5133,13 @@ bool ColorInRotation(uint32_t IDfound, uint16_t col, uint16_t* norot,
                                       *posinrot)) {
     return true;
   }
+  // Both halves, not just the slot. The composite copies the offset through
+  // unconditionally, so leaving it behind reads uninitialised memory -- which
+  // made the plane differ between two runs of the same build over the same
+  // frames. Nothing acts on the value while the slot says 0xffff, but it must
+  // still be a value.
   *norot = 0xffff;
+  *posinrot = 0xffff;
   return false;
 }
 
