@@ -2121,12 +2121,34 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
   // A colorization whose score is static rather than dynamic keeps its fused
   // comma. That is the conservative direction: missing a separator costs one
   // pixel of a comma, marking the wrong thing costs stability everywhere.
+  // Grouped by the ROM's shade, not by the colour the palette gave it.
+  //
+  // Everything below asks shape questions -- where is the bottom line, which
+  // columns hang under it, how wide is the run -- and the ROM frame is where
+  // the shape is. The colorized plane is not: a gradient score font draws each
+  // of its rows in a different colour, so one colour is a thin band scattered
+  // across the glyphs and its column groups are a few columns wide however
+  // plainly the thing is text. On spagb_100 frame 38 that split the score's
+  // two commas, which are the same three pixels drawn twice, into groups
+  // holding nine glyph bottoms and four: the first was recognized, the second
+  // was not, and which of them survived came down to the value on the display.
+  //
+  // The shade collapses the gradient back into one glyph, and it separates
+  // text from dithered artwork better than the colour does -- text is drawn at
+  // one shade, dithering mixes several.
+  //
+  // Falls back to the colour when no ROM frame is in scope, which is only the
+  // case outside a colorize call.
   uint16_t* const textFrame = separatorTextFrame;
   bool anyText = false;
   {
     const size_t px = (size_t)W * H;
     for (size_t i = 0; i < px; ++i) {
-      const uint16_t c = sdDynaLayerMap[i] ? mySerum.frame32[i] : 0;
+      const uint16_t c =
+          sdDynaLayerMap[i]
+              ? (romFrameForUpscale ? (uint16_t)romFrameForUpscale[i]
+                                    : mySerum.frame32[i])
+              : 0;
       textFrame[i] = c;
       if (c) anyText = true;
     }

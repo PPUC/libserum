@@ -3,6 +3,7 @@
 // See README.md in this directory: this is the one TU that includes the
 // implementation, so the static internals are reachable.
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -500,6 +501,7 @@ static uint32_t SeparatorsFoundFor(uint32_t tall, int shades, uint32_t cw,
   const uint32_t W = g_serumData.fwidth, H = g_serumData.fheight;
   memset(mySerum.frame32, 0, (size_t)W * H * sizeof(uint16_t));
   memset(sdDynaLayerMap, 0, (size_t)W * H);
+  std::fill(g_rom.begin(), g_rom.end(), 0);
   const uint32_t top = 4, bottom = top + tall - 1;
   uint32_t x = 4;
   int digits = 0;
@@ -510,6 +512,7 @@ static uint32_t SeparatorsFoundFor(uint32_t tall, int shades, uint32_t cw,
       for (uint32_t dx = 0; dx < 5; ++dx) {
         if (dx > 0 && dx < 4 && dy > 0 && dy < tall - 1) continue;
         mySerum.frame32[(top + dy) * W + x + dx] = colour;
+        g_rom[(top + dy) * W + x + dx] = 15;  // one shade, gradient in colour
         sdDynaLayerMap[(top + dy) * W + x + dx] = 1;
       }
     }
@@ -522,6 +525,7 @@ static uint32_t SeparatorsFoundFor(uint32_t tall, int shades, uint32_t cw,
           const uint32_t yy = bottom - (ch - 1) + cy + 1;
           if (yy >= H) continue;
           mySerum.frame32[yy * W + x + dx] = colour;
+          g_rom[yy * W + x + dx] = 15;
           sdDynaLayerMap[yy * W + x + dx] = 1;
         }
       x += cw + 1;
@@ -533,46 +537,67 @@ static uint32_t SeparatorsFoundFor(uint32_t tall, int shades, uint32_t cw,
 
 // What the filter will and will not accept as a thousands separator.
 //
-// The envelope is FIXED: two columns wide and three rows tall, whatever the
-// height of the text it belongs to. A sixteen-row score font gets the same
-// allowance as a six-row caption, because all three bounds -- how far a column
-// may rise above the baseline, how wide the run may be, how tall it may be --
-// are derived from the span of one COLOUR's rows, and a gradient font puts
-// each colour in a horizontal band that is a slice of the glyph rather than
-// the glyph.
+// Detection runs on the ROM's shades, so a score font drawn as a colour
+// gradient is still one glyph here and the allowance follows its height: three
+// rows of descender on a six-row font, four on an eight-row one, five on a
+// twelve-row one. Judged on the colorized plane instead, each colour of that
+// gradient is a horizontal band a few rows tall, the allowance is computed from
+// the band, and every font gets the same three rows however large it is.
 //
-// This test states the envelope as it is, not as it should be. A font whose
-// comma is drawn proportionally -- three pixels wide, or four tall, as a large
-// score font's is -- falls outside it and is scaled like any other pixel, which
-// is what the filter exists to avoid. Widening it means measuring the glyph
-// across every colour in those columns; when that is done this test should
-// change with it, deliberately.
-static void Test_SeparatorEnvelopeIsFixed(void) {
+// The WIDTH is still a fixed two columns and does not follow the font. No
+// colorization to hand draws a wider separator, so widening it would be a
+// change made blind; this states the bound so that changing it is deliberate.
+static void Test_SeparatorEnvelopeFollowsTheFont(void) {
   SetUpFrame(128, 32);
-  for (uint32_t tall = 6; tall <= 16; tall += 2) {
+  struct Case {
+    uint32_t tall, cw, ch;
+    bool want;
+  };
+  const Case cases[] = {
+      // Always recognized, at every size.
+      {6, 1, 2, true},
+      {16, 1, 2, true},
+      {6, 2, 3, true},
+      {16, 2, 3, true},
+      // A descender of four rows needs a font tall enough to justify it.
+      {6, 2, 4, false},
+      {8, 2, 4, true},
+      {16, 2, 4, true},
+      // Five needs taller still.
+      {8, 2, 5, false},
+      {12, 2, 5, true},
+      // Three columns is beyond the fixed width bound at every size.
+      {6, 3, 3, false},
+      {16, 3, 3, false},
+  };
+  for (const Case& c : cases) {
+    const bool got = SeparatorsFoundFor(c.tall, 3, c.cw, c.ch) != 0;
     ++g_checks;
-    if (SeparatorsFoundFor(tall, 3, 1, 2) == 0)
-      Fail(__FILE__, __LINE__, "%u-row font: a 1x2 comma was not recognized",
-           tall);
-    ++g_checks;
-    if (SeparatorsFoundFor(tall, 3, 2, 3) == 0)
-      Fail(__FILE__, __LINE__, "%u-row font: a 2x3 comma was not recognized",
-           tall);
-    // Known limitation, see above: these are proportional to a large font and
-    // are rejected at every size.
-    ++g_checks;
-    if (SeparatorsFoundFor(tall, 3, 3, 3) != 0)
-      Fail(__FILE__, __LINE__,
-           "%u-row font: a 3x3 comma is now recognized -- if that was "
-           "intended, update this test",
-           tall);
-    ++g_checks;
-    if (SeparatorsFoundFor(tall, 3, 2, 4) != 0)
-      Fail(__FILE__, __LINE__,
-           "%u-row font: a 2x4 comma is now recognized -- if that was "
-           "intended, update this test",
-           tall);
+    if (got != c.want)
+      Fail(__FILE__, __LINE__, "%u-row font, %ux%u separator: %s, expected %s",
+           c.tall, c.cw, c.ch, got ? "recognized" : "not recognized",
+           c.want ? "recognized" : "not recognized");
   }
+  TearDownFrame();
+}
+
+// The same separator drawn twice on one line is treated the same way, whatever
+// digits happen to sit beside it.
+//
+// spagb_100 frame 38 shows "36,269,900" in a gradient font, and its two commas
+// are the same three pixels. Judged on the colorized plane they fell into
+// different column groups of one colour -- nine glyph bottoms under the first,
+// four under the second -- and only the first was recognized. Which of them
+// survived came down to the value on the display.
+static void Test_IdenticalSeparatorsAreTreatedAlike(void) {
+  SetUpFrame(128, 32);
+  // Sixteen digits fit across the frame, so five separators -- and every one
+  // of them has to be found, not whichever ones the digits beside them happen
+  // to favour.
+  CHECK_EQ(SeparatorsFoundFor(8, 3, 1, 2), 5);
+  // The same line without the gradient, which always worked, to show the two
+  // now agree.
+  CHECK_EQ(SeparatorsFoundFor(8, 1, 1, 2), 5);
   TearDownFrame();
 }
 
@@ -866,7 +891,10 @@ static const TestCase kTests[] = {
      Test_NoRotationWritesBothHalves},
     {"hash/frame_dword_slot_uses_high_bits", Test_FrameDwordSlotUsesHighBits},
     {"separator/not_fused_with_digit", Test_SeparatorIsNotFusedWithTheDigit},
-    {"separator/envelope_is_fixed", Test_SeparatorEnvelopeIsFixed},
+    {"separator/envelope_follows_the_font",
+     Test_SeparatorEnvelopeFollowsTheFont},
+    {"separator/identical_treated_alike",
+     Test_IdenticalSeparatorsAreTreatedAlike},
     {"sidecar/spellings", Test_ScalingSidecarSpellings},
     {"sidecar/shadow_offset", Test_ScalingSidecarShadowOffset},
     {"sidecar/tolerance", Test_ScalingSidecarTolerance},

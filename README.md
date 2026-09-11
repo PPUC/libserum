@@ -163,11 +163,21 @@ diagonal between the two and they become one shape.
 
 libserum finds those separators before scaling and stamps them back afterwards
 by line doubling, so the digits have nothing adjacent to bridge to. The search
-runs one colour at a time. That is not an optimization: Scale2x only ever joins
-pixels sharing a colour, and a colorization that paints a background behind its
-score — most of them — has no empty row anywhere for a whole-frame search to
-find text with. Within a single colour the structure is unmistakable, and a
+runs one shade of the **ROM frame** at a time, not one colour of the finished
+picture. That is not an optimization: a colorization that paints a background
+behind its score — most of them — has no empty row anywhere for a whole-frame
+search to find text with, so the search needs something to separate text from
+what surrounds it. Within one shade the structure is unmistakable, and a
 separator is then a narrow column carrying pixels below the text's bottom line.
+
+The ROM rather than the output because everything the search asks is a question
+about shape, and the shape is in the ROM. A score font drawn as a colour
+gradient is one glyph there; in the finished picture each of its colours is a
+horizontal band a few rows tall, scattered across the digits, and the search
+sees several unrelated scraps of text instead of one number. On `spagb_100` that
+split the two commas of `36,269,900` — the same three pixels drawn twice — so
+one was filtered and the other was not, and which of them survived changed with
+the value on the display.
 A column that carries the glyph above it is never a candidate, which is what
 keeps a letter's own pixels out of the mask; marked pixels are line doubled, so
 marking one would damage the letter around it.
