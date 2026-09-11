@@ -817,6 +817,24 @@ bool scaledLayerHasCoverage = false;  // any pixel owned on the current frame
 // what lets dynamic shadows be generated from the UPSCALED glyph rather than
 // from the SD glyph -- see GenerateExtraPlaneShadows().
 uint8_t* sdDynaLayerMap = NULL;
+// Dynamic shadows at original resolution, recorded but not yet painted.
+//
+// The extra plane regenerates shadows from the UPSCALED glyph, so the picture
+// the upscale reads must not contain the original-resolution ones: a shadow
+// pixel there is one source pixel, which is two extra-plane pixels, and the
+// regenerated shadow under the default native offset is one. The other one
+// belongs to the background -- and the only way to know what the background
+// was is to never have drawn over it. Painting them and marking them unowned
+// was worse still: the composite then skipped their whole 2x2 block and
+// nothing wrote it at all, so those pixels kept the previous frame.
+//
+// So they are recorded here while the original plane is rendered, and replayed
+// into it after the upscale, and only for a caller that asked for the 32p
+// plane at all.
+uint16_t* sdShadowColour = NULL;
+uint8_t* sdShadowClaim = NULL;
+// Most frames record nothing; skip the replay scan for them.
+bool sdShadowClaimAny = false;
 uint8_t* hdDynaLayerMap = NULL;
 uint8_t shadowOffsetModeRuntime = SERUM_SHADOW_OFFSET_NATIVE;
 // Width the 64p output plane was allocated for, in pixels.
@@ -1701,6 +1719,8 @@ void Serum_free(void) {
   frameDwordShift = 0;
   frameDwordGen = 0;
   Free_element((void**)&sdDynaLayerMap);
+  Free_element((void**)&sdShadowColour);
+  Free_element((void**)&sdShadowClaim);
   Free_element((void**)&hdDynaLayerMap);
   shadowOffsetModeRuntime = SERUM_SHADOW_OFFSET_NATIVE;
   scaledLayerHasCoverage = false;
@@ -2082,6 +2102,8 @@ static void ResetScaledLayerCoverage(void) {
   const size_t px = (size_t)g_serumData.fwidth * g_serumData.fheight;
   memset(scaledLayerCoverage, 0, px);
   if (sdDynaLayerMap) memset(sdDynaLayerMap, 0, px);
+  if (sdShadowClaim) memset(sdShadowClaim, 0, px);
+  sdShadowClaimAny = false;
   if (hdDynaLayerMap) memset(hdDynaLayerMap, 0, px * 4);
   scaledLayerHasCoverage = false;
   separatorMaskValid = false;
@@ -2688,6 +2710,42 @@ static void GenerateExtraPlaneShadows(uint32_t IDfound) {
   }
 }
 
+// Paint the recorded original-resolution shadows into the 32p plane.
+//
+// Runs after the upscale, so the picture the extra plane was built from never
+// contained them -- that is the whole point of recording them. A caller that
+// did not ask for the 32p plane never sees this, so it is skipped.
+//
+// sdDynaLayerMap decides what a shadow may not cover: a pixel that turned out
+// to be lit dynamic content keeps the content. Painting in place got that from
+// the raster order, since the glyph was written after the shadow; here the
+// whole frame is known, which is the same answer.
+//
+// Not isdynapix: the extra-plane pass clears and refills that same array, so by
+// the time this runs it no longer describes the original plane. sdDynaLayerMap
+// is written beside it for exactly the lit dynamic pixels and is not reused.
+static void ReplayOriginalPlaneShadows(void) {
+  if (!sdShadowClaimAny) return;
+  if (!sdShadowClaim || !sdShadowColour || !mySerum.frame32) return;
+  if (!sdDynaLayerMap) return;
+  const size_t px = (size_t)g_serumData.fwidth * g_serumData.fheight;
+  for (size_t i = 0; i < px; ++i) {
+    if (!sdShadowClaim[i]) continue;
+    if (sdDynaLayerMap[i]) continue;
+    mySerum.frame32[i] = sdShadowColour[i];
+    // The separator mask describes the 32p plane; this writes to it. Sprites
+    // upscale again afterwards and would otherwise reuse a stale mask.
+    separatorMaskValid = false;
+    // A shadow is a flat colour and takes no part in a rotation. Painting in
+    // place left whatever the static pass had put here, which could still
+    // name a rotation slot.
+    if (mySerum.rotationsinframe32) {
+      mySerum.rotationsinframe32[i * 2] = 0xffff;
+      mySerum.rotationsinframe32[i * 2 + 1] = 0xffff;
+    }
+  }
+}
+
 // Fill the 64p output by upscaling, but only when this call rendered the
 // original plane and did not render a native extra plane for the frame.
 static void MaybeUpscaleOriginalPlaneIntoExtra(void) {
@@ -2907,6 +2965,10 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
     // allocator handed back.
     sdDynaLayerMap =
         (uint8_t*)calloc(g_serumData.fwidth * g_serumData.fheight, 1);
+    sdShadowColour = (uint16_t*)calloc(
+        (size_t)g_serumData.fwidth * g_serumData.fheight, sizeof(uint16_t));
+    sdShadowClaim =
+        (uint8_t*)calloc(g_serumData.fwidth * g_serumData.fheight, 1);
     hdDynaLayerMap = (uint8_t*)calloc(
         (size_t)g_serumData.fwidth * 2 * g_serumData.fheight * 2, 1);
     if (!frameshape) {
@@ -3068,6 +3130,9 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
   AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
   sdDynaLayerMap =
       (uint8_t*)calloc(g_serumData.fwidth * g_serumData.fheight, 1);
+  sdShadowColour = (uint16_t*)calloc(
+      (size_t)g_serumData.fwidth * g_serumData.fheight, sizeof(uint16_t));
+  sdShadowClaim = (uint8_t*)calloc(g_serumData.fwidth * g_serumData.fheight, 1);
   hdDynaLayerMap = (uint8_t*)calloc(
       (size_t)g_serumData.fwidth * 2 * g_serumData.fheight * 2, 1);
 
@@ -5039,12 +5104,19 @@ bool ColorInRotation(uint32_t IDfound, uint16_t col, uint16_t* norot,
 // their shadow configuration only in the extra tables, so rendering dynamic
 // content at SD would silently drop every shadow. Falling back keeps the
 // author's configuration without reintroducing any HD spatial data.
+//
+// defer: record the shadow instead of painting it, leaving the pixel to be
+// rendered as background so the upscale reads a shadow-free picture. See
+// sdShadowColour. isdynapix is left alone in that case -- the pixel is not
+// dynamic content yet, and marking it would stop the static pass filling in
+// what the shadow sits on.
 void CheckDynaShadow(uint16_t* pfr, const uint8_t* shadowDirByLayer,
                      const uint16_t* shadowColorByLayer, uint8_t dynacouche,
                      uint8_t* isdynapix, uint16_t fx, uint16_t fy, uint32_t fw,
                      uint32_t fh, bool markCoverage = false,
                      const uint8_t* shadowDirFallback = nullptr,
-                     const uint16_t* shadowColorFallback = nullptr) {
+                     const uint16_t* shadowColorFallback = nullptr,
+                     bool defer = false) {
   uint8_t dsdir = shadowDirByLayer ? shadowDirByLayer[dynacouche] : 0;
   uint16_t tcol = shadowColorByLayer ? shadowColorByLayer[dynacouche] : 0;
   if (dsdir == 0 && shadowDirFallback) {
@@ -5062,6 +5134,15 @@ void CheckDynaShadow(uint16_t* pfr, const uint8_t* shadowDirByLayer,
     if (nx < 0 || ny < 0 || nx >= (int32_t)fw || ny >= (int32_t)fh) continue;
     const uint32_t neighborIndex = (uint32_t)ny * fw + (uint32_t)nx;
     if (isdynapix[neighborIndex] != 0) continue;
+    if (defer) {
+      // First shadow wins, exactly as painting in place did -- the claim is
+      // what isdynapix stood for here.
+      if (sdShadowClaim[neighborIndex]) continue;
+      sdShadowClaim[neighborIndex] = 1;
+      sdShadowColour[neighborIndex] = tcol;
+      sdShadowClaimAny = true;
+      continue;
+    }
     isdynapix[neighborIndex] = 1;
     pfr[neighborIndex] = tcol;
     // A shadow is generated from dynamic content, so it belongs to the scaled
@@ -5086,6 +5167,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
   // plane is a downscale rather than an upscale -- the historical
   // all-or-nothing path is kept unchanged.
   const bool layerMode = upscaleExtraFromOriginal;
+  // Record dynamic shadows rather than painting them; see sdShadowColour.
+  const bool deferSdShadows = layerMode && sdShadowClaim && sdShadowColour;
   // In layer mode the HD gate no longer requires every referenced sprite to
   // have an HD version: sprites are their own layer now.
   const bool isextra = layerMode ? HasHdStaticContent(IDfound)
@@ -5256,15 +5339,17 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                 }
               }
               if (!dynamicBlackSuppressed) {
-                // markCoverage is false in layer mode: the extra plane
-                // regenerates shadows from the upscaled glyph, so these SD
-                // shadows belong to the 32p output only and must not be
-                // composited (that would draw them twice, at two thicknesses).
+                // In layer mode the shadow is only recorded: the extra
+                // plane regenerates it from the upscaled glyph, and the
+                // picture the upscale reads has to be shadow-free for that to
+                // mean anything. ReplayOriginalPlaneShadows() puts it back
+                // afterwards for the 32p output.
                 CheckDynaShadow(pfr, frameShadowDir, frameShadowColor,
                                 dynacouche, isdynapix, ti, tj,
                                 g_serumData.fwidth, g_serumData.fheight,
                                 /*markCoverage=*/false, shadowDirFallback,
-                                shadowColorFallback);
+                                shadowColorFallback,
+                                /*defer=*/deferSdShadows);
                 isdynapix[tk] = 1;
                 pfr[tk] = dynamicColor;
                 MarkScaledLayer(tk);
@@ -5493,6 +5578,10 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     if (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) {
       GenerateExtraPlaneShadows(IDfound);
     }
+    // The extra plane is finished, so the 32p plane can have its shadows
+    // back. Before the upscale would have put them in the picture it reads.
+    if (deferSdShadows && originalPlaneRequestedByCaller)
+      ReplayOriginalPlaneShadows();
     // Sprites render next and each scopes the mask to itself; remember what the
     // frame owns so they can restore it rather than lose it.
     if (frameLayerCoverage && scaledLayerCoverage) {

@@ -513,9 +513,28 @@ independently of the glyph's, and a one-pixel shadow becomes two pixels, which o
 a tight glyph such as `8` closes the gap between its loops.
 
 The composite carries each lit pixel's dyna layer into `hdDynaLayerMap`, which is
-what lets the pass know which per-layer direction bitmask and colour apply. SD
-shadows are still rendered for the `32p` output but are **not** covered, or they
-would be drawn twice at two thicknesses.
+what lets the pass know which per-layer direction bitmask and colour apply.
+
+The original-resolution shadows must not be in the picture the upscale reads, or
+they would be drawn twice at two thicknesses. Marking them unowned was the wrong
+way to achieve that: the composite then skipped their whole `2x2` destination
+block, and under the default native offset the regenerated shadow filled only one
+of those two pixels, so the other was **written by nothing at all** and kept the
+previous frame. On `afm_113b` that was 169391 stale extra-plane pixels across 632
+of 760 frames — speckles in colours from an unrelated screen, worst around large
+digits, where they read as notches bitten out of the glyph.
+
+So they are recorded instead (`sdShadowClaim` / `sdShadowColour`) and the pixel is
+left to the static pass, which paints what the shadow sits on and owns it
+normally. `ReplayOriginalPlaneShadows()` puts them into the `32p` plane after the
+upscale, and only for a caller that asked for that plane. Keyed on
+`sdDynaLayerMap`, not `isdynapix` — the extra-plane pass clears and refills
+`isdynapix`, so by then it no longer describes the original plane.
+
+The `32p` output is byte-identical either way. Its per-pixel rotation entries are
+not: a shadow pixel used to keep the entry belonging to the colour it had covered,
+so `Serum_Rotate()` would animate the shadow with someone else's rotation. The
+replay stamps `0xffff`.
 
 The offset is a persisted per-colorization choice, `shadowOffsetMode`:
 `SERUM_SHADOW_OFFSET_NATIVE` (1 extra-plane pixel — what the pre-layer renderer
