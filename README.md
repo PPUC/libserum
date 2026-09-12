@@ -235,6 +235,19 @@ A column that carries the glyph above it is never a candidate, which is what
 keeps a letter's own pixels out of the mask; marked pixels are line doubled, so
 marking one would damage the letter around it.
 
+A separator once found is carried into later frames while the picture
+immediately around it — its own pixels, one row and two columns of margin — is
+untouched. Several Stern games wipe a score away one row at a time from the top
+rather than blinking it. Two rows in, the fragment left on the display is too
+short for any of the above to work: the bottom line no longer stands out from
+the rows above it, the number reads as one squat band, and the commas stop
+being recognized. They then fuse with the remains of the digits exactly when
+those remains are hardest to read. Nothing about the commas changed, so the
+decision made while the number was whole stands until the wipe reaches them —
+at which point the margin changes, the memory is dropped, and the frame is
+judged on its own again. A digit growing into a comma changes that margin too,
+which is the other thing that has to end it.
+
 There is no sidecar setting for this — it is always on. A handful of artwork
 pixels per frame can match the same shape and get line doubled with the commas.
 Measured at 0.3% of a frame, and not noticeable in practice.

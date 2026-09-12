@@ -752,6 +752,37 @@ static const uint32_t kSeparatorMaxColumnSamples = 256;
 // A separator is a handful of pixels; anything that grows past this is not
 // one, and only its descending columns are taken.
 static const uint32_t kSeparatorMaxComponent = 12;
+// A separator kept from an earlier frame.
+//
+// Several Stern games wipe a score away one row at a time from the top instead
+// of blinking it. Two rows in and the number is too short for the analysis
+// above to work: the bottom line no longer stands out from the rows over it,
+// the run reads as one squat band, and the commas stop being recognized --
+// so, three frames into the animation, they fuse with what is left of the
+// digits in the upscale, which is precisely when the remaining fragments are
+// most confusable.
+//
+// Nothing about the comma itself changed though. So a separator, once found,
+// is carried while the picture immediately around it is untouched: its own
+// pixels and a one-row, two-column margin. The wipe never reaches that margin
+// until it reaches the comma, at which point the memory is dropped and the
+// frame is judged on its own again. A digit growing into the comma changes the
+// margin too, which is the other thing that has to end it.
+//
+// Kept per separator rather than per zone so that one part of a zone changing
+// does not throw away the decisions made in the rest of it.
+static const uint32_t kSeparatorMaxRemembered = 32;
+static const uint32_t kSeparatorWindowMax = 64;
+struct RememberedSeparator {
+  uint32_t px[kSeparatorMaxComponent];
+  uint16_t win[kSeparatorWindowMax];
+  uint16_t x0, y0, x1, y1;
+  uint8_t n;
+  uint8_t wn;
+};
+RememberedSeparator rememberedSeparators[kSeparatorMaxRemembered];
+uint32_t rememberedSeparatorCount = 0;
+
 uint16_t* separatorColors = NULL;
 // Per colour per column, kSeparatorMaxColors + 1 blocks of W each.
 //
@@ -1747,6 +1778,7 @@ void Serum_free(void) {
   Free_element((void**)&upscaleIndexPlane);
   separatorMaskValid = false;
   separatorMaskCount = 0;
+  rememberedSeparatorCount = 0;
   Free_element((void**)&frameDwordKeys);
   Free_element((void**)&frameDwordStamps);
   frameDwordMask = 0;
@@ -2172,6 +2204,49 @@ static void ResetScaledLayerCoverage(void) {
 // equally what keeps a glyph's own pixels out of the mask -- marked pixels are
 // pulled out of the frame Scale2x sees and stamped back line-doubled, so
 // marking one would damage the letter around it.
+// The picture around a separator that has to stay unchanged for it to be
+// carried: its own pixels plus a one-row, two-column margin. Returns false if
+// the window does not fit the fixed store, in which case it is not remembered.
+static bool CaptureSeparatorWindow(const uint16_t* f, uint32_t W, uint32_t H,
+                                   const uint32_t* px, uint32_t n,
+                                   RememberedSeparator& out) {
+  if (n == 0 || n > kSeparatorMaxComponent) return false;
+  uint32_t minx = W, maxx = 0, miny = H, maxy = 0;
+  for (uint32_t k = 0; k < n; ++k) {
+    const uint32_t x = px[k] % W, y = px[k] / W;
+    if (x < minx) minx = x;
+    if (x > maxx) maxx = x;
+    if (y < miny) miny = y;
+    if (y > maxy) maxy = y;
+  }
+  out.x0 = (uint16_t)(minx >= 2 ? minx - 2 : 0);
+  out.x1 = (uint16_t)(maxx + 2 < W ? maxx + 2 : W - 1);
+  out.y0 = (uint16_t)(miny >= 1 ? miny - 1 : 0);
+  out.y1 = (uint16_t)(maxy + 1 < H ? maxy + 1 : H - 1);
+  const uint32_t wn =
+      (uint32_t)(out.x1 - out.x0 + 1) * (uint32_t)(out.y1 - out.y0 + 1);
+  if (wn > kSeparatorWindowMax) return false;
+  uint32_t i = 0;
+  for (uint32_t y = out.y0; y <= out.y1; ++y)
+    for (uint32_t x = out.x0; x <= out.x1; ++x)
+      out.win[i++] = f[(size_t)y * W + x];
+  out.wn = (uint8_t)wn;
+  out.n = (uint8_t)n;
+  for (uint32_t k = 0; k < n; ++k) out.px[k] = px[k];
+  return true;
+}
+
+// Is the picture around a remembered separator still the one it was found in?
+static bool SeparatorWindowUnchanged(const uint16_t* f, uint32_t W, uint32_t H,
+                                     const RememberedSeparator& r) {
+  if (r.x1 >= W || r.y1 >= H) return false;
+  uint32_t i = 0;
+  for (uint32_t y = r.y0; y <= r.y1; ++y)
+    for (uint32_t x = r.x0; x <= r.x1; ++x)
+      if (f[(size_t)y * W + x] != r.win[i++]) return false;
+  return true;
+}
+
 static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
   if (!separatorMask || !mySerum.frame32) return 0;
   if (!separatorRowCount || !separatorDescends || !separatorColors) return 0;
@@ -2279,6 +2354,9 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
   }
 
   uint32_t found = 0;
+  // What this frame decided, so it can be carried into the next one.
+  static RememberedSeparator carried[kSeparatorMaxRemembered];
+  uint32_t ncarried = 0;
   for (uint32_t ci = 0; ci < ncolors; ++ci) {
     const uint16_t color = separatorColors[ci];
     const uint32_t* const rowCount = counts + (size_t)ci * H;
@@ -2482,7 +2560,10 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
                   const bool wholeShapeFits =
                       !tooBig && (cmaxx - cminx + 1) <= 2 &&
                       (cmaxy - cminy + 1) <= maxRise + 2;
+                  uint32_t taken[kSeparatorMaxComponent];
+                  uint32_t ntaken = 0;
                   const auto mark = [&](uint32_t idx) {
+                    if (ntaken < kSeparatorMaxComponent) taken[ntaken++] = idx;
                     if (separatorMask[idx]) return;
                     separatorMask[idx] = 1;
                     if (separatorPixelCount < kSeparatorMaxPixels)
@@ -2496,6 +2577,10 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
                         if (f[(size_t)y * W + x] == color)
                           mark((uint32_t)(y * W + x));
                   }
+                  if (ncarried < kSeparatorMaxRemembered &&
+                      CaptureSeparatorWindow(f, W, H, taken, ntaken,
+                                             carried[ncarried]))
+                    ++ncarried;
                   found++;
                 }
               }
@@ -2509,6 +2594,39 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
       runStart = runEnd;
     }
   }
+
+  // Carry the separators this frame did not find but that are demonstrably
+  // still there: same pixels, same margin around them. A wipe that eats the
+  // number from the top leaves both untouched for most of the animation, so
+  // the commas keep the decision made while the number was still whole.
+  //
+  // Only ever adds. A separator this frame found on its own is already in the
+  // mask, and its window was captured a moment ago from the same picture, so
+  // it needs no help; one it lost is put back exactly as it was.
+  for (uint32_t i = 0; i < rememberedSeparatorCount; ++i) {
+    const RememberedSeparator& r = rememberedSeparators[i];
+    if (!SeparatorWindowUnchanged(f, W, H, r)) continue;
+    bool alreadyMarked = true;
+    for (uint32_t k = 0; k < r.n; ++k)
+      if (!separatorMask[r.px[k]]) {
+        alreadyMarked = false;
+        break;
+      }
+    if (alreadyMarked) continue;
+    if (ncarried >= kSeparatorMaxRemembered) break;
+    for (uint32_t k = 0; k < r.n; ++k) {
+      const uint32_t idx = r.px[k];
+      if (separatorMask[idx]) continue;
+      separatorMask[idx] = 1;
+      if (separatorPixelCount < kSeparatorMaxPixels)
+        separatorPixels[separatorPixelCount++] = idx;
+    }
+    carried[ncarried++] = r;
+    found++;
+  }
+
+  rememberedSeparatorCount = ncarried;
+  for (uint32_t i = 0; i < ncarried; ++i) rememberedSeparators[i] = carried[i];
   return found;
 }
 

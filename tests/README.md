@@ -57,6 +57,7 @@ explains the rule; if the test fails, read that commit message first.
 | `separator/touching_a_digit_is_not_grown` | one drawn hard against a digit keeps its square tail rather than growing into the digit |
 | `separator/still_casts_a_shadow` | it carries its dyna layer, so the shadow pass still gives it a shadow, following the rounded shape |
 | `separator/identical_treated_alike` | the same separator drawn twice on one line is treated the same way, whatever digits sit beside it |
+| `separator/survives_a_row_wipe` | a score wiped away one row at a time keeps its commas while the picture around them is untouched, and stops keeping them when the wipe arrives |
 
 Not everything here is a past bug. The rest covers behaviour that had no test at
 all and would fail quietly — a misparsed `scaling.txt` falls back to a default

@@ -547,6 +547,83 @@ static uint32_t SeparatorsFoundFor(uint32_t tall, int shades, uint32_t cw,
 // The WIDTH is still a fixed two columns and does not follow the font. No
 // colorization to hand draws a wider separator, so widening it would be a
 // change made blind; this states the bound so that changing it is deliberate.
+// Several Stern games wipe a score away one row at a time from the top rather
+// than blinking it. Two rows in, the fragment that is left is too short for the
+// analysis to place a bottom line, and the commas stop being recognized -- so
+// they fuse with the remains of the digits in the upscale, exactly when those
+// remains are hardest to read. The commas themselves never moved, so the
+// decision made while the number was whole is carried until the wipe reaches
+// them.
+//
+// Drawn from the frame the effect was reported on: "1,113,134" on bdk_294,
+// whose own digits are what make the fragment ambiguous. A score of solid
+// blocks keeps enough of a bottom line to be recognized all the way down, so it
+// cannot show the rule working.
+static void Test_SeparatorSurvivesARowWipe(void) {
+  SetUpFrame(128, 32);
+  const uint32_t W = g_serumData.fwidth, H = g_serumData.fheight;
+  static const char* kScore[] = {
+      "###...###..#..###...###.###.###.", "..#.....#.##..#.......#.#.#.#.#.",
+      ".#.....#...#..###....#..###.#.#.", ".#.....#...#....#....#....#.#.#.",
+      ".#..#..#..###.###.#..#..###.###.", "...#.............#..............",
+  };
+  const uint32_t kTop = 1, kLeft = 8;
+  const uint32_t kRows = (uint32_t)(sizeof(kScore) / sizeof(kScore[0]));
+  const auto draw = [&]() {
+    memset(mySerum.frame32, 0, (size_t)W * H * sizeof(uint16_t));
+    memset(sdDynaLayerMap, 0, (size_t)W * H);
+    std::fill(g_rom.begin(), g_rom.end(), 0);
+    for (uint32_t r = 0; r < kRows; ++r)
+      for (uint32_t c = 0; kScore[r][c]; ++c) {
+        if (kScore[r][c] != '#') continue;
+        const size_t i = (size_t)(kTop + r) * W + kLeft + c;
+        mySerum.frame32[i] = 0xffe0;
+        g_rom[i] = 15;
+        sdDynaLayerMap[i] = 1;
+      }
+  };
+  const auto detect = [&]() {
+    separatorMaskValid = false;
+    return DetectSeparators(W, H);
+  };
+  const auto wipeTo = [&](uint32_t lastRow) {
+    for (uint32_t y = kTop; y <= lastRow; ++y)
+      for (uint32_t x = 0; x < W; ++x) {
+        mySerum.frame32[(size_t)y * W + x] = 0;
+        g_rom[(size_t)y * W + x] = 0;
+        sdDynaLayerMap[(size_t)y * W + x] = 0;
+      }
+  };
+
+  draw();
+  const uint32_t whole = detect();
+  CHECK_EQ(whole, 2);  // both commas of "1,113,134"
+
+  // Eaten from the top, one row per frame. Both commas keep their decision.
+  for (uint32_t y = kTop; y <= kTop + 2; ++y) {
+    wipeTo(y);
+    const uint32_t got = detect();
+    ++g_checks;
+    if (got != whole)
+      Fail(__FILE__, __LINE__, "rows %u..%u wiped: %u separators, expected %u",
+           kTop, y, got, whole);
+  }
+
+  // And the memory is what is doing that: the same fragment, judged on its own,
+  // has already lost them.
+  rememberedSeparatorCount = 0;
+  CHECK(detect() < whole);
+
+  // The memory ends where the comma does. Its window reaches one row above it,
+  // so wiping that row drops it rather than holding a decision about a picture
+  // that has changed.
+  draw();
+  CHECK_EQ(detect(), whole);
+  wipeTo(kTop + 3);  // row 4, the margin over the comma on row 5
+  CHECK(detect() < whole);
+  TearDownFrame();
+}
+
 static void Test_SeparatorEnvelopeFollowsTheFont(void) {
   SetUpFrame(128, 32);
   struct Case {
@@ -1516,6 +1593,7 @@ static const TestCase kTests[] = {
      Test_NoRotationWritesBothHalves},
     {"hash/frame_dword_slot_uses_high_bits", Test_FrameDwordSlotUsesHighBits},
     {"separator/not_fused_with_digit", Test_SeparatorIsNotFusedWithTheDigit},
+    {"separator/survives_a_row_wipe", Test_SeparatorSurvivesARowWipe},
     {"separator/envelope_follows_the_font",
      Test_SeparatorEnvelopeFollowsTheFont},
     {"separator/identical_treated_alike",
