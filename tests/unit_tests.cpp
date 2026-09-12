@@ -258,6 +258,68 @@ static void Test_LineDoublingReplicates(void) {
   TearDownFrame();
 }
 
+// Where the scaled layer rounds a pixel outwards, the HD frame underneath is
+// what shows -- and an author who puts a dynamic zone over artwork leaves that
+// frame black across the zone's footprint, because the zone is what covers it.
+// Yielding to that black puts a speck along every edge the scaler rounds.
+//
+// bdk_294 frame 689 draws its "30" in such a zone and the specks appeared
+// around the sprite. Where the HD frame does hold content it still stands.
+static void Test_LayerDoesNotYieldToHdNothing(void) {
+  SetUpFrame();
+  const uint32_t W = g_serumData.fwidth;
+  // A zone in the middle of the frame, everything outside it unowned.
+  memset(scaledLayerCoverage, 0, (size_t)W * kH);
+  const uint32_t zx0 = 4, zx1 = 9, zy0 = 4, zy1 = 9;
+  for (uint32_t y = zy0; y <= zy1; ++y)
+    for (uint32_t x = zx0; x <= zx1; ++x) scaledLayerCoverage[y * W + x] = 1;
+  // Content inside it, and a different colour all around: the scaler then has
+  // a neighbour worth rounding to along the zone's edge.
+  for (uint32_t y = 0; y < kH; ++y)
+    for (uint32_t x = 0; x < W; ++x) {
+      const bool inZone = x >= zx0 && x <= zx1 && y >= zy0 && y <= zy1;
+      Px(x, y, inZone ? 15 : 3, inZone ? 0x7777 : 0x2222);
+    }
+  // A diagonal step on the zone's edge, which is what Scale2x rounds.
+  Px(zx1, zy0, 3, 0x2222);
+
+  // The HD pass has run and left the zone's footprint black, artwork outside.
+  const auto renderHdStatics = [&]() {
+    for (uint32_t y = 0; y < kH * 2; ++y)
+      for (uint32_t x = 0; x < W * 2; ++x) {
+        const bool inZone = (x / 2) >= zx0 && (x / 2) <= zx1 &&
+                            (y / 2) >= zy0 && (y / 2) <= zy1;
+        mySerum.frame64[(size_t)y * W * 2 + x] = inZone ? 0 : 0x3333;
+      }
+    mySerum.flags = FLAG_RETURNED_64P_FRAME_OK;
+    extraPlaneIsDerived = false;  // HD content stands where the layer stops
+  };
+
+  renderHdStatics();
+  UpscaleOriginalPlaneIntoExtra(false, /*onlyCoveredPixels=*/true);
+  // No destination whose own source is inside the zone may be left black.
+  unsigned specks = 0;
+  for (uint32_t y = zy0 * 2; y <= zy1 * 2 + 1; ++y)
+    for (uint32_t x = zx0 * 2; x <= zx1 * 2 + 1; ++x)
+      if (mySerum.frame64[(size_t)y * W * 2 + x] == 0) ++specks;
+  CHECK_EQ(specks, 0);
+
+  // With artwork behind it instead of nothing, the layer still yields: that is
+  // the boundary being rounded against what is actually drawn there.
+  renderHdStatics();
+  for (uint32_t y = 0; y < kH * 2; ++y)
+    for (uint32_t x = 0; x < W * 2; ++x)
+      if (mySerum.frame64[(size_t)y * W * 2 + x] == 0)
+        mySerum.frame64[(size_t)y * W * 2 + x] = 0x5555;
+  UpscaleOriginalPlaneIntoExtra(false, /*onlyCoveredPixels=*/true);
+  unsigned yielded = 0;
+  for (uint32_t y = zy0 * 2; y <= zy1 * 2 + 1; ++y)
+    for (uint32_t x = zx0 * 2; x <= zx1 * 2 + 1; ++x)
+      if (mySerum.frame64[(size_t)y * W * 2 + x] == 0x5555) ++yielded;
+  CHECK(yielded > 0);
+  TearDownFrame();
+}
+
 // ---------------------------------------------------------------------------
 // Dynamic shadows on the extra plane
 // ---------------------------------------------------------------------------
@@ -1664,6 +1726,7 @@ static const TestCase kTests[] = {
      Test_PreserveStillRoundsOnBlackBackground},
     {"upscale/every_pixel_written", Test_EveryDestinationPixelIsWritten},
     {"upscale/line_doubling_replicates", Test_LineDoublingReplicates},
+    {"upscale/no_yield_to_hd_nothing", Test_LayerDoesNotYieldToHdNothing},
     {"shadow/every_dyna_layer", Test_EveryDynaLayerCastsItsShadow},
     {"shadow/claim_marker_is_not_a_layer", Test_ShadowClaimMarkerIsNotALayer},
     {"shadow/offset_modes", Test_ShadowOffsetModes},

@@ -2912,7 +2912,21 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
         src = (uint32_t)own;
       // Coverage decides only what is painted. Where the selection lands on a
       // pixel the layer does not own, the natively rendered HD content stands.
-      if (coverageProtectsHd && scaledLayerCoverage[src] == 0) continue;
+      //
+      // Unless there is no HD content there to stand. An author who puts a
+      // dynamic zone over artwork leaves the HD frame black underneath it --
+      // the zone is what covers that area, so there is nothing to draw -- and
+      // yielding to that black puts a speck along every edge the scaler
+      // rounds outwards. bdk_294 frame 689 draws its "30" in a zone whose HD
+      // frame is black across the whole footprint, and the specks landed
+      // around the sprite. Keep the layer's own pixel there: the rounding is
+      // lost at that one pixel, which is what a square edge against the
+      // artwork looks like, and nothing else changes where the HD frame does
+      // hold content.
+      if (coverageProtectsHd && scaledLayerCoverage[src] == 0) {
+        if (mySerum.frame64[(size_t)y * dstWidth + x] != 0) continue;
+        src = (uint32_t)own;
+      }
       const uint32_t dst = y * dstWidth + x;
       mySerum.frame64[dst] = mySerum.frame32[src];
       if (respectCoverage && sdDynaLayerMap && hdDynaLayerMap) {

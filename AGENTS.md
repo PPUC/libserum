@@ -488,6 +488,18 @@ decides whether the boundary rounds, the destination's own source decides
 whether the layer may paint there at all. An editor upscaling the whole frame
 cannot hit this, which is why the same frame looks right there.
 
+One exception, and it is about what "HD content" means. An author who puts a
+dynamic zone over artwork leaves the HD frame **black** across the zone's
+footprint — the zone is what covers that area, so there is nothing to draw
+there. Yielding to that black puts a speck along every edge the scaler rounds
+outwards, which is what `bdk_294` frame 689 showed around the sprite drawing
+its `30`. So where the selection lands outside the layer and the HD frame holds
+nothing at that destination, the layer keeps its own pixel instead of yielding.
+The rounding is lost at that one pixel — a square edge against the artwork —
+and nothing changes where the HD frame does hold content. Measured: 77 specks
+gone across the 20 reported frames, and not one pixel different on `afm_113b`
+(94 frames) or `im_185ve`.
+
 **Handle `kUpscaleSourceOutside`.** Outside the frame is black, not a copy of
 the edge pixel — `FrameUtil` clamped there until `db067bc`, which made content
 touching row 0 see its own colour "above" it, a false edge that trips the

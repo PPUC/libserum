@@ -121,6 +121,12 @@ A frame is rendered as two layers:
 Dynamic shadows are generated afterwards, directly on the upscaled result, so a
 shadow always follows the shape of the glyph it belongs to.
 
+Where the scaled layer rounds a pixel outwards, what shows through is the HD
+content beside it — except where the author left the HD frame black under a
+dynamic zone, which is the normal way to author one: the zone covers that area,
+so nothing is drawn there. Rounding into that black would put a speck along the
+zone's edge, so the layer keeps its own pixel there instead.
+
 A frame with no HD content at all is the whole-frame upscale of its `128x32`
 picture, so it is worth noticing when that picture has not moved. Many ROMs
 send a stream of slightly different frames that colorize to the very same

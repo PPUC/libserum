@@ -41,6 +41,7 @@ explains the rule; if the test fails, read that commit message first.
 | `preserve/rounds_on_black_background` | `cabe025` — libframeutil must be asked for plain Scale2x, or it decides first |
 | `upscale/every_pixel_written` | `5b5b0f7` — nothing else writes this plane, so a skipped pixel keeps the previous frame |
 | `upscale/line_doubling_replicates` | line doubling is exactly a 2x2 replication |
+| `upscale/no_yield_to_hd_nothing` | the layer yields a rounded pixel to HD content, but not to the black an author leaves under a dynamic zone |
 | `shadow/every_dyna_layer` | `fb5c3a1` — the layer index is bounded by the table it indexes, not by the v1 constant |
 | `shadow/claim_marker_is_not_a_layer` | `e9f8c07` — a painted shadow is not content and casts nothing |
 | `shadow/offset_modes` | native is one extra-plane pixel, proportional is two |
