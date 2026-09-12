@@ -121,19 +121,18 @@ A frame is rendered as two layers:
 Dynamic shadows are generated afterwards, directly on the upscaled result, so a
 shadow always follows the shape of the glyph it belongs to.
 
-Three algorithms are available:
+Two algorithms are available:
 
-- **Scale2x preserve** (default) — Scale2x that rounds a convex corner only
-  where the glyph is solid behind it. Reference Scale2x rounds a corner by
-  taking a neighbour, and where that neighbour is empty one of the pixel's four
-  output pixels goes with it. On a large digit that single chip is the wanted
-  rounding, and it matches the chamfer the font already draws at the top. On
-  DMD text five pixels tall, where a stroke is one pixel wide and a glyph is
-  almost nothing but corners, the same chip reads as a hole — `S`, `R` and `C`
-  stop being readable.
+- **Scale2x** (default) — a convex corner is rounded only where the glyph is
+  solid behind it. Reference Scale2x rounds every corner by taking a neighbour,
+  and where that neighbour is empty one of the pixel's four output pixels goes
+  with it. On a large digit that single chip is the wanted rounding, and it
+  matches the chamfer the font already draws at the top. On DMD text five pixels
+  tall, where a stroke is one pixel wide and a glyph is almost nothing but
+  corners, the same chip reads as a hole — `S`, `R` and `C` stop being readable.
 
-  The two are told apart by the three source pixels *behind* the corner: they
-  carry the glyph's own shade exactly when it is at least two pixels thick
+  The two cases are told apart by the three source pixels *behind* the corner:
+  they carry the glyph's own shade exactly when it is at least two pixels thick
   there. A large glyph rounds; a one-pixel stroke never can, so it is kept
   whole. Testing only the diagonal is not enough — a diagonal stroke has a lit
   diagonal neighbour by definition, and small curved letters were chipped
@@ -144,15 +143,19 @@ Three algorithms are available:
   colorization an unlit pixel is only recognizable when the palette happens to
   paint it black, so text on a coloured background would lose the protection
   entirely.
-- **Scale2x** (AdvMAME2x) — the reference algorithm, unmodified
 - **line doubling** — each source pixel becomes a `2x2` block
 
-Scale2x preserve is the default because a colorization has no way to ask for
-one algorithm on its text frames and another on its artwork — most ROMs
-alternate between the two constantly — and this one is right for both. The algorithms come from
+Reference Scale2x used to be offered beside this one. It is not any more: a
+colorization cannot ask for one algorithm on its text frames and another on its
+artwork — most ROMs alternate between the two constantly — and rounding by what
+is behind the corner is right for both, which is what reference Scale2x is not.
+
+The algorithms come from
 [libframeutil](https://github.com/PPUC/libframeutil), shared with the rest of
-the PPUC stack, and hosts can read the selection back with
-`Serum_GetScalingAlgorithm()` so any further scaling they do matches.
+the PPUC stack, where reference Scale2x remains — a host scaling a finished
+frame has no ROM frame to judge a corner against, so it is what that host has to
+use. Hosts can read libserum's selection back with `Serum_GetScalingAlgorithm()`
+and pass it straight to libframeutil, so any further scaling they do matches.
 
 ### Thousands separators
 
@@ -231,14 +234,14 @@ Each non-empty line is either a bare algorithm name or a `key: value` setting.
 `#` starts a comment:
 
 ```text
-# the reference algorithm, if you want exactly what other players produce
+# the default; line-doubling is the alternative
 scale2x
 shadow-offset: proportional
 ```
 
 | setting | values | default | meaning |
 |---|---|---|---|
-| *(bare word)* or `scaling:` | `scale2x-preserve`, `scale2x`, `line-doubling` | `scale2x-preserve` | upscaling algorithm |
+| *(bare word)* or `scaling:` | `scale2x`, `line-doubling` | `scale2x` | upscaling algorithm |
 | `shadow-offset:` | `native`, `proportional` | `native` | how far dynamic shadows are offset on the upscaled plane |
 
 `shadow-offset: native` offsets a shadow by one `256x64` pixel, which is what

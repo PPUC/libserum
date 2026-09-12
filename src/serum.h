@@ -51,19 +51,22 @@ enum  // returned by Serum_Load in *SerumVersion
 // and every cROMc older than version 8, resolve to it. Downscaling is never
 // performed by libserum.
 enum {
-  // Scale2x / AdvMAME2x edge-preserving pixel-art upscaling (default)
-  SERUM_SCALING_SCALE2X = 0,
   // replicate every source pixel into a 2x2 block
   SERUM_SCALING_LINE_DOUBLING = 1,
-  // Scale2x that never drops a pixel the source lit (default).
+  // Scale2x, rounding a convex corner only where the glyph is solid behind it
+  // (default).
   //
-  // Reference Scale2x rounds convex corners by taking a neighbour, and where
-  // that neighbour is empty the pixel is lost. DMD text is often five pixels
-  // tall, where a glyph is almost nothing but corners, and the erosion makes
-  // letters like S, R and C unreadable. This keeps the centre in that one case,
-  // so the output is the union of Scale2x and line doubling. On artwork it
-  // changes well under 1% of pixels and is invisible.
-  SERUM_SCALING_SCALE2X_PRESERVE = 2,
+  // Reference Scale2x rounds every convex corner by taking a neighbour, and
+  // where that neighbour is empty the pixel is lost. DMD text is often five
+  // pixels tall, where a glyph is almost nothing but corners, and that erosion
+  // makes letters like S, R and C unreadable. Rounding only what is backed by
+  // more of the same glyph keeps large digits' corners and small text's
+  // strokes both.
+  SERUM_SCALING_SCALE2X = 2,
+  // These are libframeutil's ScalingAlgorithm values, so a host can pass what
+  // Serum_GetScalingAlgorithm() returns straight to it and scale the way
+  // libserum did. Its value 0 is reference Scale2x, which libserum does not
+  // offer: SERUM_SCALING_SCALE2X is its Scale2xPreserve.
 };
 
 // How far a dynamic shadow is offset when the extra plane is produced by

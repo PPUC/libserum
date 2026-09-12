@@ -576,8 +576,10 @@ per colorization through `altcolor/<romname>/scaling.txt`
 values are authoritative there, matching how `pup.csv` and `skip-cromc.txt` are
 treated.
 
-`Scale2xPreserve` (value `2`) is the default. It is Scale2x with one change:
-a convex corner is rounded only where the glyph is solid behind it. Reference
+`SERUM_SCALING_SCALE2X` (value `2`) is the default and one of only two
+selectable algorithms, the other being `SERUM_SCALING_LINE_DOUBLING`. It is
+libframeutil's `Scale2xPreserve`: a convex corner is rounded only where the
+glyph is solid behind it. Reference
 Scale2x always rounds, which eats five-pixel-tall DMD text; protecting every
 lit pixel, as an earlier version did, leaves large digits square at the bottom
 while the font's own chamfer still tapers the top.
@@ -607,11 +609,17 @@ libframeutil's own `Scale2xPreserve` decides first and returns the centre
 whenever the neighbour it would have taken is colour zero, so `src == own` and
 `CornerIsSolid()` never runs — which reinstated the blocky corners on every glyph
 sitting on black: 325 of `spagb_100`'s 364 solid corners and all 174 of
-`im_185ve`'s. The enum value stays the user-facing setting, and libframeutil's
-implementation is still what hosts without a ROM frame use.
+`im_185ve`'s.
 
-Value `0` is still reference Scale2x, unmodified, for a colorization that wants
-exactly what other players produce.
+Reference Scale2x is not offered. The two values stay locked to libframeutil's
+numbering by `static_assert`, so a host can pass what
+`Serum_GetScalingAlgorithm()` returns straight through and scale the way
+libserum did; libframeutil's value `0` is its reference Scale2x, which nothing
+here selects. It remains there because a host scaling a finished frame has no
+ROM frame to judge a corner against, so it is what that host has to use.
+
+A stored value that is neither reads as `SERUM_SCALING_SCALE2X`, and
+`scaling.txt` accepts only `scale2x` and `line-doubling`.
 The selector must never be gated on extra-plane geometry: the whole-frame upscale
 runs precisely when there is no extra plane, and gating there silently made every
 `32p`-only colorization fall back to line doubling.

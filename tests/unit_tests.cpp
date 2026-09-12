@@ -84,7 +84,7 @@ static void SetUpFrame(uint32_t w = kW, uint32_t h = kH) {
 
   g_rom.assign((size_t)w * h, 0);
   romFrameForUpscale = g_rom.data();
-  runtimeScalingAlgorithm = SERUM_SCALING_SCALE2X_PRESERVE;
+  runtimeScalingAlgorithm = SERUM_SCALING_SCALE2X;
   shadowOffsetModeRuntime = SERUM_SHADOW_OFFSET_NATIVE;
   upscaleExtraFromOriginal = true;
   originalPlaneRequestedByCaller = true;
@@ -1037,14 +1037,34 @@ static void ExpectSidecar(const char* body, int algorithm, int shadowOffset) {
 // has to leave the stored choice alone rather than fall back to a default.
 static void Test_ScalingSidecarSpellings(void) {
   ExpectSidecar("scale2x\n", SERUM_SCALING_SCALE2X, -1);
-  ExpectSidecar("scale2x-preserve\n", SERUM_SCALING_SCALE2X_PRESERVE, -1);
-  ExpectSidecar("scale2xpreserve\n", SERUM_SCALING_SCALE2X_PRESERVE, -1);
-  ExpectSidecar("preserve\n", SERUM_SCALING_SCALE2X_PRESERVE, -1);
   ExpectSidecar("line-doubling\n", SERUM_SCALING_LINE_DOUBLING, -1);
   ExpectSidecar("linedoubling\n", SERUM_SCALING_LINE_DOUBLING, -1);
   ExpectSidecar("linedouble\n", SERUM_SCALING_LINE_DOUBLING, -1);
   ExpectSidecar("scaling: scale2x\n", SERUM_SCALING_SCALE2X, -1);
   ExpectSidecar("algorithm: line-doubling\n", SERUM_SCALING_LINE_DOUBLING, -1);
+}
+
+// The value libserum reports is the one a host passes to libframeutil to scale
+// the same way, so the two have to keep the same numbering -- and libserum's
+// Scale2x is libframeutil's Scale2xPreserve, not its reference Scale2x.
+static void Test_AlgorithmMatchesLibframeutil(void) {
+  SetUpFrame();
+  CHECK_EQ(SERUM_SCALING_SCALE2X,
+           (int)FrameUtil::ScalingAlgorithm::Scale2xPreserve);
+  CHECK_EQ(SERUM_SCALING_LINE_DOUBLING,
+           (int)FrameUtil::ScalingAlgorithm::LineDoubling);
+  runtimeScalingAlgorithm = SERUM_SCALING_LINE_DOUBLING;
+  CHECK_EQ((int)RuntimeScalingAlgorithm(),
+           (int)FrameUtil::ScalingAlgorithm::LineDoubling);
+  runtimeScalingAlgorithm = SERUM_SCALING_SCALE2X;
+  CHECK_EQ((int)RuntimeScalingAlgorithm(),
+           (int)FrameUtil::ScalingAlgorithm::Scale2xPreserve);
+  // Anything else is out of range and renders as the default rather than as
+  // whatever libframeutil has at that value.
+  runtimeScalingAlgorithm = 0;
+  CHECK_EQ((int)RuntimeScalingAlgorithm(),
+           (int)FrameUtil::ScalingAlgorithm::Scale2xPreserve);
+  TearDownFrame();
 }
 
 static void Test_ScalingSidecarShadowOffset(void) {
@@ -1065,6 +1085,11 @@ static void Test_ScalingSidecarTolerance(void) {
   ExpectSidecar("\tShadow-Offset :\tPROPORTIONAL \n", -1,
                 SERUM_SHADOW_OFFSET_PROPORTIONAL);
   ExpectSidecar("hq2x\n", -1, -1);
+  // The names the preserving variant of Scale2x used to have. There is one
+  // Scale2x now, so these are unknown like any other unknown value: the stored
+  // choice stands rather than being replaced.
+  ExpectSidecar("scale2x-preserve\n", -1, -1);
+  ExpectSidecar("preserve\n", -1, -1);
   ExpectSidecar("scaling: hq2x\n", -1, -1);
   ExpectSidecar("shadow-offset: sideways\n", -1, -1);
   ExpectSidecar("colours: many\n", -1, -1);
@@ -1300,6 +1325,7 @@ static const TestCase kTests[] = {
     {"colorize/dynamic_zone_active_mask",
      Test_DynamicZoneOnlyAppliesWhereActive},
     {"sidecar/spellings", Test_ScalingSidecarSpellings},
+    {"sidecar/matches_libframeutil", Test_AlgorithmMatchesLibframeutil},
     {"sidecar/shadow_offset", Test_ScalingSidecarShadowOffset},
     {"sidecar/tolerance", Test_ScalingSidecarTolerance},
     {"sparse/round_trip", Test_SparseVectorRoundTrip},

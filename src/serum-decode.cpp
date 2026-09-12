@@ -622,30 +622,25 @@ bool isoriginalfallbackrequested =
             // preferred extra resolution is unavailable
 
 uint8_t runtimeScalingAlgorithm =
-    SERUM_SCALING_SCALE2X_PRESERVE;  // cached from g_serumData.scalingAlgorithm
-                                     // at load time
+    SERUM_SCALING_SCALE2X;  // cached from g_serumData.scalingAlgorithm
+                            // at load time
 
 // The upscaling algorithm this colorization selected, as libframeutil's enum.
 static inline FrameUtil::ScalingAlgorithm RuntimeScalingAlgorithm() {
+  // Everything that is not line doubling is Scale2x, and libserum's Scale2x is
+  // libframeutil's Scale2xPreserve. Reference Scale2x is still there and is
+  // still what a host with no ROM frame has to use, but no colorization
+  // selects it any more.
   switch (runtimeScalingAlgorithm) {
     case SERUM_SCALING_LINE_DOUBLING:
       return FrameUtil::ScalingAlgorithm::LineDoubling;
-    case SERUM_SCALING_SCALE2X:
-      return FrameUtil::ScalingAlgorithm::Scale2x;
     default:
       return FrameUtil::ScalingAlgorithm::Scale2xPreserve;
   }
 }
 
 static inline const char* ScalingAlgorithmNameOf(uint8_t algorithm) {
-  switch (algorithm) {
-    case SERUM_SCALING_LINE_DOUBLING:
-      return "line-doubling";
-    case SERUM_SCALING_SCALE2X:
-      return "scale2x";
-    default:
-      return "scale2x-preserve";
-  }
+  return algorithm == SERUM_SCALING_LINE_DOUBLING ? "line-doubling" : "scale2x";
 }
 
 static inline const char* ScalingAlgorithmName() {
@@ -882,13 +877,21 @@ uint32_t masterPlaneWidth32 =
     0;  // width of the 32p master plane, even while unadvertised
 
 // The public C constants, the persisted cROMc header value and the shared
-// libframeutil selector are the same numbering. Keep them locked together.
+// libframeutil selector are the same numbering, so a host can pass what
+// Serum_GetScalingAlgorithm() returns straight to libframeutil and scale the
+// way libserum did. Keep them locked together.
+//
+// SERUM_SCALING_SCALE2X is libframeutil's Scale2xPreserve. Reference Scale2x
+// remains in libframeutil -- a host scaling a finished frame has no ROM frame
+// to judge a corner against, so it is what that host has to use -- but libserum
+// does not offer it.
 static_assert(SERUM_SCALING_LINE_DOUBLING ==
                   static_cast<int>(FrameUtil::ScalingAlgorithm::LineDoubling),
               "SERUM_SCALING_LINE_DOUBLING must match FrameUtil");
-static_assert(SERUM_SCALING_SCALE2X ==
-                  static_cast<int>(FrameUtil::ScalingAlgorithm::Scale2x),
-              "SERUM_SCALING_SCALE2X must match FrameUtil");
+static_assert(
+    SERUM_SCALING_SCALE2X ==
+        static_cast<int>(FrameUtil::ScalingAlgorithm::Scale2xPreserve),
+    "SERUM_SCALING_SCALE2X must match FrameUtil's Scale2xPreserve");
 
 uint32_t
     rotationnextabsolutetime[MAX_COLOR_ROTATIONS];  // cumulative time for the
@@ -1581,13 +1584,13 @@ static std::optional<std::string> find_case_insensitive_file(
 // Each non-empty, non-comment line is either a bare algorithm name or a
 // "key: value" setting. `#` starts a comment. Recognised:
 //
-//   scale2x-preserve | scale2x | line-doubling    upscaling algorithm
+//   scale2x | line-doubling         upscaling algorithm
 //   shadow-offset: native           dynamic shadows offset by 1 extra-plane px
 //   shadow-offset: proportional     ...by 2, keeping SD-relative thickness
 //
-// Numeric algorithm values are deliberately not accepted: the constants were
-// renumbered so Scale2x is the default, and a bare "0"/"1" in an author's file
-// would silently mean the opposite of what it used to.
+// Numeric algorithm values are deliberately not accepted: a bare "0" or "1" in
+// an author's file would name a value rather than an algorithm, and the values
+// belong to libframeutil's numbering rather than to this file.
 //
 // Anything left unset keeps the value stored in the cROMc header.
 struct ScalingSidecar {
@@ -1597,6 +1600,21 @@ struct ScalingSidecar {
     return algorithm.has_value() || shadowOffsetMode.has_value();
   }
 };
+
+// scaling.txt offers two algorithms: line-doubling and scale2x.
+static bool ParseScalingAlgorithm(const std::string& value,
+                                  std::optional<uint8_t>& out) {
+  if (value == "line-doubling" || value == "linedoubling" ||
+      value == "linedouble") {
+    out = (uint8_t)SERUM_SCALING_LINE_DOUBLING;
+    return true;
+  }
+  if (value == "scale2x") {
+    out = (uint8_t)SERUM_SCALING_SCALE2X;
+    return true;
+  }
+  return false;
+}
 
 static ScalingSidecar read_scaling_sidecar(const std::string& dirPath) {
   ScalingSidecar result;
@@ -1627,18 +1645,9 @@ static ScalingSidecar read_scaling_sidecar(const std::string& dirPath) {
     const size_t colon = trimmed.find(':');
     if (colon == std::string::npos) {
       const std::string value = to_lower(trimmed);
-      if (value == "scale2x-preserve" || value == "scale2xpreserve" ||
-          value == "preserve") {
-        result.algorithm = SERUM_SCALING_SCALE2X_PRESERVE;
-      } else if (value == "scale2x") {
-        result.algorithm = (uint8_t)SERUM_SCALING_SCALE2X;
-      } else if (value == "line-doubling" || value == "linedoubling" ||
-                 value == "linedouble") {
-        result.algorithm = (uint8_t)SERUM_SCALING_LINE_DOUBLING;
-      } else {
+      if (!ParseScalingAlgorithm(value, result.algorithm))
         Log("Ignoring unknown scaling algorithm '%s' in %s", value.c_str(),
             foundFile->c_str());
-      }
       continue;
     }
 
@@ -1654,18 +1663,9 @@ static ScalingSidecar read_scaling_sidecar(const std::string& dirPath) {
             foundFile->c_str());
       }
     } else if (key == "scaling" || key == "algorithm") {
-      if (value == "scale2x-preserve" || value == "scale2xpreserve" ||
-          value == "preserve") {
-        result.algorithm = SERUM_SCALING_SCALE2X_PRESERVE;
-      } else if (value == "scale2x") {
-        result.algorithm = (uint8_t)SERUM_SCALING_SCALE2X;
-      } else if (value == "line-doubling" || value == "linedoubling" ||
-                 value == "linedouble") {
-        result.algorithm = (uint8_t)SERUM_SCALING_LINE_DOUBLING;
-      } else {
+      if (!ParseScalingAlgorithm(value, result.algorithm))
         Log("Ignoring unknown scaling algorithm '%s' in %s", value.c_str(),
             foundFile->c_str());
-      }
     } else {
       Log("Ignoring unknown setting '%s' in %s", key.c_str(),
           foundFile->c_str());
@@ -1757,7 +1757,7 @@ void Serum_free(void) {
   isoriginalrequested = true;
   isextrarequested = false;
   isoriginalfallbackrequested = false;
-  runtimeScalingAlgorithm = SERUM_SCALING_SCALE2X_PRESERVE;
+  runtimeScalingAlgorithm = SERUM_SCALING_SCALE2X;
   upscaleExtraFromOriginal = false;
   masterPlaneWidth32 = 0;
   allocatedPlaneWidth64 = 0;
