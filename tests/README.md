@@ -79,6 +79,26 @@ and a packing bug corrupts every colorization at once.
 | `rotation/wraps_at_length` | the shift wraps at the rotation's length instead of running off its colour list |
 | `rotation/empty_slot_not_due_next` | a slot with no colours or no delay is not a rotation and is not reported as due |
 
+## Not covered yet
+
+In rough order of what is worth doing next:
+
+- **`Identify_Frame()`** — which colorization frame a ROM frame is. Attempted and
+  backed out: the fixture needs more than the render does. Two things are
+  already solved for whoever picks it up. `hashcodes` is index-based, so
+  `set()` refuses it, but `readFromCRomReader()` takes any object with a
+  `readExact()`, so an in-memory reader fills it the way the loader does. And
+  `framechecked` is allocated by each of the three load paths rather than by
+  `AllocateFrameWorkBuffers()`, because it is sized by the frame count rather
+  than by the frame — a fixture has to allocate it itself. With both of those
+  the search still answers `IDENTIFY_SAME_FRAME` for distinct frames and
+  teardown crashes, so something else in the identification state is uninitialized.
+- **Scene playback** and the finish/background flag semantics, several of which
+  have their own bug history.
+- **Sprite detection** (`Check_Spritesv2`) and `Colorize_Spritev2()`.
+- **A cROMc save/load round trip**, which needs no fixture file at all: build
+  `g_serumData`, save, reload, compare.
+
 ## Keeping the suite honest
 
 A test that cannot fail is worse than no test, so each one above was checked by
