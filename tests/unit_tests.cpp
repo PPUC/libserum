@@ -990,6 +990,217 @@ static void Test_AFullHeightRuleDoesNotDisturbTheText(void) {
   TearDownFrame();
 }
 
+// A stream of slightly different ROM frames that colorize to one picture must
+// not make the extra plane move.
+//
+// The upscale does not read only the 32p picture: the preserving corner test
+// consults the ROM frame, so the same picture upscales differently as the ROM
+// frame underneath it changes. Here the colours come from the frame's own
+// static content, so both ROM frames produce byte-identical 32p output while
+// the shades behind one corner differ -- enough to change what the corner test
+// decides, and enough to make the extra plane flicker on a static picture.
+// Fills an index-based vector the way a load does; set() refuses those.
+template <typename T>
+static void FillIndexed(SparseVector<T>& v, const std::vector<T>& bytes,
+                        size_t elementSize, uint32_t numElements) {
+  struct MemReader {
+    const uint8_t* p;
+    size_t left;
+    bool readExact(void* dst, size_t n) {
+      if (n > left) return false;
+      memcpy(dst, p, n);
+      p += n;
+      left -= n;
+      return true;
+    }
+  } reader{(const uint8_t*)bytes.data(), bytes.size() * sizeof(T)};
+  v.readFromCRomReader(elementSize, numElements, reader);
+}
+
+static void Test_UnchangedPictureKeepsItsExtraPlane(void) {
+  SetUpColorization();
+  upscaleExtraFromOriginal = true;
+  isextrarequested = false;
+  const size_t px = (size_t)kW * kCH;
+
+  // A solid block, coloured from the frame rather than from the ROM.
+  std::vector<uint16_t> colours(px, 0);
+  for (uint32_t y = 8; y < 16; ++y)
+    for (uint32_t x = 8; x < 16; ++x) colours[(size_t)y * kW + x] = 0xffff;
+  g_serumData.cframes_v2.set(kFrameId, colours.data(), px);
+
+  std::vector<uint8_t> romA(px, 0), romB(px, 0);
+  for (uint32_t y = 8; y < 16; ++y)
+    for (uint32_t x = 8; x < 16; ++x) {
+      romA[(size_t)y * kW + x] = 15;
+      romB[(size_t)y * kW + x] = 15;
+    }
+  // One shade behind a corner differs, which is what the corner test reads.
+  romB[(size_t)9 * kW + 9] = 7;
+
+  romFrameForUpscale = romA.data();
+  extraPlaneReuseCount = 0;
+  Colorize_Framev2(romA.data(), kFrameId);
+  CHECK_EQ(extraPlaneReuseCount, 0);  // nothing to reuse yet
+  CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+  std::vector<uint16_t> after(mySerum.frame64, mySerum.frame64 + px * 4);
+  const std::vector<uint16_t> sd(mySerum.frame32, mySerum.frame32 + px);
+
+  romFrameForUpscale = romB.data();
+  Colorize_Framev2(romB.data(), kFrameId);
+  CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+  CHECK_EQ(mySerum.width64, kW * 2);
+  // The 32p picture is the same...
+  for (size_t i = 0; i < px; ++i) CHECK_EQ(mySerum.frame32[i], sd[i]);
+  // ...so the extra plane is the one already derived from it.
+  CHECK_EQ(extraPlaneReuseCount, 1);
+  unsigned moved = 0;
+  for (size_t i = 0; i < px * 4; ++i)
+    if (mySerum.frame64[i] != after[i]) ++moved;
+  CHECK_EQ(moved, 0);
+
+  // A picture that does change is derived again.
+  for (uint32_t y = 8; y < 16; ++y) colours[(size_t)y * kW + 20] = 0xffff;
+  g_serumData.cframes_v2.set(kFrameId, colours.data(), px);
+  Colorize_Framev2(romB.data(), kFrameId);
+  CHECK_EQ(extraPlaneReuseCount, 1);  // derived again, not reused
+  unsigned changed = 0;
+  for (size_t i = 0; i < px * 4; ++i)
+    if (mySerum.frame64[i] != after[i]) ++changed;
+  CHECK(changed > 0);
+
+  // The plane belongs to this colorization. A load frees it, so the next one
+  // must not be told there is a plane to keep -- its own first frame would
+  // compare against a CRC taken from someone else's picture.
+  TearDownFrame();
+  CHECK(!lastUpscaledSdValid);
+}
+
+// A sprite's HD art is drawn into the extra plane after the composite, so the
+// plane stops being a pure function of the SD picture and cannot be kept.
+static void Test_HdSpriteArtBlocksReuse(void) {
+  SetUpColorization();
+  upscaleExtraFromOriginal = true;
+  isextrarequested = false;
+  const size_t px = (size_t)kW * kCH;
+
+  std::vector<uint16_t> colours(px, 0);
+  for (uint32_t y = 8; y < 16; ++y)
+    for (uint32_t x = 8; x < 16; ++x) colours[(size_t)y * kW + x] = 0xffff;
+  g_serumData.cframes_v2.set(kFrameId, colours.data(), px);
+
+  std::vector<uint8_t> rom(px, 0);
+  for (uint32_t y = 8; y < 16; ++y)
+    for (uint32_t x = 8; x < 16; ++x) rom[(size_t)y * kW + x] = 15;
+  romFrameForUpscale = rom.data();
+
+  // One sprite, HD art all through, no dynamic pixels.
+  const size_t spritePixels = (size_t)MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
+  g_serumData.nsprites = 1;
+  FillIndexed<uint8_t>(g_serumData.isextrasprite, {1}, 1, 1);
+  const std::vector<uint8_t> opaque(spritePixels, 1);
+  g_serumData.spriteoriginal_opaque.set(0, opaque.data(), spritePixels);
+  const std::vector<uint16_t> art(spritePixels, 0x1234);
+  g_serumData.spritecolored.set(0, art.data(), spritePixels);
+  g_serumData.spritemask_extra_opaque.set(0, opaque.data(), spritePixels,
+                                          &g_serumData.isextrasprite);
+  g_serumData.spritecolored_extra.set(0, art.data(), spritePixels,
+                                      &g_serumData.isextrasprite);
+
+  extraPlaneReuseCount = 0;
+  Colorize_Framev2(rom.data(), kFrameId);
+  CHECK_EQ(extraPlaneReuseCount, 0);
+  // The same picture again, with no sprite: kept, as the rule says.
+  Colorize_Framev2(rom.data(), kFrameId);
+  CHECK_EQ(extraPlaneReuseCount, 1);
+
+  // Now a frame that draws HD sprite art over the plane.
+  Colorize_Framev2(rom.data(), kFrameId);
+  CHECK_EQ(extraPlaneReuseCount, 2);
+  Colorize_Spritev2(rom.data(), 0, /*frx=*/2, /*fry=*/2, /*spx=*/0, /*spy=*/0,
+                    /*wid=*/4, /*hei=*/4, kFrameId);
+  CHECK_EQ(mySerum.frame64[2 * 2 * (kW * 2) + 2 * 2], 0x1234);
+
+  // The next frame has the same SD picture, but the plane now holds that art,
+  // so it must be derived again rather than kept.
+  Colorize_Framev2(rom.data(), kFrameId);
+  CHECK_EQ(extraPlaneReuseCount, 2);
+  CHECK(mySerum.frame64[2 * 2 * (kW * 2) + 2 * 2] != 0x1234);
+  TearDownFrame();
+}
+
+// The same SD picture can come from different frame IDs, and each ID draws its
+// own HD artwork. So which frame the plane was derived from decides nothing:
+// what matters is whether this frame composites HD content over it.
+static void Test_HdStaticFrameIsNotReused(void) {
+  SetUpColorization();
+  upscaleExtraFromOriginal = true;
+  // A colorization with HD statics is asked for its extra plane; the scaled
+  // layer composites under it.
+  isextrarequested = true;
+  const size_t px = (size_t)kW * kCH;
+  const uint32_t kPlain = kFrameId, kHdA = kFrameId + 1, kHdB = kFrameId + 2;
+
+  // All three frames colorize to the same SD picture.
+  std::vector<uint16_t> colours(px, 0);
+  for (uint32_t y = 8; y < 16; ++y)
+    for (uint32_t x = 8; x < 16; ++x) colours[(size_t)y * kW + x] = 0xffff;
+  const std::vector<uint8_t> noMask(px, 0);
+  const uint16_t noBackground[1] = {0xffff};
+  for (uint32_t id : {kPlain, kHdA, kHdB}) {
+    g_serumData.cframes_v2.set(id, colours.data(), px);
+    g_serumData.backgroundmask.set(id, noMask.data(), px);
+    g_serumData.backgroundIDs.set(id, noBackground, 1);
+  }
+
+  // Two of them carry HD artwork, and it differs; the third has none.
+  std::vector<uint8_t> hasExtra(g_serumData.nframes, 0);
+  hasExtra[kHdA] = 1;
+  hasExtra[kHdB] = 1;
+  FillIndexed<uint8_t>(g_serumData.isextraframe, hasExtra, 1,
+                       g_serumData.nframes);
+  const std::vector<uint16_t> hdA(px * 4, 0x0aaa), hdB(px * 4, 0x0bbb);
+  g_serumData.cframes_v2_extra.set(kHdA, hdA.data(), px * 4,
+                                   &g_serumData.isextraframe);
+  g_serumData.cframes_v2_extra.set(kHdB, hdB.data(), px * 4,
+                                   &g_serumData.isextraframe);
+
+  std::vector<uint8_t> rom(px, 0);
+  for (uint32_t y = 8; y < 16; ++y)
+    for (uint32_t x = 8; x < 16; ++x) rom[(size_t)y * kW + x] = 15;
+  romFrameForUpscale = rom.data();
+
+  // A pixel outside the block, so it shows HD artwork rather than scaled
+  // content.
+  const size_t probe = (size_t)2 * (kW * 2) + 2;
+  extraPlaneReuseCount = 0;
+
+  Colorize_Framev2(rom.data(), kHdA);
+  CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+  CHECK_EQ(mySerum.frame64[probe], 0x0aaa);
+  const std::vector<uint16_t> sd(mySerum.frame32, mySerum.frame32 + px);
+
+  // Another ID, the same SD picture, different artwork.
+  Colorize_Framev2(rom.data(), kHdB);
+  for (size_t i = 0; i < px; ++i) CHECK_EQ(mySerum.frame32[i], sd[i]);
+  CHECK_EQ(mySerum.frame64[probe], 0x0bbb);
+
+  // A frame with no HD content: its plane is the upscale of the SD picture
+  // alone, so the artwork composited a moment ago must be gone.
+  Colorize_Framev2(rom.data(), kPlain);
+  CHECK(mySerum.frame64[probe] != 0x0bbb);
+  CHECK(mySerum.frame64[probe] != 0x0aaa);
+
+  // And back: after a plane that *was* derived, a frame with HD artwork still
+  // composites it rather than keeping what the upscale left.
+  Colorize_Framev2(rom.data(), kHdA);
+  CHECK_EQ(mySerum.frame64[probe], 0x0aaa);
+
+  // None of these frames may have kept a plane.
+  CHECK_EQ(extraPlaneReuseCount, 0);
+  TearDownFrame();
+}
+
 // ---------------------------------------------------------------------------
 // scaling.txt, the per-colorization override
 // ---------------------------------------------------------------------------
@@ -1320,6 +1531,10 @@ static const TestCase kTests[] = {
      Test_SeparatorTouchingADigitIsNotGrown},
     {"separator/still_casts_a_shadow", Test_SeparatorStillCastsAShadow},
     {"colorize/static_content", Test_StaticContentIsTakenFromTheFrame},
+    {"colorize/unchanged_picture_keeps_extra_plane",
+     Test_UnchangedPictureKeepsItsExtraPlane},
+    {"colorize/hd_sprite_art_blocks_reuse", Test_HdSpriteArtBlocksReuse},
+    {"colorize/hd_static_frame_is_not_reused", Test_HdStaticFrameIsNotReused},
     {"colorize/background_mask", Test_BackgroundShowsThroughItsMask},
     {"colorize/dynamic_zone_colours", Test_DynamicZoneColoursComeFromItsSet},
     {"colorize/dynamic_zone_active_mask",

@@ -651,6 +651,27 @@ bool upscaleExtraFromOriginal =
     false;  // 32p content with a 64p request: libserum owns the upscale
 bool originalPlaneRequestedByCaller =
     false;  // did the caller actually ask for the 32p plane
+// CRC of the 32p plane the extra plane was last derived from, and whether the
+// extra plane still holds that derivation.
+//
+// A stream of slightly different ROM frames can colorize to one identical 32p
+// picture -- that is what a colorization is for. The upscale does not read only
+// that picture though: the preserving corner test and the separator search both
+// consult the ROM frame, so the same 32p plane upscales differently as the ROM
+// frame underneath it jitters, and a static colorized frame acquires a moving
+// extra plane. Deriving it again from a picture that has not changed can only
+// produce what is already there, or something worse.
+//
+// Compared by CRC of the finished 32p plane rather than by frame id: the same
+// static picture is reached from different frames, and it is the picture that
+// decides whether the extra plane is still right.
+uint32_t lastUpscaledSdCrc = 0;
+bool lastUpscaledSdValid = false;
+// How often the extra plane was kept rather than derived again. Reported by
+// the layer debug log, so a "the 64p frame is stuck" report can be read
+// against it.
+uint32_t extraPlaneReuseCount = 0;
+
 bool extraPlaneIsDerived =
     false;  // frame64 currently holds an upscale of frame32 rather than
             // natively rendered extra-resolution content
@@ -1742,6 +1763,8 @@ void Serum_free(void) {
   lastfound_normal = 0;
   lastfound_scene = 0;
   lastframe_full_crc_normal = 0;
+  lastUpscaledSdCrc = 0;
+  lastUpscaledSdValid = false;
   lastframe_full_crc_scene = 0;
   first_match_normal = true;
   first_match_scene = true;
@@ -2530,6 +2553,14 @@ static inline bool CornerIsSolid(const uint8_t* rom, uint32_t srcWidth,
   const uint8_t shade = rom[own];
   return rom[behind] == shade && rom[behind - (size_t)by * srcWidth] == shade &&
          rom[behind - (size_t)bx] == shade;
+}
+
+// Anything that writes the extra plane other than the upscale makes it stop
+// being a pure function of frame32, so a later frame with a matching picture
+// must derive it again instead of keeping what is there. Call this from every
+// such writer -- HD sprite art, the monochrome fallback, scene blanking.
+static inline void ExtraPlaneNoLongerDerived(void) {
+  lastUpscaledSdValid = false;
 }
 
 // Derive the 64p output plane from the already composited 32p plane.
@@ -5813,9 +5844,48 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     // background-scene pass snapshots the output plane into
     // sceneBackgroundFrame before its own pixel loop, so the plane has to be
     // complete by the time Colorize_Framev2 returns.
-    UpscaleOriginalPlaneIntoExtra(false, /*onlyCoveredPixels=*/true);
-    if (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) {
-      GenerateExtraPlaneShadows(IDfound);
+    //
+    // Unless the picture it would read has not changed since the extra plane
+    // was derived from it, and there is no HD content to composite over -- see
+    // lastUpscaledSdCrc. Then the plane still holds the answer and is left
+    // alone, shadows and all.
+    //
+    // A zeroed table makes every buffer hash alike, so an uninitialized one
+    // would not degrade the reuse test, it would make it always say "same" and
+    // freeze the extra plane on the first frame. Both load paths fill the
+    // table; this costs one branch to not depend on that.
+    if (!crc32_ready) CRC32encode();
+    const uint32_t sdCrc =
+        mySerum.frame32
+            ? crc32_fast((uint8_t*)mySerum.frame32,
+                         (uint32_t)((size_t)g_serumData.fwidth *
+                                    g_serumData.fheight * sizeof(uint16_t)))
+            : 0;
+    const bool reuseExtraPlane =
+        !isextra && lastUpscaledSdValid && sdCrc == lastUpscaledSdCrc &&
+        mySerum.frame32 && mySerum.frame64 &&
+        allocatedPlaneWidth64 == g_serumData.fwidth * 2;
+    if (reuseExtraPlane) {
+      ++extraPlaneReuseCount;
+      // Advertise what is already there. The upscale would have done this, and
+      // the caller must not be told the plane is absent because it was reused.
+      extraPlaneIsDerived = true;
+      masterPlaneWidth32 = g_serumData.fwidth;
+      mySerum.flags |= FLAG_RETURNED_64P_FRAME_OK;
+      mySerum.width64 = g_serumData.fwidth * 2;
+      if (!originalPlaneRequestedByCaller) {
+        mySerum.flags &= ~FLAG_RETURNED_32P_FRAME_OK;
+        mySerum.width32 = 0;
+      }
+    } else {
+      UpscaleOriginalPlaneIntoExtra(false, /*onlyCoveredPixels=*/true);
+      if (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) {
+        GenerateExtraPlaneShadows(IDfound);
+      }
+      // Only a derived plane can be reused; one composited over HD content is
+      // reproduced by the HD pass every frame and has nothing to keep.
+      lastUpscaledSdValid = extraPlaneIsDerived;
+      lastUpscaledSdCrc = sdCrc;
     }
     // The extra plane is finished, so the 32p plane can have its shadows
     // back. Before the upscale would have put them in the picture it reads.
@@ -5840,15 +5910,18 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
       }
       Log("Serum debug layer: frameId=%u inputCrc=%u path=%s hdStatics=%s "
           "ownedSdPixels=%u of %u width32=%u width64=%u algo=%s "
-          "shadowOffset=%s",
+          "shadowOffset=%s keptPlanes=%u",
           IDfound, g_debugCurrentInputCrc,
-          extraPlaneIsDerived ? "whole-frame-upscale" : "layer-composite",
+          reuseExtraPlane ? "kept-extra-plane"
+                          : (extraPlaneIsDerived ? "whole-frame-upscale"
+                                                 : "layer-composite"),
           isextra ? "yes" : "no", owned,
           (uint32_t)(g_serumData.fwidth * g_serumData.fheight), mySerum.width32,
           mySerum.width64, ScalingAlgorithmName(),
           shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL
               ? "proportional"
-              : "native");
+              : "native",
+          extraPlaneReuseCount);
     }
   }
 }
@@ -6030,6 +6103,13 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
       // layer. Skip only this sprite, never the rest of the frame.
       return;
     }
+    // HD sprite art lands in the extra plane after the frame composite, so
+    // from here on the plane is no longer a pure function of the SD picture:
+    // a later frame with an identical SD picture must re-derive rather than
+    // keep it, or this art stays behind after the sprite moves or goes away.
+    // Sprite detection reads the ROM frame, which is exactly what differs in
+    // the case the reuse rule exists for.
+    ExtraPlaneNoLongerDerived();
     const uint8_t* spriteExtraOpaque =
         g_serumData.spritemask_extra_opaque[nosprite];
     const uint8_t* spriteExtraDyna =
@@ -7189,6 +7269,8 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       // frames. Monochrome output never rotates, so the rotation plane is
       // neutralized rather than carried.
       UpscaleOriginalPlaneIntoExtra(false);
+      // Derived from the monochrome picture, not from a colorized frame32.
+      ExtraPlaneNoLongerDerived();
     }
     mySerum.frameID = 0xfffffffd;  // monochrome frame ID
     if (DebugTraceAllInputsEnabled()) {
@@ -7313,7 +7395,10 @@ uint32_t Serum_RenderScene(void) {
           sceneIsLastBackgroundFrame = false;
           if (mySerum.frame32)
             memset(mySerum.frame32, 0, 32 * OriginalPlaneWidth());
-          if (mySerum.frame64) memset(mySerum.frame64, 0, 64 * mySerum.width64);
+          if (mySerum.frame64) {
+            memset(mySerum.frame64, 0, 64 * mySerum.width64);
+            ExtraPlaneNoLongerDerived();
+          }
           FinishProfileRenderedFrameOperationMaybe();
           break;
 
@@ -7326,8 +7411,10 @@ uint32_t Serum_RenderScene(void) {
           } else {
             if (mySerum.frame32)
               memset(mySerum.frame32, 0, 32 * OriginalPlaneWidth());
-            if (mySerum.frame64)
+            if (mySerum.frame64) {
               memset(mySerum.frame64, 0, 64 * mySerum.width64);
+              ExtraPlaneNoLongerDerived();
+            }
             FinishProfileRenderedFrameOperationMaybe();
           }
           break;
@@ -7465,7 +7552,10 @@ uint32_t Serum_RenderScene(void) {
           sceneIsLastBackgroundFrame = false;
           if (mySerum.frame32)
             memset(mySerum.frame32, 0, 32 * OriginalPlaneWidth());
-          if (mySerum.frame64) memset(mySerum.frame64, 0, 64 * mySerum.width64);
+          if (mySerum.frame64) {
+            memset(mySerum.frame64, 0, 64 * mySerum.width64);
+            ExtraPlaneNoLongerDerived();
+          }
           break;
 
         case FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED:
@@ -7477,8 +7567,10 @@ uint32_t Serum_RenderScene(void) {
           } else {
             if (mySerum.frame32)
               memset(mySerum.frame32, 0, 32 * OriginalPlaneWidth());
-            if (mySerum.frame64)
+            if (mySerum.frame64) {
               memset(mySerum.frame64, 0, 64 * mySerum.width64);
+              ExtraPlaneNoLongerDerived();
+            }
           }
           break;
 

@@ -66,6 +66,9 @@ and a packing bug corrupts every colorization at once.
 | test | what it pins |
 |---|---|
 | `separator/envelope_follows_the_font` | how tall a separator may be follows the height of the text it belongs to; the width bound is still fixed, and the test says so |
+| `colorize/unchanged_picture_keeps_extra_plane` | an unchanged `128x32` picture keeps the `256x64` plane already derived from it, and a changed one derives again; the state does not outlive the colorization |
+| `colorize/hd_sprite_art_blocks_reuse` | HD sprite artwork lands in the plane after the composite, so the plane can no longer be kept |
+| `colorize/hd_static_frame_is_not_reused` | frames that composite HD statics each draw their own artwork, whichever frame the plane was last derived from |
 | `colorize/static_content` | a frame's own colours come through untouched, whatever the ROM shade was |
 | `colorize/background_mask` | the background image shows where its mask is set and the ROM lit nothing, and only there |
 | `colorize/dynamic_zone_colours` | inside a dynamic zone the colour comes from that zone's set, indexed by the ROM shade |
@@ -101,6 +104,11 @@ In rough order of what is worth doing next:
 - **Sprite detection** (`Check_Spritesv2`) and `Colorize_Spritev2()`.
 - **A cROMc save/load round trip**, which needs no fixture file at all: build
   `g_serumData`, save, reload, compare.
+- **Two of the `ExtraPlaneNoLongerDerived()` sites**: the monochrome fallback
+  and scene-finish blanking. Both write the extra plane outside the upscale, so
+  a later frame with a matching `frame32` must not keep it — the same rule the
+  sprite case pins, on paths that need the fixtures above. The sprite site is
+  covered; these two are reasoned, not tested.
 
 ## What must not be covered
 
@@ -120,3 +128,17 @@ follows the table, so it is caught by the sanitizer build instead.
 
 Do the same for anything added here: break the code on purpose, watch the test
 fail, then put it back.
+
+Two traps are worth knowing before trusting a red-to-green result.
+
+`make` compares timestamps to the second, so editing `src/serum-decode.cpp` and
+rebuilding within the same second can leave the previous binary in place — and a
+mutation that "passes" that way looks exactly like a mutation nothing catches.
+Delete the object file rather than touching the source:
+
+    rm -f <build dir>/CMakeFiles/serum_unit_tests.dir/tests/unit_tests.cpp.o
+
+And a rule guarded twice cannot be mutation-tested one guard at a time: each
+mutation on its own leaves the other guard standing, so both survive and look
+untested. Either construct the case where only one of them is load-bearing, or
+take the redundancy out.

@@ -502,6 +502,47 @@ an index. The composite indexes `frame32`, `sdDynaLayerMap` and
 first; using it as an index reads far out of bounds. The layer simply paints
 nothing there.
 
+### Keeping an unchanged plane
+
+A frame with no HD content anywhere is the whole-frame upscale of `frame32`, so
+when `frame32` has not changed the plane already holds the answer.
+`lastUpscaledSdCrc` holds the CRC of the finished `frame32` — taken at the end
+of the call, after every dynamic, zone, shadow and rotation entry is in it — and
+a match skips both `UpscaleOriginalPlaneIntoExtra()` and
+`GenerateExtraPlaneShadows()`, leaving `frame64` untouched. The flags and
+`width64` are still advertised, because the caller must not be told the plane is
+absent just because it was not rewritten.
+
+This is not only work saved; it is the fix for a class of visible glitch. ROMs
+send frames that differ in pixels the colorization does not use, so a stream of
+"flickering" ROM frames can colorize to one static `frame32`. The upscale reads
+the ROM frame too — `CornerIsSolid()` judges corners by ROM shade — so those
+invisible differences moved `frame64` while `frame32` stood still. Measured on
+`afm_113b` and `im_185ve`: of the single-pixel ROM changes that leave the
+frame ID and `frame32` byte-identical, 360, 320 and 96 respectively used to move
+the plane; now none do.
+
+Two things make it correct rather than merely cheap:
+
+- **Compare the finished picture, not the frame ID.** The same static picture is
+  reached through different frame IDs all the time, and a rule keyed on the ID
+  would miss exactly the streams this exists for.
+- **Only a plane that is a pure function of that picture may be kept.**
+  `lastUpscaledSdValid` follows `extraPlaneIsDerived`, and the condition also
+  requires `!isextra` for the current frame. These are not the same test: the
+  first rules out a plane that *was* composited over HD statics, the second
+  rules out a frame that *is about to* composite them. `Colorize_Spritev2()`
+  clears the flag before it draws HD sprite art for the same reason — that art
+  lands after the composite, and sprite detection reads the ROM frame, which is
+  precisely what differs here. Both guards are load-bearing and neither can be
+  mutation-tested while the other stands; `tests/README.md` says how that trap
+  reads.
+
+`Serum_free()` clears both, so one colorization can never inherit another's
+plane, and the CRC table is initialized at the comparison site — a zeroed table
+hashes every buffer alike, which would not weaken the test but invert it into
+"always the same" and freeze the plane on the first frame.
+
 ### Rotations
 
 Rotation entries are carried through the upscale using the same source selection

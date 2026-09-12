@@ -121,6 +121,24 @@ A frame is rendered as two layers:
 Dynamic shadows are generated afterwards, directly on the upscaled result, so a
 shadow always follows the shape of the glyph it belongs to.
 
+A frame with no HD content at all is the whole-frame upscale of its `128x32`
+picture, so it is worth noticing when that picture has not moved. Many ROMs
+send a stream of slightly different frames that colorize to the very same
+`128x32` result — the differences fall outside the dynamic zones, or land on
+pixels the colorization paints the same way regardless. Upscaling that picture
+again cannot improve it, and the upscale reads the ROM frame as well as the
+colorized one, so where the two disagree the `256x64` output flickers while the
+`128x32` output stands still. The finished `128x32` frame is therefore
+checksummed after every dynamic has been applied, and an unchanged checksum
+keeps the `256x64` plane exactly as it is, shadows and all. Comparing the
+finished picture rather than the frame ID matters, because the same static
+picture is often reached through different frame IDs.
+
+A plane is only kept while it remains a pure function of that picture: a frame
+that composites HD statics over it, and a sprite that draws HD artwork into it,
+both rule the plane out — sprite detection reads the ROM frame, which is
+exactly what differs in the case this rule exists for.
+
 Two algorithms are available:
 
 - **Scale2x** (default) — a convex corner is rounded only where the glyph is
