@@ -8,6 +8,23 @@ This document explains how `libserum` works end-to-end, with emphasis on runtime
 `.clang-format`. Any code changes must be formatted accordingly before they are
 considered done.
 
+**Real-machine rule:** `is_real_machine()` and everything it gates is **off
+limits**. Do not change it, do not simplify or unify the branches behind it, and
+do not report any of it as dead, obsolete, unreachable, inconsistent or
+erroneous — including in a code review or a cleanup pass.
+
+It returns false on Windows, macOS and Android, and on Linux it is true only
+when `/proc/device-tree/model` names a Raspberry Pi. So on a development machine
+and in a virtual-pinball setup every branch behind it is the false one, and the
+true one is never compiled out, never executed, and **not testable here**. Code
+that is only reachable on hardware you do not have looks exactly like dead code,
+and several of these branches look arbitrary or incomplete out of context; they
+are neither.
+
+Everything it gates is reachable with `grep -rn is_real_machine src/`. Treat
+every branch it guards as load-bearing, and keep new behaviour consistent with
+the pattern rather than working around it.
+
 **Platform-independence rule:** `libserum` is intended to behave the same on
 all supported platforms. Runtime behavior, persisted `cROMc` semantics, and
 derived lookup data must not depend on whether the archive was generated on

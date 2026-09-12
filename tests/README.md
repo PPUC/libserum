@@ -99,6 +99,14 @@ In rough order of what is worth doing next:
 - **A cROMc save/load round trip**, which needs no fixture file at all: build
   `g_serumData`, save, reload, compare.
 
+## What must not be covered
+
+Anything behind `is_real_machine()`. It is false on every platform this suite
+runs on, so those branches are unreachable here by construction — they are not
+missing coverage, and a mutation of one of them would go uncaught for the same
+reason. See the real-machine rule in `AGENTS.md`: do not test it, do not adjust
+it to make it testable, and do not report it as dead.
+
 ## Keeping the suite honest
 
 A test that cannot fail is worse than no test, so each one above was checked by
