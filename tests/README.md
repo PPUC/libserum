@@ -63,6 +63,10 @@ and a packing bug corrupts every colorization at once.
 | test | what it pins |
 |---|---|
 | `separator/envelope_follows_the_font` | how tall a separator may be follows the height of the text it belongs to; the width bound is still fixed, and the test says so |
+| `colorize/static_content` | a frame's own colours come through untouched, whatever the ROM shade was |
+| `colorize/background_mask` | the background image shows where its mask is set and the ROM lit nothing, and only there |
+| `colorize/dynamic_zone_colours` | inside a dynamic zone the colour comes from that zone's set, indexed by the ROM shade |
+| `colorize/dynamic_zone_active_mask` | a zone only applies where its active mask says so; elsewhere the static colour stands |
 | `sidecar/spellings` | every spelling `scaling.txt` advertises, bare and under `scaling:`/`algorithm:` |
 | `sidecar/shadow_offset` | `native`/`proportional`/`1`/`2`, and both keys in one file |
 | `sidecar/tolerance` | comments, blank lines, padding, case; an unknown key or value leaves the stored choice alone rather than replacing it with a default |

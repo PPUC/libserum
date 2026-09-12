@@ -704,6 +704,159 @@ static void Test_SeparatorStillCastsAShadow(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Colorize_Framev2: the render itself
+// ---------------------------------------------------------------------------
+
+// A colorization with one frame and one background, sized to the synthetic
+// frame. Everything is empty until a test fills it in.
+static const uint32_t kFrameId = 1;
+// The render is gated on the original plane being 32 rows, so these use a full
+// height rather than the shorter frame the scaling tests are built on.
+static const uint32_t kCH = 32;
+
+static void SetUpColorization(void) {
+  SetUpFrame(kW, kCH);
+  const size_t px = (size_t)kW * kCH;
+  g_serumData.nframes = 4;
+  g_serumData.nocolors = 16;
+  g_serumData.nbackgrounds = 1;
+  g_serumData.frameHasDynamic.assign(g_serumData.nframes, 0);
+  g_serumData.frameHasDynamicExtra.assign(g_serumData.nframes, 0);
+
+  const std::vector<uint16_t> noColours(px, 0);
+  g_serumData.cframes_v2.set(kFrameId, noColours.data(), px);
+  const std::vector<uint16_t> bg(px, 0);
+  g_serumData.backgroundframes_v2.set(0, bg.data(), px);
+  const std::vector<uint8_t> noMask(px, 0);
+  g_serumData.backgroundmask.set(kFrameId, noMask.data(), px);
+  // 0xffff means "no background for this frame".
+  const uint16_t noBackground[1] = {0xffff};
+  g_serumData.backgroundIDs.set(kFrameId, noBackground, 1);
+  // isextraframe is index-based and its no-data value is 0, which is already
+  // "this frame has no extra-resolution content" -- leaving it unset says that.
+
+  isoriginalrequested = true;
+  isextrarequested = false;
+  isoriginalfallbackrequested = false;
+  upscaleExtraFromOriginal = false;  // plain 32p render, no layer mode
+  mySerum.width32 = kW;
+}
+
+// Give the frame a dynamic zone: `mask` selects which pixels belong to colour
+// set `couche`, and that set maps each ROM shade to a colour.
+static void GiveFrameADynamicZone(const std::vector<uint8_t>& active,
+                                  uint8_t couche,
+                                  const std::vector<uint16_t>& shadeToColour) {
+  const size_t px = (size_t)kW * kCH;
+  g_serumData.frameHasDynamic[kFrameId] = 1;
+  const std::vector<uint8_t> couches(px, couche);
+  g_serumData.dynamasks.set(kFrameId, couches.data(), px);
+  g_serumData.dynamasks_active.set(kFrameId, active.data(), px);
+  std::vector<uint16_t> sets(
+      (size_t)MAX_DYNA_SETS_PER_FRAME_V2 * g_serumData.nocolors, 0);
+  for (uint32_t i = 0; i < g_serumData.nocolors && i < shadeToColour.size();
+       ++i)
+    sets[(size_t)couche * g_serumData.nocolors + i] = shadeToColour[i];
+  g_serumData.dyna4cols_v2.set(kFrameId, sets.data(), sets.size());
+}
+
+// Static content comes through untouched: every pixel of the 32p output is the
+// colour the colorization stored for it, whatever the ROM shade was.
+static void Test_StaticContentIsTakenFromTheFrame(void) {
+  SetUpColorization();
+  const size_t px = (size_t)kW * kCH;
+  std::vector<uint16_t> colours(px);
+  for (size_t i = 0; i < px; ++i) colours[i] = (uint16_t)(0x1000 + (i % 501));
+  g_serumData.cframes_v2.set(kFrameId, colours.data(), px);
+
+  std::vector<uint8_t> rom(px);
+  for (size_t i = 0; i < px; ++i) rom[i] = (uint8_t)(i % 16);
+  Colorize_Framev2(rom.data(), kFrameId);
+
+  for (size_t i = 0; i < px; ++i) CHECK_EQ(mySerum.frame32[i], colours[i]);
+  TearDownFrame();
+}
+
+// Where the background mask is set and the ROM lit nothing, the background
+// image shows through instead of the frame's own colour.
+static void Test_BackgroundShowsThroughItsMask(void) {
+  SetUpColorization();
+  const size_t px = (size_t)kW * kCH;
+  const std::vector<uint16_t> colours(px, 0x0111);
+  g_serumData.cframes_v2.set(kFrameId, colours.data(), px);
+  const std::vector<uint16_t> bg(px, 0x0222);
+  g_serumData.backgroundframes_v2.set(0, bg.data(), px);
+  std::vector<uint8_t> mask(px, 0);
+  for (uint32_t x = 0; x < kW; ++x) mask[(size_t)4 * kW + x] = 1;  // one row
+  g_serumData.backgroundmask.set(kFrameId, mask.data(), px);
+  const uint16_t background[1] = {0};
+  g_serumData.backgroundIDs.set(kFrameId, background, 1);
+
+  std::vector<uint8_t> rom(px, 0);
+  rom[(size_t)4 * kW + 3] = 5;  // one lit pixel on the masked row
+  Colorize_Framev2(rom.data(), kFrameId);
+
+  for (uint32_t x = 0; x < kW; ++x) {
+    const size_t i = (size_t)4 * kW + x;
+    // Lit pixels keep the frame's colour; the rest show the background.
+    CHECK_EQ(mySerum.frame32[i], x == 3 ? 0x0111 : 0x0222);
+  }
+  // A row outside the mask is the frame's colour throughout.
+  for (uint32_t x = 0; x < kW; ++x)
+    CHECK_EQ(mySerum.frame32[(size_t)5 * kW + x], 0x0111);
+  TearDownFrame();
+}
+
+// Inside a dynamic zone the colour comes from the zone's own set, indexed by
+// the ROM shade -- which is what makes the same artwork recolour as the game
+// changes the set, and what the whole dynamic-content path exists for.
+static void Test_DynamicZoneColoursComeFromItsSet(void) {
+  SetUpColorization();
+  const size_t px = (size_t)kW * kCH;
+  const std::vector<uint16_t> statics(px, 0x0111);
+  g_serumData.cframes_v2.set(kFrameId, statics.data(), px);
+
+  std::vector<uint8_t> active(px, 0);
+  for (uint32_t x = 0; x < 8; ++x) active[(size_t)6 * kW + x] = 1;
+  std::vector<uint16_t> shadeToColour(16, 0);
+  for (int i = 0; i < 16; ++i) shadeToColour[i] = (uint16_t)(0x2000 + i);
+  GiveFrameADynamicZone(active, /*couche=*/3, shadeToColour);
+
+  std::vector<uint8_t> rom(px, 0);
+  for (uint32_t x = 0; x < 8; ++x) rom[(size_t)6 * kW + x] = (uint8_t)(x + 1);
+  Colorize_Framev2(rom.data(), kFrameId);
+
+  for (uint32_t x = 0; x < 8; ++x)
+    CHECK_EQ(mySerum.frame32[(size_t)6 * kW + x], 0x2000 + x + 1);
+  // Outside the zone the static colour stands.
+  CHECK_EQ(mySerum.frame32[(size_t)6 * kW + 9], 0x0111);
+  CHECK_EQ(mySerum.frame32[(size_t)7 * kW + 0], 0x0111);
+  TearDownFrame();
+}
+
+// A dynamic zone is only dynamic where its active mask says so; elsewhere the
+// frame's static colour stands even though the zone's colour set covers it.
+static void Test_DynamicZoneOnlyAppliesWhereActive(void) {
+  SetUpColorization();
+  const size_t px = (size_t)kW * kCH;
+  const std::vector<uint16_t> statics(px, 0x0111);
+  g_serumData.cframes_v2.set(kFrameId, statics.data(), px);
+
+  std::vector<uint8_t> active(px, 0);
+  active[(size_t)6 * kW + 2] = 1;
+  std::vector<uint16_t> shadeToColour(16, 0x2222);
+  GiveFrameADynamicZone(active, /*couche=*/0, shadeToColour);
+
+  std::vector<uint8_t> rom(px, 4);  // every pixel lit, same shade
+  Colorize_Framev2(rom.data(), kFrameId);
+
+  CHECK_EQ(mySerum.frame32[(size_t)6 * kW + 2], 0x2222);
+  CHECK_EQ(mySerum.frame32[(size_t)6 * kW + 1], 0x0111);
+  CHECK_EQ(mySerum.frame32[(size_t)6 * kW + 3], 0x0111);
+  TearDownFrame();
+}
+
+// ---------------------------------------------------------------------------
 // scaling.txt, the per-colorization override
 // ---------------------------------------------------------------------------
 
@@ -1001,6 +1154,11 @@ static const TestCase kTests[] = {
     {"separator/touching_a_digit_is_not_grown",
      Test_SeparatorTouchingADigitIsNotGrown},
     {"separator/still_casts_a_shadow", Test_SeparatorStillCastsAShadow},
+    {"colorize/static_content", Test_StaticContentIsTakenFromTheFrame},
+    {"colorize/background_mask", Test_BackgroundShowsThroughItsMask},
+    {"colorize/dynamic_zone_colours", Test_DynamicZoneColoursComeFromItsSet},
+    {"colorize/dynamic_zone_active_mask",
+     Test_DynamicZoneOnlyAppliesWhereActive},
     {"sidecar/spellings", Test_ScalingSidecarSpellings},
     {"sidecar/shadow_offset", Test_ScalingSidecarShadowOffset},
     {"sidecar/tolerance", Test_ScalingSidecarTolerance},
