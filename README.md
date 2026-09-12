@@ -291,6 +291,33 @@ read and the values stored in the `*.cROMc` are used.
 Downscaling is not done by `libserum`. A `128x32` request against `64p`-only
 content still returns the `64p` frame, and the host decides how to reduce it.
 
+## Frames that are already on the display
+
+A colorization exists to turn many slightly different ROM frames into one
+stable picture, and it routinely does so through different frame IDs: the same
+score screen is matched by a dozen frames that differ only where the
+colorization paints the same colour anyway. Each of those used to be announced
+as a new frame, so the host re-rendered a picture it already had, sent it to the
+display again, and anything keyed on a frame arriving started over.
+
+A finished frame — statics, dynamics, sprites and all — that comes out as the
+picture already on the display is therefore reported as `IDENTIFY_SAME_FRAME`,
+the same answer the identifier already gives when the ROM frame itself has not
+changed. The comparison is made after rendering, because that is the only point
+at which "the caller would see the same thing" is knowable, and it covers both
+planes, since which one a host reads is its choice.
+
+Three things make a frame news whatever it looks like, and none of them is
+suppressed: a scene, which has to keep being driven; a trigger fired by this
+frame, which is an event in itself; and a frame that paints identically but
+carries different colour rotations, which has to be announced or its colours
+would never start moving.
+
+Measured on real colorizations, over the single-pixel ROM changes that colorize
+to an identical picture: 2077 and 2062 of them on two `afm_113b` frames, and
+393 on `im_185ve`, are no longer announced. On a 94-frame `afm_113b` stream,
+where every colorized frame genuinely differs, nothing changes at all.
+
 ## Rotation Scenes
 
 For `Serum v2`, scenes are authored in `*.pup.csv`.

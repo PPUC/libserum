@@ -1278,6 +1278,89 @@ static void Test_HdStaticFrameIsNotReused(void) {
   TearDownFrame();
 }
 
+// A colorization turns many slightly different ROM frames into one stable
+// picture, often through different frame ids. Announcing each of them as a new
+// frame makes the host re-render and re-send a picture it already has, and
+// restarts anything keyed on a frame arriving.
+static void Test_FinishedFrameAlreadyOnDisplay(void) {
+  SetUpFrame(128, 32);
+  const size_t px = (size_t)g_serumData.fwidth * g_serumData.fheight;
+  mySerum.flags = FLAG_RETURNED_32P_FRAME_OK;
+  mySerum.width32 = g_serumData.fwidth;
+  mySerum.width64 = 0;
+  memset(mySerum.frame32, 0, px * sizeof(uint16_t));
+  mySerum.frame32[10] = 0x1234;
+  // The rotation tables are the caller's copy, which a load allocates; the
+  // frame fixture does not.
+  const size_t rotWords = MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION;
+  mySerum.rotations32 = (uint16_t*)calloc(rotWords, sizeof(uint16_t));
+  mySerum.rotations64 = (uint16_t*)calloc(rotWords, sizeof(uint16_t));
+
+  // Nothing has been reported yet, so the first frame is always news.
+  lastReportedOutputValid = false;
+  CHECK(!FinishedFrameIsAlreadyOnDisplay(true, CurrentOutputCrc(),
+                                         CurrentRotationCrc()));
+
+  lastReportedOutputCrc = CurrentOutputCrc();
+  lastReportedRotationCrc = CurrentRotationCrc();
+  lastReportedOutputValid = true;
+
+  // The same picture and the same rotations: the caller has it already.
+  CHECK(FinishedFrameIsAlreadyOnDisplay(true, CurrentOutputCrc(),
+                                        CurrentRotationCrc()));
+
+  // One pixel different is a different picture.
+  mySerum.frame32[10] = 0x1235;
+  CHECK(!FinishedFrameIsAlreadyOnDisplay(true, CurrentOutputCrc(),
+                                         CurrentRotationCrc()));
+  mySerum.frame32[10] = 0x1234;
+  CHECK(FinishedFrameIsAlreadyOnDisplay(true, CurrentOutputCrc(),
+                                        CurrentRotationCrc()));
+
+  // The same picture that rotates differently still has to be announced, or
+  // its colours would never start moving.
+  mySerum.rotations32[0] = 4;
+  mySerum.rotations32[1] = 100;
+  CHECK(!FinishedFrameIsAlreadyOnDisplay(true, CurrentOutputCrc(),
+                                         CurrentRotationCrc()));
+  mySerum.rotations32[0] = 0;
+  mySerum.rotations32[1] = 0;
+  CHECK(FinishedFrameIsAlreadyOnDisplay(true, CurrentOutputCrc(),
+                                        CurrentRotationCrc()));
+
+  // A scene frame or a frame that fired a trigger is news whatever it looks
+  // like.
+  CHECK(!FinishedFrameIsAlreadyOnDisplay(false, CurrentOutputCrc(),
+                                         CurrentRotationCrc()));
+
+  // The 64p plane counts as well: a frame whose 32p picture repeats can still
+  // differ at 64p, and which plane the caller reads is its choice.
+  mySerum.flags = FLAG_RETURNED_32P_FRAME_OK | FLAG_RETURNED_64P_FRAME_OK;
+  mySerum.width64 = g_serumData.fwidth * 2;
+  memset(mySerum.frame64, 0, px * 4 * sizeof(uint16_t));
+  lastReportedOutputCrc = CurrentOutputCrc();
+  lastReportedRotationCrc = CurrentRotationCrc();
+  CHECK(FinishedFrameIsAlreadyOnDisplay(true, CurrentOutputCrc(),
+                                        CurrentRotationCrc()));
+  mySerum.frame64[7] = 0x0abc;
+  CHECK(!FinishedFrameIsAlreadyOnDisplay(true, CurrentOutputCrc(),
+                                         CurrentRotationCrc()));
+
+  // And what a scene left on the display ends the record: the next frame that
+  // happens to match it must still be announced.
+  mySerum.frame64[7] = 0;
+  CHECK(FinishedFrameIsAlreadyOnDisplay(true, CurrentOutputCrc(),
+                                        CurrentRotationCrc()));
+  ReportedOutputNoLongerOnDisplay();
+  CHECK(!FinishedFrameIsAlreadyOnDisplay(true, CurrentOutputCrc(),
+                                         CurrentRotationCrc()));
+  free(mySerum.rotations32);
+  free(mySerum.rotations64);
+  mySerum.rotations32 = NULL;
+  mySerum.rotations64 = NULL;
+  TearDownFrame();
+}
+
 // ---------------------------------------------------------------------------
 // scaling.txt, the per-colorization override
 // ---------------------------------------------------------------------------
@@ -1613,6 +1696,8 @@ static const TestCase kTests[] = {
      Test_UnchangedPictureKeepsItsExtraPlane},
     {"colorize/hd_sprite_art_blocks_reuse", Test_HdSpriteArtBlocksReuse},
     {"colorize/hd_static_frame_is_not_reused", Test_HdStaticFrameIsNotReused},
+    {"colorize/finished_frame_already_on_display",
+     Test_FinishedFrameAlreadyOnDisplay},
     {"colorize/background_mask", Test_BackgroundShowsThroughItsMask},
     {"colorize/dynamic_zone_colours", Test_DynamicZoneColoursComeFromItsSet},
     {"colorize/dynamic_zone_active_mask",

@@ -70,6 +70,7 @@ and a packing bug corrupts every colorization at once.
 | `colorize/unchanged_picture_keeps_extra_plane` | an unchanged `128x32` picture keeps the `256x64` plane already derived from it, and a changed one derives again; the state does not outlive the colorization |
 | `colorize/hd_sprite_art_blocks_reuse` | HD sprite artwork lands in the plane after the composite, so the plane can no longer be kept |
 | `colorize/hd_static_frame_is_not_reused` | frames that composite HD statics each draw their own artwork, whichever frame the plane was last derived from |
+| `colorize/finished_frame_already_on_display` | a finished frame that matches the picture the caller already has is not announced again — unless it rotates differently, or a scene or trigger makes it news whatever it looks like |
 | `colorize/static_content` | a frame's own colours come through untouched, whatever the ROM shade was |
 | `colorize/background_mask` | the background image shows where its mask is set and the ROM lit nothing, and only there |
 | `colorize/dynamic_zone_colours` | inside a dynamic zone the colour comes from that zone's set, indexed by the ROM shade |
@@ -105,6 +106,12 @@ In rough order of what is worth doing next:
 - **Sprite detection** (`Check_Spritesv2`) and `Colorize_Spritev2()`.
 - **A cROMc save/load round trip**, which needs no fixture file at all: build
   `g_serumData`, save, reload, compare.
+- **The wiring of `FinishedFrameIsAlreadyOnDisplay()` into
+  `Serum_ColorizeWithMetadatav2Internal()`.** The decision itself is covered;
+  reaching it from a colorize call needs a frame to be identified, so it is
+  blocked on the same fixture as `Identify_Frame()` above. Until then the
+  scene and trigger conditions are checked only as arguments to the predicate,
+  not as the states that produce them.
 - **Two of the `ExtraPlaneNoLongerDerived()` sites**: the monochrome fallback
   and scene-finish blanking. Both write the extra plane outside the upscale, so
   a later frame with a matching `frame32` must not keep it — the same rule the

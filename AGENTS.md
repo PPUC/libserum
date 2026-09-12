@@ -543,6 +543,37 @@ plane, and the CRC table is initialized at the comparison site — a zeroed tabl
 hashes every buffer alike, which would not weaken the test but invert it into
 "always the same" and freeze the plane on the first frame.
 
+### Reporting a frame that is already on the display
+
+`lastReportedOutputCrc` and `lastReportedRotationCrc` hold what the caller was
+last told about. At the end of `Serum_ColorizeWithMetadatav2Internal()`, once
+the frame is finished, `FinishedFrameIsAlreadyOnDisplay()` decides whether
+announcing it would tell the caller anything, and when it would not the call
+returns `IDENTIFY_SAME_FRAME` with `mySerum.frameID` left at
+`IDENTIFY_NO_FRAME` — the same shape as the identifier's own same-frame answer,
+so a host needs to understand nothing new.
+
+The comparison has to be after the render, not after identification: two frame
+ids routinely colorize to the same picture, which is the entire point of a
+colorization, and only the finished frame says so.
+
+What must never be suppressed, and is checked before the CRCs:
+
+- **A scene**, in any form — `sceneFrameRequested`, `rotationIsScene`, a scene
+  running (`sceneFrameCount`), or an end hold pending. A scene advances because
+  the caller keeps being driven; tell it nothing and the scene stalls.
+- **A trigger**, tested after the existing suppression block leaves
+  `mySerum.triggerID` at `0xffffffff`. A trigger is an event in itself, not a
+  property of the picture.
+- **Different rotations behind the same picture.** The rotation tables are part
+  of the record for exactly this: colours that repaint identically now but are
+  about to start moving have to be announced, or they never will.
+
+`ReportedOutputNoLongerOnDisplay()` ends the record wherever something other
+than the renderer puts a picture on the display — scene-finish blanking and the
+monochrome/unknown-frame path. Without it the caller would be told "nothing
+changed" while the display holds the black a finished scene left behind.
+
 ### Rotations
 
 Rotation entries are carried through the upscale using the same source selection

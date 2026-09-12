@@ -667,6 +667,25 @@ bool originalPlaneRequestedByCaller =
 // decides whether the extra plane is still right.
 uint32_t lastUpscaledSdCrc = 0;
 bool lastUpscaledSdValid = false;
+// The picture and the rotation tables last reported to the caller as a new
+// frame.
+//
+// A colorization exists to turn many slightly different ROM frames into one
+// stable picture, and it routinely does so through different frame ids: the
+// same score screen is matched by a dozen frames that differ only where the
+// colorization paints the same colour anyway. Every one of them is currently
+// reported as a new frame, so the host re-renders it and sends it to the
+// display, and anything keyed on a frame arriving starts over.
+//
+// Compared after the frame is finished -- statics, dynamics, sprites and all
+// -- because that is the only point at which "the caller would see the same
+// thing" is knowable.
+uint32_t lastReportedOutputCrc = 0;
+uint32_t lastReportedRotationCrc = 0;
+bool lastReportedOutputValid = false;
+// How often a finished frame turned out to be the picture already on display.
+// Reported by the layer debug log.
+uint32_t sameOutputReportCount = 0;
 // How often the extra plane was kept rather than derived again. Reported by
 // the layer debug log, so a "the 64p frame is stuck" report can be read
 // against it.
@@ -1797,6 +1816,10 @@ void Serum_free(void) {
   lastframe_full_crc_normal = 0;
   lastUpscaledSdCrc = 0;
   lastUpscaledSdValid = false;
+  lastReportedOutputCrc = 0;
+  lastReportedRotationCrc = 0;
+  lastReportedOutputValid = false;
+  sameOutputReportCount = 0;
   lastframe_full_crc_scene = 0;
   first_match_normal = true;
   first_match_scene = true;
@@ -2679,6 +2702,14 @@ static inline bool CornerIsSolid(const uint8_t* rom, uint32_t srcWidth,
 // such writer -- HD sprite art, the monochrome fallback, scene blanking.
 static inline void ExtraPlaneNoLongerDerived(void) {
   lastUpscaledSdValid = false;
+}
+
+// The planes no longer hold the frame that was last reported, so the next
+// frame that matches that record must still be announced -- otherwise the
+// caller would be told nothing changed while the display holds something else
+// entirely, such as the black a finished scene left behind.
+static inline void ReportedOutputNoLongerOnDisplay(void) {
+  lastReportedOutputValid = false;
 }
 
 // Derive the 64p output plane from the already composited 32p plane.
@@ -6709,6 +6740,58 @@ static void ForceNormalFrameRefreshAfterSceneEnd(void) {
   lastframe_full_crc_normal = 0xffffffff;
 }
 
+// What the caller would see of this frame, and what would drive its rotations.
+//
+// Both planes, because which one the caller reads is its choice, and a frame
+// whose 32p picture repeats can still have a different 64p one. The two CRCs
+// are mixed rather than added so that a change in one cannot cancel a change
+// in the other.
+static uint32_t CurrentOutputCrc(void) {
+  if (!crc32_ready) CRC32encode();
+  uint32_t crc = 0;
+  if ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) && mySerum.frame32 &&
+      mySerum.width32)
+    crc =
+        crc32_fast((uint8_t*)mySerum.frame32,
+                   (uint32_t)((size_t)mySerum.width32 * 32 * sizeof(uint16_t)));
+  if ((mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) && mySerum.frame64 &&
+      mySerum.width64)
+    crc ^= crc32_fast(
+               (uint8_t*)mySerum.frame64,
+               (uint32_t)((size_t)mySerum.width64 * 64 * sizeof(uint16_t))) *
+           2654435761u;
+  return crc;
+}
+
+// The rotation tables behind that picture. Two frames can paint identically
+// and rotate differently, and the caller has to hear about the second one or
+// its colours would never start moving.
+static uint32_t CurrentRotationCrc(void) {
+  if (!crc32_ready) CRC32encode();
+  const uint32_t bytes =
+      MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * sizeof(uint16_t);
+  uint32_t crc = 0;
+  if ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) && mySerum.rotations32)
+    crc = crc32_fast((uint8_t*)mySerum.rotations32, bytes);
+  if ((mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) && mySerum.rotations64)
+    crc ^= crc32_fast((uint8_t*)mySerum.rotations64, bytes) * 2654435761u;
+  return crc;
+}
+
+// Would announcing this finished frame tell the caller anything it does not
+// already have on its display?
+//
+// `reportable` is everything that makes a frame news whatever it looks like: a
+// scene, which has to keep being driven, and a trigger, which is an event in
+// itself. Given those, the picture and the rotation tables together decide.
+static bool FinishedFrameIsAlreadyOnDisplay(bool reportable, uint32_t outputCrc,
+                                            uint32_t rotationCrc) {
+  if (!reportable) return false;
+  if (!lastReportedOutputValid) return false;
+  return outputCrc == lastReportedOutputCrc &&
+         rotationCrc == lastReportedRotationCrc;
+}
+
 static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                                                      bool sceneFrameRequested,
                                                      uint32_t knownFrameId) {
@@ -7279,6 +7362,41 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
           mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
         mySerum.triggerID = 0xffffffff;
 
+      // The frame is finished. If it came out as the picture already on
+      // display, say so instead of announcing a new one: the caller then keeps
+      // what it has, sends nothing to the display, and anything keyed on a
+      // frame arriving -- a rotation part way through its cycle, most of all --
+      // carries on rather than starting over.
+      //
+      // Only where reporting it cannot mean anything else. A scene has to keep
+      // being driven whatever it currently looks like, a trigger fired by this
+      // frame is news in itself, and a frame that paints identically but
+      // rotates differently has to be announced or its colours would never
+      // start moving.
+      const uint32_t outputCrc = CurrentOutputCrc();
+      const uint32_t rotationCrc = CurrentRotationCrc();
+      const bool mayReportSameOutput =
+          !sceneFrameRequested && !rotationIsScene && sceneFrameCount == 0 &&
+          sceneEndHoldUntilMs == 0 && mySerum.triggerID == 0xffffffff;
+      if (FinishedFrameIsAlreadyOnDisplay(mayReportSameOutput, outputCrc,
+                                          rotationCrc)) {
+        ++sameOutputReportCount;
+        if (DebugTraceAllInputsEnabled()) {
+          Log("Serum debug input result: api=v2 inputCrc=%u "
+              "result=same-output frameId=%u",
+              g_debugCurrentInputCrc, lastfound);
+        }
+        // The same answer the identifier gives when the ROM frame itself has
+        // not changed, so a caller needs to understand nothing new.
+        mySerum.frameID = IDENTIFY_NO_FRAME;
+        if (g_profileDynamicHotPaths) ++g_profileSameFrameReturns;
+        MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
+        return IDENTIFY_SAME_FRAME;
+      }
+      lastReportedOutputCrc = outputCrc;
+      lastReportedRotationCrc = rotationCrc;
+      lastReportedOutputValid = true;
+
       MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
       return (uint32_t)mySerum.rotationtimer |
              (rotationIsScene ? FLAG_RETURNED_V2_SCENE : 0);
@@ -7294,6 +7412,10 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   }
 
   mySerum.triggerID = 0xffffffff;
+
+  // Whatever this path puts on the display, it is not the frame the record
+  // describes.
+  ReportedOutputNoLongerOnDisplay();
 
   if (monochromeMode || monochromePaletteMode ||
       (ignoreUnknownFramesTimeout && firstUnknownFrameTimestamp > 0 &&
@@ -7517,6 +7639,7 @@ uint32_t Serum_RenderScene(void) {
             memset(mySerum.frame64, 0, 64 * mySerum.width64);
             ExtraPlaneNoLongerDerived();
           }
+          ReportedOutputNoLongerOnDisplay();
           FinishProfileRenderedFrameOperationMaybe();
           break;
 
@@ -7533,6 +7656,7 @@ uint32_t Serum_RenderScene(void) {
               memset(mySerum.frame64, 0, 64 * mySerum.width64);
               ExtraPlaneNoLongerDerived();
             }
+            ReportedOutputNoLongerOnDisplay();
             FinishProfileRenderedFrameOperationMaybe();
           }
           break;
@@ -7674,6 +7798,7 @@ uint32_t Serum_RenderScene(void) {
             memset(mySerum.frame64, 0, 64 * mySerum.width64);
             ExtraPlaneNoLongerDerived();
           }
+          ReportedOutputNoLongerOnDisplay();
           break;
 
         case FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED:
@@ -7689,6 +7814,7 @@ uint32_t Serum_RenderScene(void) {
               memset(mySerum.frame64, 0, 64 * mySerum.width64);
               ExtraPlaneNoLongerDerived();
             }
+            ReportedOutputNoLongerOnDisplay();
           }
           break;
 
