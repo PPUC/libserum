@@ -737,10 +737,20 @@ static const uint32_t kSeparatorMaxColumnSamples = 256;
 // one, and only its descending columns are taken.
 static const uint32_t kSeparatorMaxComponent = 12;
 uint16_t* separatorColors = NULL;
-// Lit rows per colour per column, kSeparatorMaxColors + 1 blocks of W. A
-// count rather than a flag so a column that runs the height of the display
-// can be told from one that carries a glyph. See kSeparatorMaxTextRows.
+// Per colour per column, kSeparatorMaxColors + 1 blocks of W each.
+//
+// separatorColPresent holds the longest UNBROKEN run of rows the colour covers
+// in that column, not how many rows it covers in total. Two lines of text in
+// one dynamic zone put two runs in the same column, and their total would be
+// twice a glyph -- so a threshold built on it would grow with every line added
+// and stop telling a divider from the text. The longest run is the height of
+// one glyph however many lines there are.
+//
+// The other two are what it takes to measure that in the single row-major pass:
+// the run in progress, and the last row the colour was seen in.
 uint8_t* separatorColPresent = NULL;
+uint8_t* separatorColRun = NULL;
+uint8_t* separatorColLastRow = NULL;
 uint16_t* separatorTextFrame = NULL;  // the 32p plane, lit dynamic pixels only
 // The ROM frame currently being colorized, or NULL outside a colorize call.
 //
@@ -1709,6 +1719,8 @@ void Serum_free(void) {
   Free_element((void**)&separatorDescends);
   Free_element((void**)&separatorColors);
   Free_element((void**)&separatorColPresent);
+  Free_element((void**)&separatorColRun);
+  Free_element((void**)&separatorColLastRow);
   Free_element((void**)&separatorTextFrame);
   romFrameForUpscale = NULL;
   Free_element((void**)&upscaleIndexPlane);
@@ -2219,6 +2231,9 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
           separatorColors[ncolors] = c;
           memset(counts + (size_t)ncolors * H, 0, H * sizeof(uint32_t));
           memset(separatorColPresent + (size_t)ncolors * W, 0, W);
+          memset(separatorColRun + (size_t)ncolors * W, 0, W);
+          // 0xff so the first row seen cannot look like a continuation.
+          memset(separatorColLastRow + (size_t)ncolors * W, 0xff, W);
           ncolors++;
         }
         lastColor = c;
@@ -2226,8 +2241,16 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
       }
       counts[(size_t)slot * H + y]++;
       {
-        uint8_t& rows = separatorColPresent[(size_t)slot * W + x];
-        if (rows < 255) ++rows;
+        const size_t at = (size_t)slot * W + x;
+        uint8_t& longest = separatorColPresent[at];
+        uint8_t& running = separatorColRun[at];
+        uint8_t& lastRow = separatorColLastRow[at];
+        running =
+            (lastRow != 0xff && (uint32_t)lastRow + 1 == y && running < 255)
+                ? (uint8_t)(running + 1)
+                : 1;
+        lastRow = (uint8_t)y;
+        if (running > longest) longest = running;
       }
     }
   }
@@ -2269,11 +2292,11 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
       // far taller than the glyphs around it -- what remains on either side is
       // a line of one type size, which is what has a bottom line worth finding.
       //
-      // Measured against the upper quartile of the run's column heights, not
-      // its median. A glyph's vertical strokes cover its whole height while the
-      // columns between them cover two or three rows, so the median describes
-      // the gaps inside the letters rather than the letters, and cutting on it
-      // would cut the letters apart.
+      // Measured against the upper quartile of the columns' glyph heights, not
+      // their median. A glyph's vertical strokes cover its whole height while
+      // the columns between them cover two or three rows, so the median
+      // describes the gaps inside the letters rather than the letters, and
+      // cutting on it would cut the letters apart.
       uint32_t heights[kSeparatorMaxColumnSamples];
       uint32_t nHeights = 0;
       for (uint32_t x = runStart;
@@ -3094,6 +3117,10 @@ static bool AllocateFrameWorkBuffers(void) {
   separatorColors = (uint16_t*)malloc(kSeparatorMaxColors * sizeof(uint16_t));
   separatorColPresent =
       (uint8_t*)malloc((size_t)kSeparatorMaxColors * g_serumData.fwidth);
+  separatorColRun =
+      (uint8_t*)malloc((size_t)kSeparatorMaxColors * g_serumData.fwidth);
+  separatorColLastRow =
+      (uint8_t*)malloc((size_t)kSeparatorMaxColors * g_serumData.fwidth);
   separatorTextFrame = (uint16_t*)malloc(px * sizeof(uint16_t));
   upscaleIndexPlane = (uint32_t*)malloc(px * 4 * sizeof(uint32_t));
   AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
@@ -3108,8 +3135,9 @@ static bool AllocateFrameWorkBuffers(void) {
   return frameshape && scaledLayerCoverage && frameLayerCoverage &&
          separatorMask && separatorFreeFrame && separatorRowCount &&
          separatorDescends && separatorColors && separatorColPresent &&
-         separatorTextFrame && separatorOnlyFrame && upscaleIndexPlane &&
-         sdDynaLayerMap && sdShadowColour && sdShadowClaim && hdDynaLayerMap;
+         separatorColRun && separatorColLastRow && separatorTextFrame &&
+         separatorOnlyFrame && upscaleIndexPlane && sdDynaLayerMap &&
+         sdShadowColour && sdShadowClaim && hdDynaLayerMap;
 }
 
 static Serum_Frame_Struc* Serum_LoadConcentratePrepared(

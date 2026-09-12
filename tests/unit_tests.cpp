@@ -601,6 +601,60 @@ static void Test_IdenticalSeparatorsAreTreatedAlike(void) {
   TearDownFrame();
 }
 
+// Two lines of scores in one dynamic zone, with a border down the side.
+//
+// The column heights are measured as the longest UNBROKEN run of rows, not as
+// how many rows the colour covers in that column. A second line puts a second
+// run in the same columns, so a total would be two glyphs tall and the
+// allowance built on it would grow with every line added -- at three lines it
+// would exceed the display and nothing could ever be cut out. The longest run
+// is one glyph however many lines there are.
+static void Test_TwoLinesOfScoresKeepTheirSeparators(void) {
+  SetUpFrame(64, 32);
+  const uint16_t kText = 0xffe0;
+  const auto lit = [&](uint32_t x, uint32_t y) {
+    Px(x, y, 15, kText);
+    sdDynaLayerMap[(size_t)y * 64 + x] = 1;
+  };
+  // Two lines of four digits with a comma, one above the other, a blank row
+  // between them, in the same zone.
+  for (int line = 0; line < 2; ++line) {
+    const uint32_t top = 4 + (uint32_t)line * 12, bottom = top + 7;
+    uint32_t x = 4;
+    for (int d = 0; d < 4; ++d, x += 3)
+      for (uint32_t y = top; y <= bottom; ++y) {
+        lit(x, y);
+        lit(x + 1, y);
+      }
+    lit(x + 1, bottom - 1);
+    lit(x + 1, bottom);
+    lit(x, bottom + 1);
+    x += 3;
+    for (int d = 0; d < 4; ++d, x += 3)
+      for (uint32_t y = top; y <= bottom; ++y) {
+        lit(x, y);
+        lit(x + 1, y);
+      }
+  }
+  separatorMaskValid = false;
+  const uint32_t both = DetectSeparators(64, 32);
+  CHECK_EQ(both, 2);  // one separator on each line
+
+  // A border down the side in the same shade and the same zone, placed just
+  // inside the spacing that still reads as one run -- otherwise it would not
+  // join the text and the test would prove nothing.
+  uint32_t lastLit = 0;
+  for (uint32_t x = 0; x < 64; ++x)
+    for (uint32_t y = 0; y < 32; ++y)
+      if (sdDynaLayerMap[(size_t)y * 64 + x]) lastLit = x;
+  const uint32_t borderX = lastLit + 2;
+  CHECK(borderX < 64);
+  for (uint32_t y = 0; y < 32; ++y) lit(borderX, y);
+  separatorMaskValid = false;
+  CHECK_EQ(DetectSeparators(64, 32), both);
+  TearDownFrame();
+}
+
 // A separator is scaled as a shape of its own, not stamped flat.
 //
 // A comma is a body with its tail one row down and one column across, and the
@@ -1177,6 +1231,8 @@ static const TestCase kTests[] = {
      Test_SeparatorEnvelopeFollowsTheFont},
     {"separator/identical_treated_alike",
      Test_IdenticalSeparatorsAreTreatedAlike},
+    {"separator/two_lines_keep_separators",
+     Test_TwoLinesOfScoresKeepTheirSeparators},
     {"separator/full_height_rule_ignored",
      Test_AFullHeightRuleDoesNotDisturbTheText},
     {"separator/scaled_as_its_own_shape", Test_SeparatorIsScaledAsItsOwnShape},

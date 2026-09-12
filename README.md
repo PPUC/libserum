@@ -190,6 +190,13 @@ around them are therefore cut out, and the run is judged in the pieces that
 remain: a rule, a border, a divider or a bargraph standing beside a score is not
 part of it.
 
+A column's height is the longest unbroken run of rows it covers, not how many
+rows it covers in total. Two lines of scores in one dynamic zone put two runs in
+the same columns, and a total would make every column twice a glyph tall — so
+the allowance would grow with each line added, and at three lines it would
+exceed the display and nothing could be cut out at all. The longest run is one
+glyph however many lines share the zone.
+
 On `im_185ve` the same `4,076,760` sits two columns from the same divider on two
 frames — close enough for the spacing to join them — as dynamic content on one
 and static on the other. Its commas were filtered on one frame and not the other
