@@ -6,3 +6,5 @@ CMakeSettings.json
 # fetched by platforms/<platform>/<arch>/external.sh
 /external/
 /third-party/include/FrameUtil.h
+# local notes, deliberately not shared
+AGENTS.local.md
