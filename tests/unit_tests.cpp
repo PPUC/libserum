@@ -856,6 +856,33 @@ static void Test_DynamicZoneOnlyAppliesWhereActive(void) {
   TearDownFrame();
 }
 
+// A full-height rule beside the text must not change what the text does.
+//
+// The column group's row band is the rows it covers without a break, so a
+// column running the height of the display stretches that band over the whole
+// frame, drags the bottom line down to the last row, and the text sharing the
+// group stops being recognized as text. im_185ve frames 506 and 507 show the
+// same score beside the same divider -- dynamic in one, static in the other --
+// and the thousands separators were filtered in one frame and not the other.
+static void Test_AFullHeightRuleDoesNotDisturbTheText(void) {
+  SetUpFrame(64, 32);
+  BuildScoreWithComma(1);
+  separatorMaskValid = false;
+  const uint32_t withoutRule = DetectSeparators(64, 32);
+  CHECK(withoutRule > 0);
+
+  // Put a divider two columns to the right of the number, running top to
+  // bottom, in the same shade.
+  const uint32_t ruleX = g_commaBodyX + 14;
+  for (uint32_t y = 0; y < 32; ++y) {
+    Px(ruleX, y, 15, 0xffe0);
+    sdDynaLayerMap[(size_t)y * 64 + ruleX] = 1;
+  }
+  separatorMaskValid = false;
+  CHECK_EQ(DetectSeparators(64, 32), withoutRule);
+  TearDownFrame();
+}
+
 // ---------------------------------------------------------------------------
 // scaling.txt, the per-colorization override
 // ---------------------------------------------------------------------------
@@ -1150,6 +1177,8 @@ static const TestCase kTests[] = {
      Test_SeparatorEnvelopeFollowsTheFont},
     {"separator/identical_treated_alike",
      Test_IdenticalSeparatorsAreTreatedAlike},
+    {"separator/full_height_rule_ignored",
+     Test_AFullHeightRuleDoesNotDisturbTheText},
     {"separator/scaled_as_its_own_shape", Test_SeparatorIsScaledAsItsOwnShape},
     {"separator/touching_a_digit_is_not_grown",
      Test_SeparatorTouchingADigitIsNotGrown},

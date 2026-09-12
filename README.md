@@ -181,6 +181,20 @@ search to find text with, so the search needs something to separate text from
 what surrounds it. Within one shade the structure is unmistakable, and a
 separator is then a narrow column carrying pixels below the text's bottom line.
 
+The run of columns that spacing alone would join is then narrowed to the line of
+text inside it. A separator sits within a number, three digits from its end, so
+only that number can say where the bottom line is — and a group's row band is
+the rows it covers without a break, so anything taller pulled into the group
+pulls the bottom line with it. Columns more than twice the height of the glyphs
+around them are therefore cut out, and the run is judged in the pieces that
+remain: a rule, a border, a divider or a bargraph standing beside a score is not
+part of it.
+
+On `im_185ve` the same `4,076,760` sits two columns from the same divider on two
+frames — close enough for the spacing to join them — as dynamic content on one
+and static on the other. Its commas were filtered on one frame and not the other
+until the divider stopped counting as part of the number.
+
 The ROM rather than the output because everything the search asks is a question
 about shape, and the shape is in the ROM. A score font drawn as a colour
 gradient is one glyph there; in the finished picture each of its colours is a

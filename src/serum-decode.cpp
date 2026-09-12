@@ -711,11 +711,36 @@ uint8_t* separatorDescends = NULL;
 static const uint32_t kSeparatorMaxColors = 64;
 // Pixels a bottom line must carry before it can hold a separator.
 static const uint32_t kSeparatorMinBaseline = 8;
+// How much taller than the glyphs a column may be before it is something else
+// standing next to them. A run of text is one type size:
+// digits of a score all cover much the same rows, and a comma covers fewer. A
+// rule, a border, a divider or a bargraph covers far more, and it is not part
+// of the number it happens to touch.
+//
+// This is what bounds the window each separator is judged in. A thousands
+// separator sits inside a number, three digits from its end, so only the
+// number around it can say where the bottom line is -- and a group's row band
+// is the rows it covers without a break, so anything taller dragged into the
+// group drags the bottom line with it.
+//
+// im_185ve frames 506 and 507 show the same "4,076,760" beside the same
+// divider, two columns past the last digit and well inside the gap that still
+// reads as one run. In 507 the divider is dynamic content and joined the score:
+// the band became the full height of the display, the bottom line became the
+// last row with one pixel on it, and neither comma was filtered. In 506 the
+// divider is static, the band was the score's own six rows, and both were.
+static const uint32_t kSeparatorHeightMultiple = 2;
+// Enough columns to take a representative height from; a run wider than this
+// is sampled by its first entries, which is plenty for a line of text.
+static const uint32_t kSeparatorMaxColumnSamples = 256;
 // A separator is a handful of pixels; anything that grows past this is not
 // one, and only its descending columns are taken.
 static const uint32_t kSeparatorMaxComponent = 12;
 uint16_t* separatorColors = NULL;
-uint8_t* separatorColPresent = NULL;  // kSeparatorMaxColors blocks of W
+// Lit rows per colour per column, kSeparatorMaxColors + 1 blocks of W. A
+// count rather than a flag so a column that runs the height of the display
+// can be told from one that carries a glyph. See kSeparatorMaxTextRows.
+uint8_t* separatorColPresent = NULL;
 uint16_t* separatorTextFrame = NULL;  // the 32p plane, lit dynamic pixels only
 // The ROM frame currently being colorized, or NULL outside a colorize call.
 //
@@ -2200,7 +2225,10 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
         lastSlot = slot;
       }
       counts[(size_t)slot * H + y]++;
-      separatorColPresent[(size_t)slot * W + x] = 1;
+      {
+        uint8_t& rows = separatorColPresent[(size_t)slot * W + x];
+        if (rows < 255) ++rows;
+      }
     }
   }
 
@@ -2224,181 +2252,215 @@ static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
     // so grouping by column gap keeps each decision local to its own text.
     const uint8_t* const present = separatorColPresent + (size_t)ci * W;
     const uint32_t kGap = 2;  // columns of space that still read as one run
-    for (uint32_t g0 = 0; g0 < W; ++g0) {
-      if (!present[g0]) continue;
-      uint32_t g1 = g0;
+    for (uint32_t runStart = 0; runStart < W; ++runStart) {
+      if (!present[runStart]) continue;
+      uint32_t runEnd = runStart;
       for (;;) {
-        uint32_t probe = g1 + 1;
-        while (probe < W && probe - g1 <= kGap && !present[probe]) probe++;
-        if (probe < W && probe - g1 <= kGap && present[probe])
-          g1 = probe;
+        uint32_t probe = runEnd + 1;
+        while (probe < W && probe - runEnd <= kGap && !present[probe]) probe++;
+        if (probe < W && probe - runEnd <= kGap && present[probe])
+          runEnd = probe;
         else
           break;
       }
 
-      uint32_t* const groupRow =
-          separatorRowCount + (size_t)kSeparatorMaxColors * H;
-      for (uint32_t y = 0; y < H; ++y) {
-        uint32_t n = 0;
-        for (uint32_t x = g0; x <= g1; ++x)
-          if (f[(size_t)y * W + x] == color) n++;
-        groupRow[y] = n;
-      }
+      // The run reaches as far as the spacing allows; the window a separator is
+      // judged in is narrower than that. Cut the run wherever a column stands
+      // far taller than the glyphs around it -- what remains on either side is
+      // a line of one type size, which is what has a bottom line worth finding.
+      //
+      // Measured against the upper quartile of the run's column heights, not
+      // its median. A glyph's vertical strokes cover its whole height while the
+      // columns between them cover two or three rows, so the median describes
+      // the gaps inside the letters rather than the letters, and cutting on it
+      // would cut the letters apart.
+      uint32_t heights[kSeparatorMaxColumnSamples];
+      uint32_t nHeights = 0;
+      for (uint32_t x = runStart;
+           x <= runEnd && nHeights < kSeparatorMaxColumnSamples; ++x)
+        if (present[x]) heights[nHeights++] = present[x];
+      std::sort(heights, heights + nHeights);
+      const uint32_t glyphHeight = nHeights ? heights[nHeights * 3 / 4] : 0;
+      const uint32_t maxColumnHeight = glyphHeight * kSeparatorHeightMultiple;
 
-      for (uint32_t r0 = 0; r0 < H; ++r0) {
-        if (!groupRow[r0]) continue;
-        uint32_t r1 = r0;
-        while (r1 + 1 < H && groupRow[r1 + 1]) r1++;
+      uint32_t g0 = runStart;
+      while (g0 <= runEnd) {
+        while (g0 <= runEnd && (!present[g0] || present[g0] > maxColumnHeight))
+          ++g0;
+        if (g0 > runEnd) break;
+        uint32_t g1 = g0;
+        for (uint32_t x = g0; x <= runEnd; ++x) {
+          if (present[x] && present[x] <= maxColumnHeight)
+            g1 = x;
+          else if (present[x])
+            break;  // a taller column ends the window
+        }
 
-        // The bottom line, found by walking up from the last row while each
-        // row holds far less than the one above it. That is what a descender
-        // row looks like: a comma or two against a row of glyph bottoms.
-        //
-        // Comparing neighbouring rows rather than each row against the band's
-        // peak matters for stability. The peak moves whenever anything in the
-        // run is occluded -- a ball crossing "BALL SAVE" hides part of the
-        // text, the peak drops, the bottom line moves up, and rows that are
-        // really glyph bottoms start looking like descenders. The marks then
-        // flicker on and off as the object passes, in text whose own pixels
-        // never changed. A ratio between adjacent rows moves with both rows
-        // at once, so it stays put.
-        uint32_t baseline = r1;
-        while (baseline > r0 &&
-               groupRow[baseline] * 3 <= groupRow[baseline - 1])
-          --baseline;
+        uint32_t* const groupRow =
+            separatorRowCount + (size_t)kSeparatorMaxColors * H;
+        for (uint32_t y = 0; y < H; ++y) {
+          uint32_t n = 0;
+          for (uint32_t x = g0; x <= g1; ++x)
+            if (f[(size_t)y * W + x] == color) n++;
+          groupRow[y] = n;
+        }
 
-        // A separator only means something under a line of text, and a line of
-        // text puts a row of glyph bottoms on its bottom line. Dithered
-        // artwork does not: a scattered colour carries one to five pixels per
-        // row, and at that size the ratio above is decided by noise -- one
-        // frame of an animation reads as having a descender and the next does
-        // not, so marks flicker on artwork that never moved. Real text clears
-        // this comfortably: the score on spagb_100 frame 241 has 23.
-        if (baseline < r1 && groupRow[baseline] >= kSeparatorMinBaseline) {
-          // How far above the bottom line a separator may start scales with
-          // the band: a comma is roughly a quarter of the text height, so a
-          // tall font draws a taller comma.
-          const uint32_t maxRise = std::max(1u, (r1 - r0 + 1) / 4);
-          const uint32_t highest =
-              (baseline >= maxRise) ? baseline - maxRise : 0;
-          uint8_t* const descends = separatorDescends;
-          memset(descends + g0, 0, g1 - g0 + 1);
-          for (uint32_t x = g0; x <= g1; ++x) {
-            bool below = false;
-            for (uint32_t y = baseline + 1; y <= r1; ++y)
-              if (f[(size_t)y * W + x] == color) {
-                below = true;
-                break;
-              }
-            if (!below) continue;
-            uint32_t topRow = r1;
-            for (uint32_t y = r0; y <= r1; ++y)
-              if (f[(size_t)y * W + x] == color) {
-                topRow = y;
-                break;
-              }
-            if (topRow >= highest) descends[x] = 1;
-          }
+        for (uint32_t r0 = 0; r0 < H; ++r0) {
+          if (!groupRow[r0]) continue;
+          uint32_t r1 = r0;
+          while (r1 + 1 < H && groupRow[r1 + 1]) r1++;
 
-          for (uint32_t c0 = g0; c0 <= g1; ++c0) {
-            if (!descends[c0]) continue;
-            uint32_t c1 = c0;
-            while (c1 + 1 <= g1 && descends[c1 + 1]) c1++;
-            if (c1 - c0 + 1 <= 2) {  // wider than this is not a separator
-              // ...and a separator is short. Height was unbounded, so a tall
-              // thin feature whose column runs below the bottom line
-              // qualified as one enormous comma: the highlighted border down
-              // the side of a tab on Iron Man's settings screen was marked
-              // over its whole length and line doubled, which made it read as
-              // blocks instead of a scaled edge.
-              //
-              // Judged on the whole run, not per column: dropping a single
-              // column would split a run too wide to be a separator into
-              // narrow pieces that then qualify, marking more rather than
-              // less.
-              uint32_t top = r1, bottom = r0;
-              for (uint32_t x = c0; x <= c1; ++x)
-                for (uint32_t y = r0; y <= r1; ++y)
-                  if (f[(size_t)y * W + x] == color) {
-                    if (y < top) top = y;
-                    if (y > bottom) bottom = y;
-                  }
-              if (bottom - top + 1 <= maxRise + 2) {
-                // Take the whole separator, not just the columns that reach
-                // below the bottom line. A comma's body sits ON that line, so
-                // its column does not descend and was left out -- half of it
-                // stamped back and half of it scaled, meeting at a corner.
-                // Both halves have to be in the mask for it to be scaled as
-                // one shape.
+          // The bottom line, found by walking up from the last row while each
+          // row holds far less than the one above it. That is what a descender
+          // row looks like: a comma or two against a row of glyph bottoms.
+          //
+          // Comparing neighbouring rows rather than each row against the band's
+          // peak matters for stability. The peak moves whenever anything in the
+          // run is occluded -- a ball crossing "BALL SAVE" hides part of the
+          // text, the peak drops, the bottom line moves up, and rows that are
+          // really glyph bottoms start looking like descenders. The marks then
+          // flicker on and off as the object passes, in text whose own pixels
+          // never changed. A ratio between adjacent rows moves with both rows
+          // at once, so it stays put.
+          uint32_t baseline = r1;
+          while (baseline > r0 &&
+                 groupRow[baseline] * 3 <= groupRow[baseline - 1])
+            --baseline;
+
+          // A separator only means something under a line of text, and a line
+          // of text puts a row of glyph bottoms on its bottom line. Dithered
+          // artwork does not: a scattered colour carries one to five pixels per
+          // row, and at that size the ratio above is decided by noise -- one
+          // frame of an animation reads as having a descender and the next does
+          // not, so marks flicker on artwork that never moved. Real text clears
+          // this comfortably: the score on spagb_100 frame 241 has 23.
+          if (baseline < r1 && groupRow[baseline] >= kSeparatorMinBaseline) {
+            // How far above the bottom line a separator may start scales with
+            // the band: a comma is roughly a quarter of the text height, so a
+            // tall font draws a taller comma.
+            const uint32_t maxRise = std::max(1u, (r1 - r0 + 1) / 4);
+            const uint32_t highest =
+                (baseline >= maxRise) ? baseline - maxRise : 0;
+            uint8_t* const descends = separatorDescends;
+            memset(descends + g0, 0, g1 - g0 + 1);
+            for (uint32_t x = g0; x <= g1; ++x) {
+              bool below = false;
+              for (uint32_t y = baseline + 1; y <= r1; ++y)
+                if (f[(size_t)y * W + x] == color) {
+                  below = true;
+                  break;
+                }
+              if (!below) continue;
+              uint32_t topRow = r1;
+              for (uint32_t y = r0; y <= r1; ++y)
+                if (f[(size_t)y * W + x] == color) {
+                  topRow = y;
+                  break;
+                }
+              if (topRow >= highest) descends[x] = 1;
+            }
+
+            for (uint32_t c0 = g0; c0 <= g1; ++c0) {
+              if (!descends[c0]) continue;
+              uint32_t c1 = c0;
+              while (c1 + 1 <= g1 && descends[c1 + 1]) c1++;
+              if (c1 - c0 + 1 <= 2) {  // wider than this is not a separator
+                // ...and a separator is short. Height was unbounded, so a tall
+                // thin feature whose column runs below the bottom line
+                // qualified as one enormous comma: the highlighted border down
+                // the side of a tab on Iron Man's settings screen was marked
+                // over its whole length and line doubled, which made it read as
+                // blocks instead of a scaled edge.
                 //
-                // Grown by connection rather than guessed: the pixel beside a
-                // comma's tail is as often a digit as it is the comma. If the
-                // shape it grows into does not fit what a separator can be, it
-                // is something else -- a descender joined to its letter -- and
-                // only the descending columns are taken, as before.
-                uint32_t comp[kSeparatorMaxComponent];
-                uint32_t n = 0;
-                bool tooBig = false;
-                const auto push = [&](uint32_t idx) {
-                  for (uint32_t k = 0; k < n; ++k)
-                    if (comp[k] == idx) return;
-                  if (n == kSeparatorMaxComponent) {
-                    tooBig = true;
-                    return;
-                  }
-                  comp[n++] = idx;
-                };
+                // Judged on the whole run, not per column: dropping a single
+                // column would split a run too wide to be a separator into
+                // narrow pieces that then qualify, marking more rather than
+                // less.
+                uint32_t top = r1, bottom = r0;
                 for (uint32_t x = c0; x <= c1; ++x)
                   for (uint32_t y = r0; y <= r1; ++y)
-                    if (f[(size_t)y * W + x] == color)
-                      push((uint32_t)(y * W + x));
-                for (uint32_t k = 0; k < n && !tooBig; ++k) {
-                  const uint32_t cx = comp[k] % W, cy = comp[k] / W;
-                  for (int oy = -1; oy <= 1; ++oy)
-                    for (int ox = -1; ox <= 1; ++ox) {
-                      const int32_t nx = (int32_t)cx + ox,
-                                    ny = (int32_t)cy + oy;
-                      if (nx < 0 || ny < 0 || nx >= (int32_t)W ||
-                          ny >= (int32_t)H)
-                        continue;
-                      if (f[(size_t)ny * W + nx] == color)
-                        push((uint32_t)(ny * W + nx));
+                    if (f[(size_t)y * W + x] == color) {
+                      if (y < top) top = y;
+                      if (y > bottom) bottom = y;
                     }
-                }
-                uint32_t cminx = W, cmaxx = 0, cminy = H, cmaxy = 0;
-                for (uint32_t k = 0; k < n; ++k) {
-                  const uint32_t cx = comp[k] % W, cy = comp[k] / W;
-                  if (cx < cminx) cminx = cx;
-                  if (cx > cmaxx) cmaxx = cx;
-                  if (cy < cminy) cminy = cy;
-                  if (cy > cmaxy) cmaxy = cy;
-                }
-                const bool wholeShapeFits = !tooBig &&
-                                            (cmaxx - cminx + 1) <= 2 &&
-                                            (cmaxy - cminy + 1) <= maxRise + 2;
-                const auto mark = [&](uint32_t idx) {
-                  if (separatorMask[idx]) return;
-                  separatorMask[idx] = 1;
-                  if (separatorPixelCount < kSeparatorMaxPixels)
-                    separatorPixels[separatorPixelCount++] = idx;
-                };
-                if (wholeShapeFits) {
-                  for (uint32_t k = 0; k < n; ++k) mark(comp[k]);
-                } else {
+                if (bottom - top + 1 <= maxRise + 2) {
+                  // Take the whole separator, not just the columns that reach
+                  // below the bottom line. A comma's body sits ON that line, so
+                  // its column does not descend and was left out -- half of it
+                  // stamped back and half of it scaled, meeting at a corner.
+                  // Both halves have to be in the mask for it to be scaled as
+                  // one shape.
+                  //
+                  // Grown by connection rather than guessed: the pixel beside a
+                  // comma's tail is as often a digit as it is the comma. If the
+                  // shape it grows into does not fit what a separator can be,
+                  // it is something else -- a descender joined to its letter --
+                  // and only the descending columns are taken, as before.
+                  uint32_t comp[kSeparatorMaxComponent];
+                  uint32_t n = 0;
+                  bool tooBig = false;
+                  const auto push = [&](uint32_t idx) {
+                    for (uint32_t k = 0; k < n; ++k)
+                      if (comp[k] == idx) return;
+                    if (n == kSeparatorMaxComponent) {
+                      tooBig = true;
+                      return;
+                    }
+                    comp[n++] = idx;
+                  };
                   for (uint32_t x = c0; x <= c1; ++x)
                     for (uint32_t y = r0; y <= r1; ++y)
                       if (f[(size_t)y * W + x] == color)
-                        mark((uint32_t)(y * W + x));
+                        push((uint32_t)(y * W + x));
+                  for (uint32_t k = 0; k < n && !tooBig; ++k) {
+                    const uint32_t cx = comp[k] % W, cy = comp[k] / W;
+                    for (int oy = -1; oy <= 1; ++oy)
+                      for (int ox = -1; ox <= 1; ++ox) {
+                        const int32_t nx = (int32_t)cx + ox,
+                                      ny = (int32_t)cy + oy;
+                        if (nx < 0 || ny < 0 || nx >= (int32_t)W ||
+                            ny >= (int32_t)H)
+                          continue;
+                        if (f[(size_t)ny * W + nx] == color)
+                          push((uint32_t)(ny * W + nx));
+                      }
+                  }
+                  uint32_t cminx = W, cmaxx = 0, cminy = H, cmaxy = 0;
+                  for (uint32_t k = 0; k < n; ++k) {
+                    const uint32_t cx = comp[k] % W, cy = comp[k] / W;
+                    if (cx < cminx) cminx = cx;
+                    if (cx > cmaxx) cmaxx = cx;
+                    if (cy < cminy) cminy = cy;
+                    if (cy > cmaxy) cmaxy = cy;
+                  }
+                  const bool wholeShapeFits =
+                      !tooBig && (cmaxx - cminx + 1) <= 2 &&
+                      (cmaxy - cminy + 1) <= maxRise + 2;
+                  const auto mark = [&](uint32_t idx) {
+                    if (separatorMask[idx]) return;
+                    separatorMask[idx] = 1;
+                    if (separatorPixelCount < kSeparatorMaxPixels)
+                      separatorPixels[separatorPixelCount++] = idx;
+                  };
+                  if (wholeShapeFits) {
+                    for (uint32_t k = 0; k < n; ++k) mark(comp[k]);
+                  } else {
+                    for (uint32_t x = c0; x <= c1; ++x)
+                      for (uint32_t y = r0; y <= r1; ++y)
+                        if (f[(size_t)y * W + x] == color)
+                          mark((uint32_t)(y * W + x));
+                  }
+                  found++;
                 }
-                found++;
               }
+              c0 = c1;
             }
-            c0 = c1;
           }
+          r0 = r1;
         }
-        r0 = r1;
+        g0 = g1 + 1;
       }
-      g0 = g1;
+      runStart = runEnd;
     }
   }
   return found;

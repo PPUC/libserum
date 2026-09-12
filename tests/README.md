@@ -50,6 +50,7 @@ explains the rule; if the test fails, read that commit message first.
 | `rotation/no_rotation_writes_both_halves` | `effef51` — the offset is written too, or the output differs between runs |
 | `hash/frame_dword_slot_uses_high_bits` | Fibonacci hashing carries its entropy upwards |
 | `separator/not_fused_with_digit` | a thousands separator is taken out of the picture before scaling, so it cannot bridge to the digit |
+| `separator/full_height_rule_ignored` | a column far taller than the glyphs around it is cut out of the text run, so a divider beside a score cannot change whether its separators are found |
 | `separator/scaled_as_its_own_shape` | it is put back by scaling it by itself, so its own diagonal rounds instead of being stamped flat |
 | `separator/touching_a_digit_is_not_grown` | one drawn hard against a digit keeps its square tail rather than growing into the digit |
 | `separator/still_casts_a_shadow` | it carries its dyna layer, so the shadow pass still gives it a shadow, following the rounded shape |
