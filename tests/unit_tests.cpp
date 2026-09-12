@@ -655,6 +655,59 @@ static void Test_TwoLinesOfScoresKeepTheirSeparators(void) {
   TearDownFrame();
 }
 
+// The left-hand zone of a Stern SAM ROM: up to four player scores stacked in
+// one dynamic zone, the active player's drawn larger than the rest, the value
+// of the current shot under it, and the divider down the side of the zone.
+//
+// Everything here shares one column group, so every one of these has to keep
+// its separator: several lines, more than one type size among them, and a
+// full-height rule alongside.
+static void Test_SternStyleScoreColumnKeepsEverySeparator(void) {
+  SetUpFrame(64, 32);
+  const uint16_t kText = 0xffe0;
+  const auto lit = [&](uint32_t x, uint32_t y) {
+    Px(x, y, 15, kText);
+    sdDynaLayerMap[(size_t)y * 64 + x] = 1;
+  };
+  // One line of "N,NNN": four digits with a separator after the first.
+  const auto line = [&](uint32_t top, uint32_t height, uint32_t stroke) {
+    const uint32_t bottom = top + height - 1;
+    uint32_t x = 3;
+    for (uint32_t dx = 0; dx < stroke; ++dx)
+      for (uint32_t y = top; y <= bottom; ++y) lit(x + dx, y);
+    x += stroke + 1;
+    lit(x, bottom - 1);
+    lit(x, bottom);
+    lit(x - 1, bottom + 1);  // the separator's tail
+    x += 2;
+    for (int d = 0; d < 3; ++d, x += stroke + 1)
+      for (uint32_t dx = 0; dx < stroke; ++dx)
+        for (uint32_t y = top; y <= bottom; ++y) lit(x + dx, y);
+  };
+  // Spaced as a display spaces them: a separator hangs one row below its line,
+  // and the next line starts below that.
+  line(1, 5, 2);   // player 1
+  line(8, 5, 2);   // player 2
+  line(15, 7, 3);  // the active player, drawn larger
+  line(25, 5, 2);  // the value of the current shot
+
+  separatorMaskValid = false;
+  const uint32_t found = DetectSeparators(64, 32);
+  CHECK_EQ(found, 4);  // one per line, the larger one included
+
+  // ...and the divider down the side changes none of it.
+  uint32_t lastLit = 0;
+  for (uint32_t x = 0; x < 64; ++x)
+    for (uint32_t y = 0; y < 32; ++y)
+      if (sdDynaLayerMap[(size_t)y * 64 + x]) lastLit = x;
+  const uint32_t dividerX = lastLit + 2;
+  CHECK(dividerX < 64);
+  for (uint32_t y = 0; y < 32; ++y) lit(dividerX, y);
+  separatorMaskValid = false;
+  CHECK_EQ(DetectSeparators(64, 32), found);
+  TearDownFrame();
+}
+
 // A separator is scaled as a shape of its own, not stamped flat.
 //
 // A comma is a body with its tail one row down and one column across, and the
@@ -1231,6 +1284,8 @@ static const TestCase kTests[] = {
      Test_SeparatorEnvelopeFollowsTheFont},
     {"separator/identical_treated_alike",
      Test_IdenticalSeparatorsAreTreatedAlike},
+    {"separator/stern_score_column",
+     Test_SternStyleScoreColumnKeepsEverySeparator},
     {"separator/two_lines_keep_separators",
      Test_TwoLinesOfScoresKeepTheirSeparators},
     {"separator/full_height_rule_ignored",

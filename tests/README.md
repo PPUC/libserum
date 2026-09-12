@@ -50,6 +50,7 @@ explains the rule; if the test fails, read that commit message first.
 | `rotation/no_rotation_writes_both_halves` | `effef51` — the offset is written too, or the output differs between runs |
 | `hash/frame_dword_slot_uses_high_bits` | Fibonacci hashing carries its entropy upwards |
 | `separator/not_fused_with_digit` | a thousands separator is taken out of the picture before scaling, so it cannot bridge to the digit |
+| `separator/stern_score_column` | the left zone of a Stern SAM ROM — four player scores stacked in one zone, the active one drawn larger, the shot value under it, a divider alongside — every line keeps its separator |
 | `separator/two_lines_keep_separators` | two lines of scores in one zone keep theirs, with a border alongside — the column height is the longest unbroken run, so it does not grow with the number of lines |
 | `separator/full_height_rule_ignored` | a column far taller than the glyphs around it is cut out of the text run, so a divider beside a score cannot change whether its separators are found |
 | `separator/scaled_as_its_own_shape` | it is put back by scaling it by itself, so its own diagonal rounds instead of being stamped flat |
