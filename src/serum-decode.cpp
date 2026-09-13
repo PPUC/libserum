@@ -627,6 +627,8 @@ uint8_t runtimeScalingAlgorithm =
 
 // The upscaling algorithm this colorization selected, as libframeutil's enum.
 static inline FrameUtil::ScalingAlgorithm RuntimeScalingAlgorithm() {
+  // A real machine, scales force line doubling for memory savings and performance.
+  if (is_real_machine()) return FrameUtil::ScalingAlgorithm::LineDoubling;
   // Everything that is not line doubling is Scale2x, and libserum's Scale2x is
   // libframeutil's Scale2xPreserve. Reference Scale2x is still there and is
   // still what a host with no ROM frame has to use, but no colorization
@@ -2271,6 +2273,8 @@ static bool SeparatorWindowUnchanged(const uint16_t* f, uint32_t W, uint32_t H,
 }
 
 static uint32_t DetectSeparators(uint32_t W, uint32_t H) {
+  // Not needed on a real machine with line doubling for better performance.
+  if (is_real_machine()) return 0;
   if (!separatorMask || !mySerum.frame32) return 0;
   if (!separatorRowCount || !separatorDescends || !separatorColors) return 0;
   if (!separatorColPresent) return 0;
@@ -6426,6 +6430,9 @@ SERUM_API void Serum_SetGenerateCRomC(bool generate) {
 
 SERUM_API uint8_t Serum_GetScalingAlgorithm(void) {
   SERUM_API_GUARD_START("Serum_GetScalingAlgorithm")
+  // A real machine renders with line doubling whatever the colorization
+  // selected to save memory and improve performance.
+  if (is_real_machine()) return (uint8_t)SERUM_SCALING_LINE_DOUBLING;
   // Report what the colorization asks for, not what this load ended up using.
   // runtimeScalingAlgorithm is additionally forced off when there is no 2x
   // extra plane to render into, but a caller scaling the finished frame for

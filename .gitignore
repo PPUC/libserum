@@ -1,4 +1,5 @@
 /build/
+/build-*/
 /.vs/
 /.vscode/
 /out/
@@ -8,3 +9,5 @@ CMakeSettings.json
 /third-party/include/FrameUtil.h
 # local notes, deliberately not shared
 AGENTS.local.md
+*.cROMc
+*.cRZ
