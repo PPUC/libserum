@@ -627,7 +627,8 @@ uint8_t runtimeScalingAlgorithm =
 
 // The upscaling algorithm this colorization selected, as libframeutil's enum.
 static inline FrameUtil::ScalingAlgorithm RuntimeScalingAlgorithm() {
-  // A real machine, scales force line doubling for memory savings and performance.
+  // A real machine, scales force line doubling for memory savings and
+  // performance.
   if (is_real_machine()) return FrameUtil::ScalingAlgorithm::LineDoubling;
   // Everything that is not line doubling is Scale2x, and libserum's Scale2x is
   // libframeutil's Scale2xPreserve. Reference Scale2x is still there and is

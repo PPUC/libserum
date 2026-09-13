@@ -335,7 +335,7 @@ Format of a PUP scene line:
 2: number of frames
 3: duration of each frame
 4: 0 - not interruptable, 1 - interruptable by frame match or PUP event
-5: 0 - start immediately, replacing the triggering frame, 1 - start after frame duration
+5: 0 - start after frame duration, 1 - start immediately, replacing the triggering frame
    background scenes do not replace the triggering frame; instead the first
    background scene frame is prepared immediately and the triggering normal
    frame still renders in the foreground
@@ -367,6 +367,40 @@ Format of a PUP scene line:
 ```
 
 Positions `4` to `10` are optional. If not provided, the default is `0`.
+
+### Choosing the frame that triggers a scene
+
+Put the trigger on a frame the ROM shows **briefly**, not on one it holds.
+
+A ROM keeps sending the image it displays, for as long as it displays it. Every
+one of those repeats is offered to libserum, and a frame that carries a
+comparison mask — most frames do — is reported as a new match each time, because
+the masked-out areas may have changed while the frame still matches. An
+interruptable scene is therefore stopped by its own trigger frame as soon as the
+ROM sends it again, and started again by it once
+`PUP_TRIGGER_REPEAT_TIMEOUT` (500 ms) has passed. Retriggering the same ID after
+that timeout is deliberate — it is what a repeating PUP effect such as a bumper
+relies on — so a scene triggered by a held frame will show its first frame for
+one DMD frame, disappear for 500 ms, and repeat, for as long as the ROM holds
+that image.
+
+Measured on `btmn_106`: frame `1410` triggers a 50-frame scene and is held by the
+ROM for 2765 ms. The scene's first frame is visible for a single 17 ms host frame,
+then the trigger frame returns for 500 ms, six times over, and the scene never
+reaches its second frame.
+
+So when a scene is meant to cover the end of an animation:
+
+- trigger it from the **last short frame before** the held image — on `btmn_106`
+  that is frame `1409`, shown for 47 ms — rather than from the held image itself;
+- make the scene's **first frame identical** to the image the ROM is holding, so
+  the handover is seamless;
+- make sure the held image itself is **not** matched as a project frame any more,
+  or its repeats will still interrupt the scene — and, with the trigger moved
+  away, nothing will restart it.
+
+Set field `5` to `1` if the scene should replace the triggering frame at once
+rather than after its frame duration.
 
 ## Build
 
