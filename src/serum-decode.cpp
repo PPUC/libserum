@@ -2929,7 +2929,13 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       // artwork looks like, and nothing else changes where the HD frame does
       // hold content.
       if (coverageProtectsHd && scaledLayerCoverage[src] == 0) {
-        if (mySerum.frame64[(size_t)y * dstWidth + x] != 0) continue;
+        // A bounded pass is a sprite compositing its own region. What stands
+        // there is not authored HD content but this plane's own earlier
+        // output for the picture BEFORE the sprite drew -- the ROM's white
+        // digits under a sprite that replaces them -- so yielding to it keeps
+        // stale pixels around the sprite's rounded edges.
+        if (!srcBounds && mySerum.frame64[(size_t)y * dstWidth + x] != 0)
+          continue;
         src = (uint32_t)own;
       }
       const uint32_t dst = y * dstWidth + x;

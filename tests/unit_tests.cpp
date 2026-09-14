@@ -320,6 +320,54 @@ static void Test_LayerDoesNotYieldToHdNothing(void) {
   TearDownFrame();
 }
 
+// A sprite composites its own region after the whole frame has already been
+// composited, and what the frame left there is the picture from BEFORE the
+// sprite drew -- on avr_200 the ROM's own white digits, under a sprite that
+// replaces them with pink artwork. Yielding to that at the sprite's rounded
+// edges keeps stale pixels: white specks around the corners of the glyphs.
+//
+// So a bounded pass paints every destination whose own source it owns, even
+// where the rounding would reach outside. A whole-frame pass still yields,
+// because there what stands is authored HD content rather than its own
+// earlier output -- that is `upscale/no_yield_to_hd_nothing`.
+static void Test_SpriteRegionIsNotLeftStale(void) {
+  SetUpFrame();
+  const uint32_t W = g_serumData.fwidth;
+  const uint32_t zx0 = 6, zx1 = 9, zy0 = 6, zy1 = 9;
+  memset(scaledLayerCoverage, 0, (size_t)W * kH);
+  for (uint32_t y = zy0; y <= zy1; ++y)
+    for (uint32_t x = zx0; x <= zx1; ++x) scaledLayerCoverage[y * W + x] = 1;
+  for (uint32_t y = 0; y < kH; ++y)
+    for (uint32_t x = 0; x < W; ++x) {
+      const bool in = x >= zx0 && x <= zx1 && y >= zy0 && y <= zy1;
+      Px(x, y, in ? 15 : 3, in ? 0x7777 : 0x2222);
+    }
+  // A diagonal step on the region's edge, so the scaler reaches outside it.
+  Px(zx1, zy0, 3, 0x2222);
+
+  // The plane already holds an earlier composite of the picture before the
+  // sprite drew -- a colour that is neither black nor the sprite's.
+  const uint16_t kStale = 0xffff;
+  for (uint32_t y = 0; y < kH * 2; ++y)
+    for (uint32_t x = 0; x < W * 2; ++x)
+      mySerum.frame64[(size_t)y * W * 2 + x] = kStale;
+  mySerum.flags = FLAG_RETURNED_64P_FRAME_OK;
+  extraPlaneIsDerived = false;  // HD content stands where the layer stops
+
+  const uint16_t bounds[4] = {(uint16_t)zx0, (uint16_t)zy0, (uint16_t)zx1,
+                              (uint16_t)zy1};
+  UpscaleOriginalPlaneIntoExtra(false, /*onlyCoveredPixels=*/true, bounds);
+
+  unsigned stale = 0;
+  for (uint32_t y = zy0 * 2; y <= zy1 * 2 + 1; ++y)
+    for (uint32_t x = zx0 * 2; x <= zx1 * 2 + 1; ++x)
+      if (mySerum.frame64[(size_t)y * W * 2 + x] == kStale) ++stale;
+  CHECK_EQ(stale, 0);
+  // Outside the region the pass must still leave the plane alone.
+  CHECK_EQ(mySerum.frame64[(size_t)0 * W * 2 + 0], kStale);
+  TearDownFrame();
+}
+
 // ---------------------------------------------------------------------------
 // Dynamic shadows on the extra plane
 // ---------------------------------------------------------------------------
@@ -1727,6 +1775,7 @@ static const TestCase kTests[] = {
     {"upscale/every_pixel_written", Test_EveryDestinationPixelIsWritten},
     {"upscale/line_doubling_replicates", Test_LineDoublingReplicates},
     {"upscale/no_yield_to_hd_nothing", Test_LayerDoesNotYieldToHdNothing},
+    {"upscale/sprite_region_not_left_stale", Test_SpriteRegionIsNotLeftStale},
     {"shadow/every_dyna_layer", Test_EveryDynaLayerCastsItsShadow},
     {"shadow/claim_marker_is_not_a_layer", Test_ShadowClaimMarkerIsNotALayer},
     {"shadow/offset_modes", Test_ShadowOffsetModes},

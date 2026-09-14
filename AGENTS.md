@@ -500,6 +500,17 @@ and nothing changes where the HD frame does hold content. Measured: 77 specks
 gone across the 20 reported frames, and not one pixel different on `afm_113b`
 (94 frames) or `im_185ve`.
 
+A bounded pass -- a sprite compositing its own region -- does not yield at all,
+and the reason is what stands underneath. The whole frame is composited before
+any sprite draws, so inside a sprite's rectangle the plane holds this layer's
+own earlier output for the picture *before* the sprite existed: on `avr_200`
+the ROM's white digits, under a sprite that replaces them with pink artwork.
+That is not HD content to defer to, it is a stale intermediate, and yielding to
+it left white specks around the rounded corners of every sprite glyph. So where
+`srcBounds` is set the layer keeps its own pixel instead. Twenty-two specks per
+frame on the reported frames, none now, and not a pixel different on
+`afm_113b`, `bdk_294` or `im_185ve`.
+
 **Handle `kUpscaleSourceOutside`.** Outside the frame is black, not a copy of
 the edge pixel — `FrameUtil` clamped there until `db067bc`, which made content
 touching row 0 see its own colour "above" it, a false edge that trips the
