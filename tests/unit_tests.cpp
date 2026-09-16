@@ -88,6 +88,16 @@ static void SetUpFrame(uint32_t w = kW, uint32_t h = kH) {
   shadowOffsetModeRuntime = SERUM_SHADOW_OFFSET_NATIVE;
   upscaleExtraFromOriginal = true;
   originalPlaneRequestedByCaller = true;
+  // Both branches of the loader guarantee these are long enough to index with
+  // every dyna set, because the render path reads all of them whether the
+  // colorization set any or not -- an element that was never set reads back as
+  // the no-data buffer, and that buffer is only as long as it was reserved.
+  // Without this the fixture is shorter than a real load and the shadow pass
+  // reads past it; see the reserve() calls in Serum_LoadFilev2Stream().
+  g_serumData.dynashadowsdir.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
+  g_serumData.dynashadowscol.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
+  g_serumData.dynashadowsdir_extra.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
+  g_serumData.dynashadowscol_extra.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
   memset(hdDynaLayerMap, 0, (size_t)w * h * 4);
   memset(sdDynaLayerMap, 0, (size_t)w * h);
   memset(scaledLayerCoverage, 1, (size_t)w * h);  // the layer owns everything
@@ -532,7 +542,7 @@ static void Test_ReplayedShadowYieldsToLitContent(void) {
 // slot names a rotation or not, so leaving it behind reads uninitialised memory
 // and makes the library's own output differ between runs.
 static void Test_NoRotationWritesBothHalves(void) {
-  SetUpFrame();
+  SetUpFrame(kW, 32);
   uint16_t slot = 0x5a5a, offset = 0x5a5a;
   const bool found = ColorInRotation(0, 0x1234, &slot, &offset, false);
   CHECK(!found);
@@ -1678,7 +1688,7 @@ static void Test_SparseVectorWideValuesRoundTrip(void) {
 // One rotation in slot 0: four colours, 10 ms apart. A pixel tagged with the
 // slot advances; a pixel tagged 0xffff never does.
 static void Test_RotationAdvancesTaggedPixelsOnly(void) {
-  SetUpFrame();
+  SetUpFrame(kW, 32);
   mySerum.flags = FLAG_RETURNED_32P_FRAME_OK;
   mySerum.rotations32 = (uint16_t*)calloc(
       MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION, sizeof(uint16_t));
@@ -1689,7 +1699,7 @@ static void Test_RotationAdvancesTaggedPixelsOnly(void) {
   for (int i = 0; i < 4; ++i)
     mySerum.rotations32[2 + i] = (uint16_t)(0x100 + i);
 
-  const size_t px = (size_t)kW * 32;
+  const size_t px = (size_t)kW * kH;
   for (size_t i = 0; i < px; ++i) {
     mySerum.rotationsinframe32[i * 2] = 0xffff;
     mySerum.rotationsinframe32[i * 2 + 1] = 0xffff;
@@ -1712,7 +1722,7 @@ static void Test_RotationAdvancesTaggedPixelsOnly(void) {
 // The shift wraps at the rotation's length rather than running off the end of
 // the colour list.
 static void Test_RotationWrapsAtItsLength(void) {
-  SetUpFrame();
+  SetUpFrame(kW, 32);
   mySerum.flags = FLAG_RETURNED_32P_FRAME_OK;
   mySerum.rotations32 = (uint16_t*)calloc(
       MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION, sizeof(uint16_t));
@@ -1722,7 +1732,7 @@ static void Test_RotationWrapsAtItsLength(void) {
   mySerum.rotations32[1] = 1;
   for (int i = 0; i < 3; ++i)
     mySerum.rotations32[2 + i] = (uint16_t)(0x200 + i);
-  const size_t px = (size_t)kW * 32;
+  const size_t px = (size_t)kW * kH;
   for (size_t i = 0; i < px; ++i) mySerum.rotationsinframe32[i * 2] = 0xffff;
   mySerum.rotationsinframe32[0] = 0;
   mySerum.rotationsinframe32[1] = 0;

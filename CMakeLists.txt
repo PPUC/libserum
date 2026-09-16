@@ -93,6 +93,19 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
    endif()
 endif()
 
+# Say so when the sanitizers were asked for but cannot be turned on. PLATFORM
+# defaults to win, so -DENABLE_SANITIZERS=ON on its own configures a plain
+# Debug build and every run of the suite looks clean because nothing is
+# instrumented.
+if(ENABLE_SANITIZERS AND NOT (CMAKE_BUILD_TYPE STREQUAL "Debug" AND
+      (PLATFORM STREQUAL "macos" OR PLATFORM STREQUAL "linux")))
+   message(WARNING
+      "ENABLE_SANITIZERS=ON has no effect here: it needs CMAKE_BUILD_TYPE=Debug "
+      "and PLATFORM=macos or linux (this build has CMAKE_BUILD_TYPE="
+      "'${CMAKE_BUILD_TYPE}' and PLATFORM='${PLATFORM}'). Nothing will be "
+      "instrumented.")
+endif()
+
 set(SERUM_SOURCES
    src/serum-decode.cpp
    src/SerumData.cpp

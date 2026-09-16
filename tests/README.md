@@ -22,7 +22,18 @@ Or run the binary directly; it takes an optional substring to filter test names:
     ./build/serum_unit_tests shadow/
 
 Configure with `-DENABLE_SANITIZERS=ON` to run the same tests under
-AddressSanitizer and UndefinedBehaviorSanitizer. Do that at least once per
+AddressSanitizer and UndefinedBehaviorSanitizer. It needs the build type and
+the platform as well, because the flag is only honoured for a Debug build on
+macOS or Linux and `PLATFORM` defaults to `win`:
+
+    cmake -S . -B build-san -DENABLE_SANITIZERS=ON \
+          -DCMAKE_BUILD_TYPE=Debug -DPLATFORM=macos -DARCH=arm64
+
+Get that wrong and the suite still builds, still passes, and instruments
+nothing — which is how three out-of-bounds accesses in the fixtures survived a
+whole series of "sanitizer clean" runs. `CMakeLists.txt` now warns when the
+option is set but cannot take effect; if you do not see the warning and the
+binary is not linked against `libclang_rt.asan`, the run means nothing. Do that at least once per
 change to the render path: one of the bugs below was an out-of-bounds read whose
 *output* was whatever happened to follow a table in memory, so it cannot be
 pinned by an assertion on pixels — but ASan names the line.

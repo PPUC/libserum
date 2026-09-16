@@ -346,6 +346,7 @@ uint32_t calc_crc32(uint8_t* source, uint8_t mask, uint32_t n, uint8_t Shape);
 uint32_t crc32_fast(uint8_t* s, uint32_t n);
 static uint64_t MakeFrameSignature(uint8_t mask, uint8_t shape, uint32_t hash);
 static bool DebugTraceMatches(uint32_t inputCrc, uint32_t frameId);
+static bool DebugFrameTracingRequested();
 static bool DebugIdentifyVerboseEnabled();
 
 static void BeginProfileFrameOperation(void) {
@@ -1180,6 +1181,19 @@ static void InitDebugFrameTracingFromEnv(void) {
         g_debugVerboseSprites ? "on" : "off",
         g_debugVerboseScenes ? "on" : "off");
   }
+}
+
+// Did the caller actually ask to trace anything?
+//
+// DebugTraceMatches() is a FILTER, not a switch: with no target set it matches
+// every frame, so that a verbose flag shows everything until the user narrows
+// it to one frame id or one input CRC. A log site that has no verbose flag of
+// its own must therefore ask this as well, or it writes a line for every frame
+// of every game -- which is how the layer trace came to flood a host's INFO
+// log.
+static bool DebugFrameTracingRequested() {
+  InitDebugFrameTracingFromEnv();
+  return g_debugTargetInputCrc != 0 || g_debugTargetFrameId != 0xffffffffu;
 }
 
 static bool DebugTraceMatches(uint32_t inputCrc, uint32_t frameId) {
@@ -6075,7 +6089,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     // took, how much of it the scaled layer owned, and the active settings.
     // Without this an author's screenshot cannot be tied back to a frame.
     if (DebugTraceAllInputsEnabled() ||
-        DebugTraceMatches(g_debugCurrentInputCrc, IDfound)) {
+        (DebugFrameTracingRequested() &&
+         DebugTraceMatches(g_debugCurrentInputCrc, IDfound))) {
       uint32_t owned = 0;
       if (scaledLayerCoverage) {
         const size_t px = (size_t)g_serumData.fwidth * g_serumData.fheight;
@@ -6924,7 +6939,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
         g_serumData.sceneGenerator->isActive() && !sceneFrameRequested &&
         (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
         !sceneInterruptable) {
-      if (DebugTraceMatches(g_debugCurrentInputCrc, lastfound)) {
+      if (DebugTraceAllInputsEnabled() ||
+          (DebugFrameTracingRequested() &&
+           DebugTraceMatches(g_debugCurrentInputCrc, lastfound))) {
         Log("Serum debug v2 gate: inputCrc=%u frameId=%u "
             "gate=scene-noninterruptable currentFrame=%u sceneFrameCount=%u "
             "endHoldUntil=%u bypass=%s",
