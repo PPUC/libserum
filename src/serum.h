@@ -32,6 +32,7 @@ enum {
   // background scene show through, do not generate dynamic shadows, and do not
   // replace already-written dynamic shadow pixels. Unlit dynamic-zone pixels
   // that resolve to a colour keep it instead of showing the background scene.
+  // They cast dynamic shadows like lit dynamic content.
   FLAG_SCENE_REPLACE_DYNAMIC_BLACK = 32,
 };
 

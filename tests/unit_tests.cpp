@@ -1194,6 +1194,52 @@ static void Test_UnlitDynamicColourBeatsTheBackgroundOnRequest(void) {
   TearDownFrame();
 }
 
+// Inverted text under FLAG_SCENE_REPLACE_DYNAMIC_BLACK: the glyph is the unlit
+// pixel and the lit surround is mapped to black, so it is the unlit pixel that
+// has to cast the shadow -- onto the holes either side of it, whichever way
+// the raster reaches them -- and no shadow may cover the glyph itself.
+static void Test_UnlitDynamicColourCastsItsShadow(void) {
+  SetUpColorization();
+  const size_t px = (size_t)kW * kCH;
+  const std::vector<uint16_t> bg(px, 0x0222);
+  g_serumData.backgroundframes_v2.set(0, bg.data(), px);
+  const std::vector<uint8_t> mask(px, 1);
+  g_serumData.backgroundmask.set(kFrameId, mask.data(), px);
+  const uint16_t background[1] = {0};
+  g_serumData.backgroundIDs.set(kFrameId, background, 1);
+
+  // hole, glyph, glyph, hole -- all inside the zone.
+  const size_t first = (size_t)6 * kW + 2;
+  std::vector<uint8_t> active(px, 0);
+  std::vector<uint8_t> rom(px, 0);
+  for (size_t i = first; i < first + 4; ++i) active[i] = 1;
+  rom[first] = rom[first + 3] = 5;
+  GiveFrameADynamicZone(active, /*couche=*/2, {0x0333});  // shade 5 is black
+
+  std::vector<uint8_t> dir(MAX_DYNA_SETS_PER_FRAME_V2, 0);
+  std::vector<uint16_t> col(MAX_DYNA_SETS_PER_FRAME_V2, 0);
+  dir[2] = (1u << 3) | (1u << 7);  // right and left
+  col[2] = 0x0444;
+  g_serumData.dynashadowsdir.set(kFrameId, dir.data(), dir.size());
+  g_serumData.dynashadowscol.set(kFrameId, col.data(), col.size());
+
+  Colorize_Framev2(rom.data(), kFrameId, false, false,
+                   /*replaceDynamicBlackContent=*/true);
+  CHECK_EQ(mySerum.frame32[first], 0x0444);
+  CHECK_EQ(mySerum.frame32[first + 1], 0x0333);
+  CHECK_EQ(mySerum.frame32[first + 2], 0x0333);
+  CHECK_EQ(mySerum.frame32[first + 3], 0x0444);
+
+  // Without the flag the roles are the historical ones: the lit pixels are
+  // the content, painted black, and it is they that cast the shadow.
+  Colorize_Framev2(rom.data(), kFrameId);
+  CHECK_EQ(mySerum.frame32[first], 0);
+  CHECK_EQ(mySerum.frame32[first + 1], 0x0444);
+  CHECK_EQ(mySerum.frame32[first + 2], 0x0444);
+  CHECK_EQ(mySerum.frame32[first + 3], 0);
+  TearDownFrame();
+}
+
 // A full-height rule beside the text must not change what the text does.
 //
 // The column group's row band is the rows it covers without a break, so a
@@ -1860,6 +1906,8 @@ static const TestCase kTests[] = {
      Test_DynamicZoneOnlyAppliesWhereActive},
     {"colorize/unlit_dynamic_colour_on_request",
      Test_UnlitDynamicColourBeatsTheBackgroundOnRequest},
+    {"colorize/unlit_dynamic_colour_casts_shadow",
+     Test_UnlitDynamicColourCastsItsShadow},
     {"sidecar/spellings", Test_ScalingSidecarSpellings},
     {"sidecar/matches_libframeutil", Test_AlgorithmMatchesLibframeutil},
     {"sidecar/shadow_offset", Test_ScalingSidecarShadowOffset},

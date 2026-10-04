@@ -5777,7 +5777,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
           } else {
             const uint8_t dynacouche = frameDyna[tk];
             bool dynamicBlackSuppressed = false;
-            if (frame[tk] > 0) {
+            // An unlit pixel that keeps its colour is content like a lit one:
+            // it casts the layer's shadow and a shadow may not cover it.
+            if (frame[tk] > 0 || unlitDynamicKeepsColour) {
               const uint16_t dynamicColor =
                   frameDynaColors[dynacouche * g_serumData.nocolors +
                                   frame[tk]];
@@ -5984,7 +5986,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
           } else {
             const uint8_t dynacouche = frameDynaExtra[tk];
             bool dynamicBlackSuppressed = false;
-            if (srcShade > 0) {
+            if (srcShade > 0 || unlitDynamicKeepsColour) {
               const uint16_t dynamicColor =
                   frameDynaColorsExtra[dynacouche * g_serumData.nocolors +
                                        srcShade];

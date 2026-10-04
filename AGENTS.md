@@ -393,6 +393,9 @@ Background placeholder policy:
   mask. Without the flag the background test runs first and such a pixel always
   shows the background, which is the historical precedence existing
   colorizations rely on.
+  Such a pixel is content like a lit one: it casts its layer's dynamic shadow
+  and a shadow does not cover it. That is what makes inverted text work, where
+  the glyph is the unlit pixel and the lit surround is mapped to black.
 
 Mixed-resolution background scenes:
 - `applySceneBackground` caches the already-rendered scene background together
@@ -746,6 +749,7 @@ Flags (from `serum.h`):
   pixel.
   Unlit dynamic-zone pixels whose dynamic color for shade `0` is not black keep
   that color instead of showing the background scene.
+  They cast dynamic shadows like lit dynamic content.
 
 Finished-scene default behavior:
 - Foreground scenes with flag `0` leave the last rendered scene frame visible

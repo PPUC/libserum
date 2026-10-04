@@ -366,6 +366,7 @@ Format of a PUP scene line:
        shadows and do not replace already-written dynamic shadow pixels;
        unlit dynamic-zone pixels whose dynamic color for shade 0 is not black
        keep that color instead of showing the background scene
+       and cast dynamic shadows like lit dynamic content
 ```
 
 Positions `4` to `10` are optional. If not provided, the default is `0`.
