@@ -363,7 +363,9 @@ Format of a PUP scene line:
   16 - continue scene at previous frame when interrupted for less than 8s
   32 - with flag 4, replace dynamic-zone pixels whose selected dynamic color is
        black with the background scene; these pixels do not generate dynamic
-       shadows and do not replace already-written dynamic shadow pixels
+       shadows and do not replace already-written dynamic shadow pixels;
+       unlit dynamic-zone pixels whose dynamic color for shade 0 is not black
+       keep that color instead of showing the background scene
 ```
 
 Positions `4` to `10` are optional. If not provided, the default is `0`.

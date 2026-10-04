@@ -1160,6 +1160,40 @@ static void Test_DynamicZoneOnlyAppliesWhereActive(void) {
   TearDownFrame();
 }
 
+// Under a background mask an unlit pixel shows the background before the
+// dynamic zone is ever asked -- unless FLAG_SCENE_REPLACE_DYNAMIC_BLACK is in
+// force, where the zone's colour decides: a set that gives shade 0 a colour
+// keeps it, and one that leaves shade 0 black still shows the background.
+static void Test_UnlitDynamicColourBeatsTheBackgroundOnRequest(void) {
+  SetUpColorization();
+  const size_t px = (size_t)kW * kCH;
+  const std::vector<uint16_t> bg(px, 0x0222);
+  g_serumData.backgroundframes_v2.set(0, bg.data(), px);
+  const std::vector<uint8_t> mask(px, 1);
+  g_serumData.backgroundmask.set(kFrameId, mask.data(), px);
+  const uint16_t background[1] = {0};
+  g_serumData.backgroundIDs.set(kFrameId, background, 1);
+
+  const size_t zone = (size_t)6 * kW + 2;
+  std::vector<uint8_t> active(px, 0);
+  active[zone] = 1;
+  std::vector<uint8_t> rom(px, 0);  // nothing lit
+
+  GiveFrameADynamicZone(active, /*couche=*/2, {0x0333});
+  Colorize_Framev2(rom.data(), kFrameId);
+  CHECK_EQ(mySerum.frame32[zone], 0x0222);
+  Colorize_Framev2(rom.data(), kFrameId, false, false,
+                   /*replaceDynamicBlackContent=*/true);
+  CHECK_EQ(mySerum.frame32[zone], 0x0333);
+  // Outside the zone the background is untouched by the flag.
+  CHECK_EQ(mySerum.frame32[zone + 1], 0x0222);
+
+  GiveFrameADynamicZone(active, /*couche=*/2, {0});
+  Colorize_Framev2(rom.data(), kFrameId, false, false, true);
+  CHECK_EQ(mySerum.frame32[zone], 0x0222);
+  TearDownFrame();
+}
+
 // A full-height rule beside the text must not change what the text does.
 //
 // The column group's row band is the rows it covers without a break, so a
@@ -1824,6 +1858,8 @@ static const TestCase kTests[] = {
     {"colorize/dynamic_zone_colours", Test_DynamicZoneColoursComeFromItsSet},
     {"colorize/dynamic_zone_active_mask",
      Test_DynamicZoneOnlyAppliesWhereActive},
+    {"colorize/unlit_dynamic_colour_on_request",
+     Test_UnlitDynamicColourBeatsTheBackgroundOnRequest},
     {"sidecar/spellings", Test_ScalingSidecarSpellings},
     {"sidecar/matches_libframeutil", Test_AlgorithmMatchesLibframeutil},
     {"sidecar/shadow_offset", Test_ScalingSidecarShadowOffset},

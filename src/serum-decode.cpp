@@ -5728,8 +5728,15 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     for (tj = 0; tj < g_serumData.fheight; tj++) {
       for (ti = 0; ti < g_serumData.fwidth; ti++) {
         uint16_t tk = tj * g_serumData.fwidth + ti;
+        // With FLAG_SCENE_REPLACE_DYNAMIC_BLACK the dynamic colour decides
+        // inside a zone, not the ROM shade: an unlit pixel whose set gives it
+        // a colour keeps that colour instead of showing the background.
+        const bool unlitDynamicKeepsColour =
+            replaceDynamicBlackContent && frameHasDynamic && frame[tk] == 0 &&
+            frameDynaActive[tk] != 0 &&
+            frameDynaColors[frameDyna[tk] * g_serumData.nocolors] != 0;
         if (hasBackground && (frame[tk] == 0) &&
-            (frameBackgroundMask[tk] > 0)) {
+            (frameBackgroundMask[tk] > 0) && !unlitDynamicKeepsColour) {
           if (isdynapix[tk] == 0 && sdRendersStatics) {
             if (sdOwnsStatics) MarkScaledLayer(tk);
             if (applySceneBackground) {
@@ -5927,8 +5934,15 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         const bool srcIsDynamicZone =
             sdDynaActive &&
             sdDynaActive[(tj >> 1) * g_serumData.fwidth + (ti >> 1)] != 0;
+        // Same rule as the original-resolution pass. In layer mode
+        // frameHasDynamicExtra is false and the scaled layer carries it.
+        const bool unlitDynamicKeepsColour =
+            replaceDynamicBlackContent && frameHasDynamicExtra &&
+            srcShade == 0 && frameDynaExtraActive[tk] != 0 &&
+            frameDynaColorsExtra[frameDynaExtra[tk] * g_serumData.nocolors] !=
+                0;
         if (hasBackground && (srcShade == 0 || srcIsDynamicZone) &&
-            (frameBackgroundMaskExtra[tk] > 0)) {
+            (frameBackgroundMaskExtra[tk] > 0) && !unlitDynamicKeepsColour) {
           if (isdynapix[tk] == 0) {
             if (applySceneBackground) {
               pfr[tk] = GetSceneBackgroundPixel(
