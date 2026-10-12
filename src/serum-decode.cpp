@@ -2003,41 +2003,238 @@ static Serum_Frame_Struc* Serum_LoadFilev1Stream(Reader& reader,
                                                  const uint8_t loadFlags,
                                                  const uint8_t runtimeFlags);
 
-static bool ExtractCRZEntryToMemory(const char* filename,
-                                    std::vector<uint8_t>& outData) {
+// Finds the first regular entry of a cRZ archive, which is the cROM. Entry
+// names are never used to locate it: an archive is untrusted input.
+static bool FindCRZEntry(mz_zip_archive* zip_archive, mz_uint* index,
+                         mz_zip_archive_file_stat* file_stat) {
+  const mz_uint numFiles = mz_zip_reader_get_num_files(zip_archive);
+  for (mz_uint i = 0; i < numFiles; ++i) {
+    if (!mz_zip_reader_file_stat(zip_archive, i, file_stat)) {
+      continue;
+    }
+    if (mz_zip_reader_is_file_a_directory(zip_archive, i) ||
+        !mz_zip_reader_is_file_supported(zip_archive, i) ||
+        mz_zip_reader_is_file_encrypted(zip_archive, i)) {
+      continue;
+    }
+    *index = i;
+    return true;
+  }
+  return false;
+}
+
+// The returned block belongs to miniz and is released with mz_free().
+static void* ExtractCRZEntryToHeap(const char* filename, size_t* extractedSize,
+                                   mz_zip_error* error = nullptr) {
   mz_zip_archive zip_archive = {0};
+  if (error) *error = MZ_ZIP_NO_ERROR;
   if (!mz_zip_reader_init_file(&zip_archive, filename, 0)) {
-    return false;
+    if (error) *error = mz_zip_get_last_error(&zip_archive);
+    return nullptr;
   }
 
-  const mz_uint numFiles = mz_zip_reader_get_num_files(&zip_archive);
-  bool ok = false;
-  for (mz_uint i = 0; i < numFiles; ++i) {
-    mz_zip_archive_file_stat file_stat;
-    if (!mz_zip_reader_file_stat(&zip_archive, i, &file_stat)) {
-      continue;
-    }
-    if (mz_zip_reader_is_file_a_directory(&zip_archive, i) ||
-        !mz_zip_reader_is_file_supported(&zip_archive, i) ||
-        mz_zip_reader_is_file_encrypted(&zip_archive, i)) {
-      continue;
-    }
-
-    size_t extractedSize = 0;
-    void* extracted =
-        mz_zip_reader_extract_to_heap(&zip_archive, i, &extractedSize, 0);
-    if (!extracted) {
-      break;
-    }
-    outData.assign(static_cast<const uint8_t*>(extracted),
-                   static_cast<const uint8_t*>(extracted) + extractedSize);
-    mz_free(extracted);
-    ok = true;
-    break;
+  void* extracted = nullptr;
+  mz_uint index = 0;
+  mz_zip_archive_file_stat file_stat;
+  if (FindCRZEntry(&zip_archive, &index, &file_stat)) {
+    extracted =
+        mz_zip_reader_extract_to_heap(&zip_archive, index, extractedSize, 0);
+    if (!extracted && error) *error = mz_zip_get_last_error(&zip_archive);
+  } else if (error) {
+    *error = MZ_ZIP_FILE_NOT_FOUND;
   }
 
   mz_zip_reader_end(&zip_archive);
-  return ok;
+  return extracted;
+}
+
+static bool ExtractCRZEntryToMemory(const char* filename,
+                                    std::vector<uint8_t>& outData) {
+  size_t extractedSize = 0;
+  void* extracted = ExtractCRZEntryToHeap(filename, &extractedSize);
+  if (!extracted) {
+    return false;
+  }
+  outData.assign(static_cast<const uint8_t*>(extracted),
+                 static_cast<const uint8_t*>(extracted) + extractedSize);
+  mz_free(extracted);
+  return true;
+}
+
+// The Serum_CRZ_* functions work on files only and never touch the loaded
+// colorization, so they do not hold the API mutex while they run: deflating a
+// large cROM takes seconds and must not stall Serum_Colorize() on another
+// thread. Only the shared error buffer is updated under it.
+static void ClearCRZErrorMessage() {
+  std::lock_guard<std::recursive_mutex> serumApiLock(g_serumApiMutex);
+  ClearLastErrorMessage();
+}
+
+static void SetCRZErrorMessage(const char* format, ...) {
+  std::lock_guard<std::recursive_mutex> serumApiLock(g_serumApiMutex);
+  va_list args;
+  va_start(args, format);
+  vsnprintf(g_lastErrorMessage, sizeof(g_lastErrorMessage), format, args);
+  va_end(args);
+}
+
+// miniz reads its paths as UTF-8 on Windows and as native bytes elsewhere;
+// this is the same reading for std::filesystem.
+static std::filesystem::path CRZPathFromUtf8(const char* path) {
+  return std::filesystem::path(
+      std::u8string(reinterpret_cast<const char8_t*>(path)));
+}
+
+// An entry name is a plain file name. Anything that could be read as a path
+// would make the archive a hazard for a tool that extracts it by name.
+static bool IsPlainCRZEntryName(const char* name) {
+  if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return false;
+  return strpbrk(name, "/\\:") == nullptr;
+}
+
+static bool IsAsciiName(const char* name) {
+  for (; *name; ++name) {
+    if (static_cast<unsigned char>(*name) >= 0x80) return false;
+  }
+  return true;
+}
+
+SERUM_API bool Serum_CRZ_Read(const char* crzPath, uint8_t** data,
+                              size_t* size) {
+  ClearCRZErrorMessage();
+  if (data) *data = nullptr;
+  if (size) *size = 0;
+  if (!crzPath || !crzPath[0] || !data || !size) {
+    SetCRZErrorMessage("Serum_CRZ_Read: invalid arguments");
+    return false;
+  }
+
+  size_t extractedSize = 0;
+  mz_zip_error error = MZ_ZIP_NO_ERROR;
+  void* extracted = ExtractCRZEntryToHeap(crzPath, &extractedSize, &error);
+  if (!extracted) {
+    SetCRZErrorMessage("Serum_CRZ_Read: no cROM could be read from '%s' (%s)",
+                       crzPath, mz_zip_get_error_string(error));
+    return false;
+  }
+  *data = static_cast<uint8_t*>(extracted);
+  *size = extractedSize;
+  return true;
+}
+
+SERUM_API void Serum_CRZ_Free(uint8_t* data) { mz_free(data); }
+
+SERUM_API bool Serum_CRZ_GetEntryName(const char* crzPath, char* name,
+                                      size_t nameSize) {
+  ClearCRZErrorMessage();
+  if (name && nameSize > 0) name[0] = '\0';
+  if (!crzPath || !crzPath[0] || !name || nameSize == 0) {
+    SetCRZErrorMessage("Serum_CRZ_GetEntryName: invalid arguments");
+    return false;
+  }
+
+  mz_zip_archive zip_archive = {0};
+  if (!mz_zip_reader_init_file(&zip_archive, crzPath, 0)) {
+    SetCRZErrorMessage(
+        "Serum_CRZ_GetEntryName: could not open '%s' (%s)", crzPath,
+        mz_zip_get_error_string(mz_zip_get_last_error(&zip_archive)));
+    return false;
+  }
+
+  mz_uint index = 0;
+  mz_zip_archive_file_stat file_stat;
+  const bool found = FindCRZEntry(&zip_archive, &index, &file_stat);
+  mz_zip_reader_end(&zip_archive);
+  if (!found) {
+    SetCRZErrorMessage("Serum_CRZ_GetEntryName: no cROM entry in '%s'",
+                       crzPath);
+    return false;
+  }
+  if (strlen(file_stat.m_filename) >= nameSize) {
+    SetCRZErrorMessage(
+        "Serum_CRZ_GetEntryName: entry name of '%s' needs %zu bytes", crzPath,
+        strlen(file_stat.m_filename) + 1);
+    return false;
+  }
+  memcpy(name, file_stat.m_filename, strlen(file_stat.m_filename) + 1);
+  return true;
+}
+
+SERUM_API bool Serum_CRZ_WriteFromFile(const char* crzPath,
+                                       const char* entryName,
+                                       const char* cromPath) {
+  ClearCRZErrorMessage();
+  if (!crzPath || !crzPath[0] || !entryName || !entryName[0] || !cromPath ||
+      !cromPath[0]) {
+    SetCRZErrorMessage("Serum_CRZ_WriteFromFile: invalid arguments");
+    return false;
+  }
+
+  if (!IsPlainCRZEntryName(entryName)) {
+    SetCRZErrorMessage(
+        "Serum_CRZ_WriteFromFile: entry name '%s' is not a plain file name",
+        entryName);
+    return false;
+  }
+
+  try {
+    // Checked before the archive is created, because creating it truncates
+    // whatever is at crzPath.
+    std::error_code ec;
+    const std::filesystem::path source = CRZPathFromUtf8(cromPath);
+    const std::filesystem::path target = CRZPathFromUtf8(crzPath);
+    if (!std::filesystem::is_regular_file(source, ec)) {
+      SetCRZErrorMessage("Serum_CRZ_WriteFromFile: '%s' is not a readable file",
+                         cromPath);
+      return false;
+    }
+    if (std::filesystem::equivalent(source, target, ec)) {
+      SetCRZErrorMessage(
+          "Serum_CRZ_WriteFromFile: '%s' is both the source and the archive",
+          cromPath);
+      return false;
+    }
+
+    mz_zip_archive zip_archive = {0};
+    if (!mz_zip_writer_init_file_v2(&zip_archive, crzPath, 0, 0)) {
+      SetCRZErrorMessage(
+          "Serum_CRZ_WriteFromFile: could not create '%s' (%s)", crzPath,
+          mz_zip_get_error_string(mz_zip_get_last_error(&zip_archive)));
+      return false;
+    }
+
+    // The sizes go into the local header rather than into a trailing data
+    // descriptor, and a plain ASCII name is not flagged as UTF-8. Both match
+    // what the ColorizingDMD editor's own zip writer produces. zip64 is not
+    // requested: miniz switches to it by itself for a source of 4 GiB or more.
+    mz_uint levelAndFlags =
+        static_cast<mz_uint>(MZ_DEFAULT_LEVEL) |
+        static_cast<mz_uint>(MZ_ZIP_FLAG_WRITE_HEADER_SET_SIZE);
+    if (IsAsciiName(entryName)) {
+      levelAndFlags |= static_cast<mz_uint>(MZ_ZIP_FLAG_ASCII_FILENAME);
+    }
+
+    bool ok = mz_zip_writer_add_file(&zip_archive, entryName, cromPath, nullptr,
+                                     0, levelAndFlags) &&
+              mz_zip_writer_finalize_archive(&zip_archive);
+    const mz_zip_error error = mz_zip_get_last_error(&zip_archive);
+    // Closing flushes the file, so a full disk can still surface here.
+    if (!mz_zip_writer_end(&zip_archive)) ok = false;
+    if (!ok) {
+      std::filesystem::remove(target, ec);
+      SetCRZErrorMessage(
+          "Serum_CRZ_WriteFromFile: could not write '%s' from '%s' (%s)",
+          crzPath, cromPath, mz_zip_get_error_string(error));
+      return false;
+    }
+    return true;
+  } catch (const std::exception& e) {
+    SetCRZErrorMessage("Serum_CRZ_WriteFromFile: %s", e.what());
+    return false;
+  } catch (...) {
+    SetCRZErrorMessage("Serum_CRZ_WriteFromFile: unknown C++ exception");
+    return false;
+  }
 }
 
 void Full_Reset_ColorRotations(void) {

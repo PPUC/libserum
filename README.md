@@ -82,6 +82,24 @@ On real-machine targets:
 - only `*.cROMc` is supported
 - `*.pup.csv` and `skip-cromc.txt` are ignored
 
+## cRZ Archives
+
+A `cRZ` is a zip archive holding one `cROM`. Besides loading one through
+`Serum_Load(...)`, a host — an editor, a converter — can read and create them
+directly, without a loaded colorization:
+
+- `Serum_CRZ_Read(crzPath, &data, &size)` returns the cROM bytes; release them
+  with `Serum_CRZ_Free(data)`.
+- `Serum_CRZ_GetEntryName(crzPath, name, nameSize)` returns the name of that
+  entry.
+- `Serum_CRZ_WriteFromFile(crzPath, entryName, cromPath)` creates the archive
+  from a cROM on disk, streaming it, so the file size does not have to fit in
+  memory. The entry is deflated; zip64 is used only for a cROM of 4 GiB or
+  more. By convention the entry is called `<romname>.cRom`.
+
+All return `false` on failure, with the reason in
+`Serum_GetLastErrorMessage()`. Paths are UTF-8 on Windows.
+
 ## Monochrome Triggers
 
 `libserum` supports two dedicated trigger IDs:

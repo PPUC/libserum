@@ -1562,6 +1562,193 @@ static void Test_FinishedFrameAlreadyOnDisplay(void) {
 }
 
 // ---------------------------------------------------------------------------
+// cRZ archives
+// ---------------------------------------------------------------------------
+
+static std::filesystem::path CrzTestDir(void) {
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "libserum_tests" / "crz";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  return dir;
+}
+
+// Compressible, but not one repeated byte: a cROM is mostly runs, with detail.
+static std::vector<uint8_t> CrzTestPayload(size_t size) {
+  std::vector<uint8_t> bytes(size);
+  uint32_t state = 12345;
+  for (size_t i = 0; i < size; ++i) {
+    state = state * 1664525u + 1013904223u;
+    bytes[i] = (i / 97) % 3 ? (uint8_t)(i / 97) : (uint8_t)(state >> 24);
+  }
+  return bytes;
+}
+
+static void WriteTestFile(const std::filesystem::path& path,
+                          const std::vector<uint8_t>& bytes) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  out.write((const char*)bytes.data(), (std::streamsize)bytes.size());
+}
+
+// The editor writes a cRZ next to every cROM and libserum has to load it, so
+// what goes in must come out byte for byte, under the name it was given. The
+// payload is larger than miniz's 64 KiB I/O buffer, so the streamed path loops.
+static void Test_CrzWriteThenReadRoundTrips(void) {
+  const std::filesystem::path dir = CrzTestDir();
+  const std::string crom = (dir / "source.cROM").string();
+  const std::string crz = (dir / "test_rom.cRZ").string();
+  const std::vector<uint8_t> payload = CrzTestPayload(300000);
+  WriteTestFile(crom, payload);
+
+  CHECK(Serum_CRZ_WriteFromFile(crz.c_str(), "test_rom.cRom", crom.c_str()));
+  CHECK_EQ(strlen(Serum_GetLastErrorMessage()), 0);
+  CHECK(std::filesystem::file_size(crz) < payload.size());
+
+  uint8_t* data = NULL;
+  size_t size = 0;
+  CHECK(Serum_CRZ_Read(crz.c_str(), &data, &size));
+  CHECK_EQ(size, payload.size());
+  CHECK(data && size == payload.size() &&
+        memcmp(data, payload.data(), size) == 0);
+  Serum_CRZ_Free(data);
+
+  char name[64] = "untouched";
+  CHECK(Serum_CRZ_GetEntryName(crz.c_str(), name, sizeof(name)));
+  CHECK(strcmp(name, "test_rom.cRom") == 0);
+
+  // The loader's own extraction sees the same bytes.
+  std::vector<uint8_t> viaLoader;
+  CHECK(ExtractCRZEntryToMemory(crz.c_str(), viaLoader));
+  CHECK(viaLoader == payload);
+
+  std::filesystem::remove_all(dir);
+}
+
+// A small cROM does not need zip64, and a reader that predates it -- the
+// Win32 editor's -- must not be handed one. The sizes sit in the local header
+// with no data descriptor, as that editor writes them.
+static void Test_CrzIsAPlainDeflatedZip(void) {
+  const std::filesystem::path dir = CrzTestDir();
+  const std::string crom = (dir / "source.cROM").string();
+  const std::string crz = (dir / "plain.cRZ").string();
+  WriteTestFile(crom, CrzTestPayload(5000));
+  CHECK(Serum_CRZ_WriteFromFile(crz.c_str(), "plain.cRom", crom.c_str()));
+
+  mz_zip_archive zip = {0};
+  CHECK(mz_zip_reader_init_file(&zip, crz.c_str(), 0));
+  CHECK_EQ(mz_zip_reader_get_num_files(&zip), 1);
+  CHECK(!mz_zip_is_zip64(&zip));
+  mz_zip_archive_file_stat stat;
+  CHECK(mz_zip_reader_file_stat(&zip, 0, &stat));
+  CHECK_EQ(stat.m_method, MZ_DEFLATED);
+  CHECK_EQ(stat.m_bit_flag & (1 << 3), 0);   // no data descriptor
+  CHECK_EQ(stat.m_bit_flag & (1 << 11), 0);  // name not flagged as UTF-8
+  CHECK_EQ(stat.m_uncomp_size, 5000);
+  mz_zip_reader_end(&zip);
+
+  std::filesystem::remove_all(dir);
+}
+
+// A failed read hands back nothing to free and says why; a failed write does
+// not leave half an archive where a good one may have been expected.
+static void Test_CrzFailuresAreClean(void) {
+  const std::filesystem::path dir = CrzTestDir();
+  const std::string missing = (dir / "missing.cRZ").string();
+  const std::string garbage = (dir / "garbage.cRZ").string();
+  WriteTestFile(garbage, CrzTestPayload(4096));
+
+  uint8_t* data = (uint8_t*)&dir;
+  size_t size = 99;
+  CHECK(!Serum_CRZ_Read(missing.c_str(), &data, &size));
+  CHECK(data == NULL);
+  CHECK_EQ(size, 0);
+  CHECK(strstr(Serum_GetLastErrorMessage(), "Serum_CRZ_Read") != NULL);
+
+  data = (uint8_t*)&dir;
+  size = 99;
+  CHECK(!Serum_CRZ_Read(garbage.c_str(), &data, &size));
+  CHECK(data == NULL);
+  CHECK_EQ(size, 0);
+  CHECK(!Serum_CRZ_Read(NULL, &data, &size));
+  CHECK(!Serum_CRZ_Read(garbage.c_str(), NULL, &size));
+  Serum_CRZ_Free(NULL);
+
+  char name[8] = "x";
+  CHECK(!Serum_CRZ_GetEntryName(garbage.c_str(), name, sizeof(name)));
+  CHECK_EQ(name[0], 0);
+
+  // A missing source must not cost the caller the archive it already has.
+  const std::string crz = (dir / "kept.cRZ").string();
+  const std::string crom = (dir / "source.cROM").string();
+  WriteTestFile(crom, CrzTestPayload(2000));
+  CHECK(Serum_CRZ_WriteFromFile(crz.c_str(), "kept.cRom", crom.c_str()));
+  const auto keptSize = std::filesystem::file_size(crz);
+  CHECK(!Serum_CRZ_WriteFromFile(crz.c_str(), "kept.cRom",
+                                 (dir / "no_such.cROM").string().c_str()));
+  CHECK(strstr(Serum_GetLastErrorMessage(), "Serum_CRZ_WriteFromFile") != NULL);
+  CHECK(std::filesystem::exists(crz) &&
+        std::filesystem::file_size(crz) == keptSize);
+  CHECK(!Serum_CRZ_WriteFromFile(crom.c_str(), "kept.cRom", crom.c_str()));
+  CHECK_EQ(std::filesystem::file_size(crom), 2000);
+
+  // An entry name that reads as a path is refused, and nothing is created.
+  const std::string refused = (dir / "refused.cRZ").string();
+  for (const char* bad :
+       {"/abs.cRom", "dir/x.cRom", "..\\x.cRom", "c:x.cRom", "..", ""}) {
+    CHECK(!Serum_CRZ_WriteFromFile(refused.c_str(), bad, crom.c_str()));
+    CHECK(!std::filesystem::exists(refused));
+  }
+  CHECK(!Serum_CRZ_WriteFromFile((dir / "no_dir" / "x.cRZ").string().c_str(),
+                                 "x.cRom", crom.c_str()));
+
+  // Too small a name buffer is an error, not a truncated name.
+  CHECK(!Serum_CRZ_GetEntryName(crz.c_str(), name, sizeof(name)));
+  CHECK_EQ(name[0], 0);
+
+  // A success clears the message of the failure before it.
+  CHECK(Serum_CRZ_Read(crz.c_str(), &data, &size));
+  CHECK_EQ(strlen(Serum_GetLastErrorMessage()), 0);
+  Serum_CRZ_Free(data);
+
+  std::filesystem::remove_all(dir);
+}
+
+// Optional: SERUM_TEST_CRZ names a real cRZ, such as one written by the Win32
+// editor. No colorization is kept in the repository, so without it this checks
+// nothing. With it, the archive must read and survive being written again.
+static void Test_CrzRealArchive(void) {
+  const char* real = std::getenv("SERUM_TEST_CRZ");
+  if (!real || !real[0]) return;
+
+  uint8_t* data = NULL;
+  size_t size = 0;
+  CHECK(Serum_CRZ_Read(real, &data, &size));
+  CHECK(size > 0);
+  char name[512] = "";
+  CHECK(Serum_CRZ_GetEntryName(real, name, sizeof(name)));
+  if (!data) return;
+
+  const std::filesystem::path dir = CrzTestDir();
+  const std::string crom = (dir / "real.cROM").string();
+  const std::string crz = (dir / "real.cRZ").string();
+  {
+    std::ofstream out(crom, std::ios::binary | std::ios::trunc);
+    out.write((const char*)data, (std::streamsize)size);
+  }
+  CHECK(Serum_CRZ_WriteFromFile(crz.c_str(), name, crom.c_str()));
+  uint8_t* again = NULL;
+  size_t againSize = 0;
+  CHECK(Serum_CRZ_Read(crz.c_str(), &again, &againSize));
+  CHECK_EQ(againSize, size);
+  CHECK(again && againSize == size && memcmp(again, data, size) == 0);
+  printf("       %s: entry %s, %zu bytes, rewritten as %llu bytes\n", real,
+         name, size, (unsigned long long)std::filesystem::file_size(crz));
+  Serum_CRZ_Free(again);
+  Serum_CRZ_Free(data);
+  std::filesystem::remove_all(dir);
+}
+
+// ---------------------------------------------------------------------------
 // scaling.txt, the per-colorization override
 // ---------------------------------------------------------------------------
 
@@ -1908,6 +2095,10 @@ static const TestCase kTests[] = {
      Test_UnlitDynamicColourBeatsTheBackgroundOnRequest},
     {"colorize/unlit_dynamic_colour_casts_shadow",
      Test_UnlitDynamicColourCastsItsShadow},
+    {"crz/write_then_read_round_trips", Test_CrzWriteThenReadRoundTrips},
+    {"crz/plain_deflated_zip", Test_CrzIsAPlainDeflatedZip},
+    {"crz/failures_are_clean", Test_CrzFailuresAreClean},
+    {"crz/real_archive", Test_CrzRealArchive},
     {"sidecar/spellings", Test_ScalingSidecarSpellings},
     {"sidecar/matches_libframeutil", Test_AlgorithmMatchesLibframeutil},
     {"sidecar/shadow_offset", Test_ScalingSidecarShadowOffset},

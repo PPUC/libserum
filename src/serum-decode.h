@@ -147,13 +147,73 @@ SERUM_API const char* Serum_GetMinorVersion(void);
 
 /** @brief Get the last fatal runtime error message
  *
- * Returns the most recent top-level exception/fatal error captured by the DLL.
+ * Returns the most recent top-level exception/fatal error captured by the DLL,
+ * or the reason the last Serum_CRZ_* call failed.
  * The returned pointer is owned by libserum and remains valid until the next
  * API call that updates the stored error state.
  *
  * @return Empty string if no fatal error has been recorded
  */
 SERUM_API const char* Serum_GetLastErrorMessage(void);
+
+/** @brief Read the cROM stored in a cRZ archive
+ *
+ * A cRZ is a zip archive holding one cROM. The first regular entry is taken,
+ * whatever it is called: entry names are not interpreted and nothing is
+ * written to disk. This is the same extraction Serum_Load() uses.
+ *
+ * Works on the file only. It neither needs nor changes a loaded colorization
+ * and may be called from any thread.
+ *
+ * @param crzPath: path of the archive, UTF-8 on Windows
+ * @param data: receives the cROM bytes; release them with Serum_CRZ_Free()
+ * @param size: receives the number of bytes
+ * @return true on success. On failure *data is NULL, *size is 0 and
+ * Serum_GetLastErrorMessage() says why.
+ */
+SERUM_API bool Serum_CRZ_Read(const char* crzPath, uint8_t** data,
+                              size_t* size);
+
+/** @brief Release a buffer returned by Serum_CRZ_Read()
+ *
+ * @param data: the buffer; NULL is accepted
+ */
+SERUM_API void Serum_CRZ_Free(uint8_t* data);
+
+/** @brief Get the name of the entry Serum_CRZ_Read() would return
+ *
+ * The name is data from the archive. Do not build a path from it.
+ *
+ * @param crzPath: path of the archive, UTF-8 on Windows
+ * @param name: receives the zero-terminated entry name
+ * @param nameSize: size of the name buffer in bytes
+ * @return true on success, false if there is no such entry or the buffer is
+ * too small; Serum_GetLastErrorMessage() says why
+ */
+SERUM_API bool Serum_CRZ_GetEntryName(const char* crzPath, char* name,
+                                      size_t nameSize);
+
+/** @brief Create a cRZ archive from a cROM file
+ *
+ * Writes a zip archive with one deflated entry. The cROM is streamed from
+ * disk, so its size does not have to fit in memory. zip64 is used only for a
+ * cROM of 4 GiB or more. The entry gets the cROM file's modification time.
+ *
+ * An existing file at crzPath is replaced. If writing fails after the archive
+ * was created, the incomplete archive is removed.
+ *
+ * Works on the files only. It neither needs nor changes a loaded colorization
+ * and may be called from any thread.
+ *
+ * @param crzPath: path of the archive to create, UTF-8 on Windows
+ * @param entryName: name of the entry, by convention "<romname>.cRom". It has
+ * to be a plain file name: '/', '\\' and ':' are refused, as are "." and ".."
+ * @param cromPath: path of the cROM file to store, UTF-8 on Windows
+ * @return true on success, otherwise Serum_GetLastErrorMessage() says why
+ */
+SERUM_API bool Serum_CRZ_WriteFromFile(const char* crzPath,
+                                       const char* entryName,
+                                       const char* cromPath);
 
 /** @brief Parse a scene description file in CSV format
  *

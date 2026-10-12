@@ -9,6 +9,10 @@ twice and the link fails.
 
 The tests build their frames in memory — a handful of pixels chosen to make one
 rule observable. There are no dumps and no colorization files in the repository.
+The one test that can use a real file takes its path from the environment:
+
+    SERUM_TEST_CRZ=/path/to/rom.cRZ ./build/serum_unit_tests crz/
+
 Frame buffers come from `AllocateFrameWorkBuffers()`, the same function both
 load paths call, so a buffer added there is present here too.
 
@@ -88,6 +92,10 @@ and a packing bug corrupts every colorization at once.
 | `colorize/background_mask` | the background image shows where its mask is set and the ROM lit nothing, and only there |
 | `colorize/dynamic_zone_colours` | inside a dynamic zone the colour comes from that zone's set, indexed by the ROM shade |
 | `colorize/dynamic_zone_active_mask` | a zone only applies where its active mask says so; elsewhere the static colour stands |
+| `crz/write_then_read_round_trips` | a cRZ written from a cROM file reads back byte for byte under the entry name it was given, through the public call and through the loader's own extraction |
+| `crz/plain_deflated_zip` | a small cROM yields a plain deflated zip: no zip64, no data descriptor, no UTF-8 flag on an ASCII name — what older readers expect |
+| `crz/failures_are_clean` | a failed read hands back nothing to free and says why; a failed write neither destroys an archive already there nor leaves half of one |
+| `crz/real_archive` | checks nothing unless `SERUM_TEST_CRZ` names a real cRZ, which must then read and survive being written again |
 | `sidecar/spellings` | every spelling `scaling.txt` advertises, bare and under `scaling:`/`algorithm:` |
 | `sidecar/shadow_offset` | `native`/`proportional`/`1`/`2`, and both keys in one file |
 | `sidecar/tolerance` | comments, blank lines, padding, case; an unknown key or value leaves the stored choice alone rather than replacing it with a default |

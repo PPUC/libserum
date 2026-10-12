@@ -860,6 +860,58 @@ v6 snapshot policy:
     compatibility shims merely to keep older `v6` development snapshots
     loading.
 
+## cRZ archive API
+A `cRZ` is a zip archive holding one cROM. The authoring tools write it next to
+the `cROM`, and it is what gets passed around. Four public functions in
+`serum-decode.h` let a host handle it without bringing its own zip code:
+
+- `bool Serum_CRZ_Read(const char* crzPath, uint8_t** data, size_t* size)` —
+  the cROM bytes, in a buffer owned by libserum.
+- `void Serum_CRZ_Free(uint8_t* data)` — releases that buffer, so the caller
+  does not need libserum's allocator. `NULL` is accepted.
+- `bool Serum_CRZ_GetEntryName(const char* crzPath, char* name, size_t nameSize)`
+  — the name of the entry `Serum_CRZ_Read()` returns. Too small a buffer is an
+  error, not a truncation.
+- `bool Serum_CRZ_WriteFromFile(const char* crzPath, const char* entryName,
+  const char* cromPath)` — creates the archive from a cROM on disk.
+
+Rules that hold for all of them:
+- **One extraction.** `Serum_CRZ_Read()` and the loader both go through
+  `ExtractCRZEntryToHeap()`; `ExtractCRZEntryToMemory()` is the loader's
+  `std::vector` wrapper around it. Which entry counts as the cROM is decided in
+  one place, `FindCRZEntry()`: the first entry that is a regular, supported,
+  unencrypted file. The entry name is never interpreted and nothing is ever
+  extracted to a path — the archive is untrusted input.
+- **No runtime state.** They work on files only, neither need nor change a
+  loaded colorization, and may run while another thread colorizes. They
+  therefore do **not** hold the API mutex for their duration (deflating a
+  450 MB cROM takes seconds); only the shared error buffer is written under it.
+  They are also not gated on `is_real_machine()`: they do nothing unless a host
+  calls them, and the load path's own real-machine policy is untouched.
+- **Errors.** A failure returns `false` and stores a message for
+  `Serum_GetLastErrorMessage()`; every call clears the message first.
+- **Paths** are what miniz takes: UTF-8 on Windows (MSVC and MinGW-w64),
+  native bytes elsewhere.
+
+What `Serum_CRZ_WriteFromFile()` writes:
+- one entry, deflated at miniz's default level, streamed from the source file
+  through miniz's 64 KiB buffer, so the cROM is never held in memory;
+- sizes and CRC in the local header, no trailing data descriptor
+  (`MZ_ZIP_FLAG_WRITE_HEADER_SET_SIZE`), and no UTF-8 flag on an ASCII name —
+  the layout the ColorizingDMD Win32 editor's LiteZip produces, minus its `UT`
+  timestamp extra field;
+- zip64 only when miniz needs it, i.e. for a source of 4 GiB or more;
+- the source file's modification time as the entry time, so the archive bytes
+  are not a pure function of the cROM bytes.
+- The entry name has to be a plain file name; `/`, `\` and `:` anywhere in it,
+  and `.`/`..`, are refused before anything is written. miniz itself only
+  refuses a leading `/`, and an archive whose entry reads as a path is a hazard
+  for whatever extracts it by name.
+- An existing `crzPath` is replaced. The source is checked first, so a missing
+  cROM does not cost the caller the archive already there; if writing fails
+  after the archive was created, the incomplete file is removed. It does not
+  write beside the target and rename — a caller that needs that does it.
+
 ## Logging
 - Central callback configured by `Serum_SetLogCallback`.
 - `serum-decode.cpp` and `SceneGenerator.cpp` both use callback-based `Log(...)`.
@@ -868,6 +920,8 @@ v6 snapshot policy:
     exceptions and Windows structured exceptions (`SEH`) at the DLL boundary.
   - Fatal API-boundary failures are recorded in a process-global message buffer
     exposed through `Serum_GetLastErrorMessage()`.
+  - The same buffer carries the reason a `Serum_CRZ_*` call returned `false`,
+    on every platform.
   - Those fatal diagnostics are emitted through the configured log callback and
     also mirrored to `stderr` and `OutputDebugStringA`, so crash reasons remain
     visible even when the host does not install a log callback.
