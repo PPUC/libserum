@@ -460,8 +460,15 @@ class SerumData {
                           : std::vector<SceneData>{});
       }
     } else {
+      // An is256x64 project is rendered from its extra-plane data only, and a
+      // 32p-only request with FLAG_REQUEST_FALLBACK gets that plane too, so
+      // the data has to stay for it.
+      const bool nativePlaneFallback =
+          is256x64 && (m_loadFlags & FLAG_REQUEST_32P_FRAMES) &&
+          (m_loadFlags & FLAG_REQUEST_FALLBACK);
       if (SERUM_V2 == SerumVersion &&
-          ((fheight == 32 && !(m_loadFlags & FLAG_REQUEST_64P_FRAMES)) ||
+          ((fheight == 32 && !(m_loadFlags & FLAG_REQUEST_64P_FRAMES) &&
+            !nativePlaneFallback) ||
            (fheight == 64 && !(m_loadFlags & FLAG_REQUEST_32P_FRAMES)))) {
         isextraframe.clearIndex();
         isextrabackground.clearIndex();

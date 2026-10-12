@@ -286,6 +286,33 @@ static bool g_debugVerboseScenes = false;
 static std::vector<std::pair<uint8_t, uint8_t>> g_criticalTriggerMaskShapes;
 
 static SerumData g_serumData;
+
+// The frame the ROM delivers, as opposed to the two colour planes.
+//
+// For every layout but one the ROM frame has the geometry of the original
+// plane. An `is256x64` project is the exception: its ROM frame is 256x64 while
+// the header still describes a 128x32 original plane and a 256x64 extra one.
+// There the extra plane is the one that matches the ROM frame pixel for pixel,
+// and it is the only plane there is: libserum does not downscale, so the
+// 128x32 one is never rendered and what the file stores for it is not used.
+//
+// Everything that indexes, sizes, copies or hashes the ROM frame -- frame
+// identification, sprite detection, the shade lookups of the render passes,
+// the monochrome fallback, the copy kept for a later re-render -- has to go
+// through these rather than through fwidth/fheight.
+static inline uint32_t NativeFrameWidth(void) {
+  return g_serumData.is256x64 ? 256u : g_serumData.fwidth;
+}
+static inline uint32_t NativeFrameHeight(void) {
+  return g_serumData.is256x64 ? 64u : g_serumData.fheight;
+}
+static inline uint32_t NativeFramePixels(void) {
+  return NativeFrameWidth() * NativeFrameHeight();
+}
+// True when the extra plane has the ROM frame's own geometry, so it reads the
+// ROM shade 1:1 and sprites land in it at their detected position unscaled.
+// It is then also the only plane that is ever rendered.
+static inline bool ExtraPlaneIsNative(void) { return g_serumData.is256x64; }
 uint16_t sceneFrameCount = 0;
 uint16_t sceneCurrentFrame = 0;
 uint16_t sceneDurationPerFrame = 0;
@@ -417,9 +444,7 @@ static uint32_t IdentifyCriticalTriggerFrame(uint8_t* frame) {
     return IDENTIFY_NO_FRAME;
   }
 
-  const uint32_t pixels = g_serumData.is256x64
-                              ? (256 * 64)
-                              : (g_serumData.fwidth * g_serumData.fheight);
+  const uint32_t pixels = NativeFramePixels();
   for (const auto& maskShape : g_criticalTriggerMaskShapes) {
     const uint32_t hash =
         calc_crc32(frame, maskShape.first, pixels, maskShape.second);
@@ -503,17 +528,12 @@ static uint32_t ResolveIdentifiedFrameMatch(uint8_t* frame, uint32_t inputCrc,
     }
     lastfound_stream = candidateFrameId;
     lastfound = candidateFrameId;
-    lastframe_full_crc =
-        crc32_fast(frame, g_serumData.is256x64
-                              ? (256 * 64)
-                              : (g_serumData.fwidth * g_serumData.fheight));
+    lastframe_full_crc = crc32_fast(frame, NativeFramePixels());
     first_match = false;
     return candidateFrameId;
   }
 
-  const uint32_t full_crc = crc32_fast(
-      frame, g_serumData.is256x64 ? (256 * 64)
-                                  : (g_serumData.fwidth * g_serumData.fheight));
+  const uint32_t full_crc = crc32_fast(frame, NativeFramePixels());
   if (full_crc != lastframe_full_crc) {
     if (DebugIdentifyVerboseEnabled() &&
         DebugTraceMatches(inputCrc, candidateFrameId)) {
@@ -1585,6 +1605,25 @@ bool is_real_machine() {
 }
 #endif
 
+// An is256x64 project has exactly one geometry: a 256x64 ROM frame, a 128x32
+// original plane and, when there is one, a 256x64 extra plane. The native
+// accessors and every buffer sized from them rely on it.
+static bool ValidateNativeGeometry(const char* sourceTag) {
+  if (!g_serumData.is256x64) return true;
+  const bool hasExtra =
+      g_serumData.fwidth_extra > 0 || g_serumData.fheight_extra > 0;
+  if (g_serumData.fwidth != 128 || g_serumData.fheight != 32 ||
+      (hasExtra &&
+       (g_serumData.fwidth_extra != 256 || g_serumData.fheight_extra != 64))) {
+    Log("Invalid 256x64 project geometry in %s: %ux%u with extra %ux%u "
+        "(expected 128x32 with extra 256x64)",
+        sourceTag, g_serumData.fwidth, g_serumData.fheight,
+        g_serumData.fwidth_extra, g_serumData.fheight_extra);
+    return false;
+  }
+  return true;
+}
+
 static bool ValidateLoadedGeometry(bool isV2, const char* sourceTag) {
   auto is_valid_frame = [](uint32_t width, uint32_t height) -> bool {
     return width > 0 && height > 0 && width <= MAX_FRAME_WIDTH &&
@@ -1945,9 +1984,7 @@ uint32_t crc32_fast_mask_shape(uint8_t* source, uint8_t* mask, uint32_t n)
 }
 
 uint32_t calc_crc32(uint8_t* source, uint8_t mask, uint32_t n, uint8_t Shape) {
-  const uint32_t pixels = g_serumData.is256x64
-                              ? (256 * 64)
-                              : (g_serumData.fwidth * g_serumData.fheight);
+  const uint32_t pixels = NativeFramePixels();
   if (mask < 255) {
     uint8_t* pmask = g_serumData.compmasks[mask];
     if (Shape == 1)
@@ -2275,7 +2312,19 @@ static bool PreferExtraOnlyModeRequested(const uint8_t flags) {
   return IsExtra32Requested(flags) || IsExtra64Requested(flags);
 }
 
+// The one plane of an is256x64 project is the 256x64 one. A 64p request asks
+// for it. A 32p-only request asks for a plane that does not exist, and gets
+// the 256x64 one instead exactly when FLAG_REQUEST_FALLBACK says the other
+// plane will do -- the flag's meaning in every layout.
+static bool NativePlaneRequested(const uint8_t flags) {
+  return g_serumData.is256x64 && ((flags & FLAG_REQUEST_64P_FRAMES) != 0 ||
+                                  ((flags & FLAG_REQUEST_32P_FRAMES) != 0 &&
+                                   (flags & FLAG_REQUEST_FALLBACK) != 0));
+}
+
 static bool Allocate32OutputPlane(const uint8_t runtimeFlags) {
+  // There is no 32p plane to fill, whatever was asked for.
+  if (g_serumData.is256x64) return false;
   return (runtimeFlags & FLAG_REQUEST_32P_FRAMES) != 0 ||
          (isoriginalfallbackrequested && g_serumData.fheight == 32) ||
          // 32p content with a 64p request: the original plane is the render
@@ -2285,11 +2334,25 @@ static bool Allocate32OutputPlane(const uint8_t runtimeFlags) {
 }
 
 static bool Allocate64OutputPlane(const uint8_t runtimeFlags) {
+  if (g_serumData.is256x64) return NativePlaneRequested(runtimeFlags);
   return (runtimeFlags & FLAG_REQUEST_64P_FRAMES) != 0 ||
          (isoriginalfallbackrequested && g_serumData.fheight == 64);
 }
 
 static void ConfigureRequestedOutputMode(const uint8_t runtimeFlags) {
+  if (g_serumData.is256x64) {
+    // The ROM frame is 256x64 and so is the only plane: the extra one, read
+    // from the ROM frame pixel for pixel through the historical all-or-nothing
+    // path that 64p-native content uses. Nothing is scaled in either
+    // direction, so the original plane is neither a render target nor a
+    // fallback, and layer mode stays off.
+    isoriginalrequested = false;
+    isoriginalfallbackrequested = false;
+    upscaleExtraFromOriginal = false;
+    originalPlaneRequestedByCaller = false;
+    isextrarequested = NativePlaneRequested(runtimeFlags);
+    return;
+  }
   isoriginalrequested = IsOriginal32Requested(runtimeFlags) ||
                         IsOriginal64Requested(runtimeFlags);
   isextrarequested =
@@ -3518,7 +3581,10 @@ bool Serum_SaveConcentrate(const char* filename) {
 // Returns false if any allocation failed; the caller frees and gives up.
 static bool AllocateFrameWorkBuffers(void) {
   const size_t px = (size_t)g_serumData.fwidth * g_serumData.fheight;
-  frameshape = (uint8_t*)malloc(px);
+  // Sprite detection works on the ROM frame, so its shape copy and its dword
+  // index are sized by that frame. Everything else here belongs to the scaled
+  // layer and is sized by the original plane it is rendered at.
+  frameshape = (uint8_t*)malloc(NativeFramePixels());
   scaledLayerCoverage = (uint8_t*)malloc(px);
   frameLayerCoverage = (uint8_t*)malloc(px);
   separatorMask = (uint8_t*)malloc(px);
@@ -3539,7 +3605,7 @@ static bool AllocateFrameWorkBuffers(void) {
       (uint8_t*)malloc((size_t)kSeparatorMaxColors * g_serumData.fwidth);
   separatorTextFrame = (uint16_t*)malloc(px * sizeof(uint16_t));
   upscaleIndexPlane = (uint32_t*)malloc(px * 4 * sizeof(uint32_t));
-  AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
+  AllocateFrameDwordTable(NativeFrameWidth(), NativeFrameHeight());
   // Zeroed, not just allocated: the separator filter reads sdDynaLayerMap to
   // tell dynamic content from artwork, and it is only cleared per frame once
   // a layer-mode render begins. Before that it would be reading whatever the
@@ -3563,7 +3629,8 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
   mySerum.flags = runtimeFlags;
   mySerum.nocolors = g_serumData.nocolors;
 
-  if (!ValidateLoadedGeometry(g_serumData.SerumVersion == SERUM_V2, "cROMc")) {
+  if (!ValidateLoadedGeometry(g_serumData.SerumVersion == SERUM_V2, "cROMc") ||
+      !ValidateNativeGeometry("cROMc")) {
     Log("Failed to vaildate cROMc geometry.");
     enabled = false;
     return NULL;
@@ -3751,9 +3818,6 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
   mySerum.width32 = 0;
   mySerum.width64 = 0;
   mySerum.flags = runtimeFlags;
-  ConfigureRequestedOutputMode(runtimeFlags);
-  const bool loadExtraDataRequested =
-      IsExtra32Requested(loadFlags) || IsExtra64Requested(loadFlags);
   if (!ReadValue(reader, g_serumData.nframes) ||
       !ReadValue(reader, g_serumData.nocolors)) {
     enabled = false;
@@ -3771,6 +3835,8 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
     enabled = false;
     return NULL;
   }
+  // Older headers do not carry the flag; Serum_free() has already cleared
+  // whatever the previous colorization set.
   if (sizeheader >= 20 * sizeof(uint32_t)) {
     int is256x64;
     if (!ReadValue(reader, is256x64)) {
@@ -3779,6 +3845,17 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
     }
     g_serumData.is256x64 = (is256x64 != 0);
   }
+  if (!ValidateNativeGeometry("cROM/v2")) {
+    enabled = false;
+    return NULL;
+  }
+  // Only now: which planes are rendered, whether libserum upscales, and which
+  // request needs the extra-plane data all depend on whether the ROM frame is
+  // 256x64.
+  ConfigureRequestedOutputMode(runtimeFlags);
+  const bool loadExtraDataRequested = IsExtra32Requested(loadFlags) ||
+                                      IsExtra64Requested(loadFlags) ||
+                                      NativePlaneRequested(loadFlags);
 
   if (!AllocateFrameWorkBuffers()) {
     Serum_free();
@@ -3836,10 +3913,8 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
   g_serumData.hashcodes.readFromCRomReader(1, g_serumData.nframes, reader);
   g_serumData.shapecompmode.readFromCRomReader(1, g_serumData.nframes, reader);
   g_serumData.compmaskID.readFromCRomReader(1, g_serumData.nframes, reader);
-  g_serumData.compmasks.readFromCRomReader(
-      g_serumData.is256x64 ? (256 * 64)
-                           : (g_serumData.fwidth * g_serumData.fheight),
-      g_serumData.ncompmasks, reader);
+  g_serumData.compmasks.readFromCRomReader(NativeFramePixels(),
+                                           g_serumData.ncompmasks, reader);
   g_serumData.isextraframe.readFromCRomReader(1, g_serumData.nframes, reader);
   if (loadExtraDataRequested) {
     for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
@@ -4726,9 +4801,7 @@ static void BuildFrameLookupVectors(void) {
   if (g_serumData.nframes == 0) return;
   g_serumData.frameIsScene.resize(g_serumData.nframes, 0);
   g_serumData.frameToNormalBucket.assign(g_serumData.nframes, 0xffffffffu);
-  const uint32_t pixels = g_serumData.is256x64
-                              ? (256 * 64)
-                              : (g_serumData.fwidth * g_serumData.fheight);
+  const uint32_t pixels = NativeFramePixels();
 
   // Build scene signatures in the same domain used by Identify_Frame:
   // (mask, shape, crc32 over original frame pixels).
@@ -4751,7 +4824,12 @@ static void BuildFrameLookupVectors(void) {
     std::unordered_set<uint64_t> sceneSignatures;
     sceneSignatures.reserve(uniqueMaskShapes.size() * 64);
 
-    uint8_t generatedSceneFrame[128 * 32];
+    // A scene marker is a 128x32 frame, but it is hashed like any ROM frame,
+    // over NativeFramePixels(). For an is256x64 project that is 16384 bytes:
+    // the marker followed by zeros, which is what the runtime `sceneFrame`
+    // buffer holds when a scene is played. Sized and zeroed to match, so the
+    // lookup built here agrees with identification there.
+    uint8_t generatedSceneFrame[MAX_FRAME_WIDTH * MAX_FRAME_HEIGHT] = {0};
     const auto& scenes = g_serumData.sceneGenerator->getSceneData();
     for (const auto& scene : scenes) {
       const int groups = scene.frameGroups > 0 ? scene.frameGroups : 1;
@@ -4948,9 +5026,7 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   uint32_t tj = sceneFrameRequested
                     ? lastfound_scene
                     : lastfound_normal;  // stream-local search start
-  const uint32_t pixels = g_serumData.is256x64
-                              ? (256 * 64)
-                              : (g_serumData.fwidth * g_serumData.fheight);
+  const uint32_t pixels = NativeFramePixels();
   const uint32_t inputCrc = crc32_fast(frame, pixels);
   uint32_t& lastfound_stream =
       sceneFrameRequested ? lastfound_scene : lastfound_normal;
@@ -5338,7 +5414,13 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                      uint16_t* pfry, uint16_t* pspx, uint16_t* pspy,
                      uint16_t* pwid, uint16_t* phei) {
   *nspr = 0;
-  if (g_serumData.fwidth < 4 || quelleframe >= g_serumData.nframes) {
+  // Sprites are matched against the ROM frame as it arrives, at its own
+  // resolution, never against a scaled version of it: the bounding boxes, the
+  // detection areas and the positions reported are ROM-frame coordinates. For
+  // an is256x64 project that frame is 256x64, not the 128x32 original plane.
+  const uint32_t nativeWidth = NativeFrameWidth();
+  const uint32_t nativeHeight = NativeFrameHeight();
+  if (nativeWidth < 4 || quelleframe >= g_serumData.nframes) {
     return false;
   }
 
@@ -5356,16 +5438,16 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
     if (!frameDwordKeys || !frameDwordStamps) {
       Free_element((void**)&frameDwordKeys);
       Free_element((void**)&frameDwordStamps);
-      AllocateFrameDwordTable(g_serumData.fwidth, g_serumData.fheight);
+      AllocateFrameDwordTable(nativeWidth, nativeHeight);
       if (!frameDwordKeys || !frameDwordStamps) return;
     }
     FrameDwordsBegin();
-    for (uint32_t y = 0; y < g_serumData.fheight; ++y) {
-      const uint32_t rowBase = y * g_serumData.fwidth;
+    for (uint32_t y = 0; y < nativeHeight; ++y) {
+      const uint32_t rowBase = y * nativeWidth;
       uint32_t dword = (uint32_t)(recframe[rowBase] << 8) |
                        (uint32_t)(recframe[rowBase + 1] << 16) |
                        (uint32_t)(recframe[rowBase + 2] << 24);
-      for (uint32_t x = 0; x <= g_serumData.fwidth - 4; ++x) {
+      for (uint32_t x = 0; x <= nativeWidth - 4; ++x) {
         dword = (dword >> 8) | (uint32_t)(recframe[rowBase + x + 3] << 24);
         FrameDwordsInsert(dword);
       }
@@ -5434,7 +5516,7 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                                   : (g_serumData.sprshapemode[qspr][0] > 0);
     if (isshapecheck && frameHasShapeCandidates) {
       if (!hasShapeFrameBuffer) {
-        for (int i = 0; i < g_serumData.fwidth * g_serumData.fheight; i++) {
+        for (int i = 0; i < nativeWidth * nativeHeight; i++) {
           frameshape[i] = (Frame[i] > 0) ? 1 : 0;
         }
         hasShapeFrameBuffer = true;
@@ -5442,14 +5524,14 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
       Frame = frameshape;
       if (!frameShapeDwordsBuilt) {
         frameShapeDwords.clear();
-        frameShapeDwords.reserve(static_cast<size_t>(g_serumData.fheight) *
-                                 std::max(1u, g_serumData.fwidth - 3));
-        for (uint32_t y = 0; y < g_serumData.fheight; ++y) {
-          const uint32_t rowBase = y * g_serumData.fwidth;
+        frameShapeDwords.reserve(static_cast<size_t>(nativeHeight) *
+                                 std::max(1u, nativeWidth - 3));
+        for (uint32_t y = 0; y < nativeHeight; ++y) {
+          const uint32_t rowBase = y * nativeWidth;
           uint32_t dword = (uint32_t)(frameshape[rowBase] << 8) |
                            (uint32_t)(frameshape[rowBase + 1] << 16) |
                            (uint32_t)(frameshape[rowBase + 2] << 24);
-          for (uint32_t x = 0; x <= g_serumData.fwidth - 4; ++x) {
+          for (uint32_t x = 0; x <= nativeWidth - 4; ++x) {
             dword =
                 (dword >> 8) | (uint32_t)(frameshape[rowBase + x + 3] << 24);
             frameShapeDwords.insert(dword);
@@ -5498,11 +5580,11 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
 
       // we look for the sprite in the frame sent
       for (short ty = minyBB; ty <= maxyBB; ty++) {
-        mdword = (uint32_t)(Frame[ty * g_serumData.fwidth + minxBB] << 8) |
-                 (uint32_t)(Frame[ty * g_serumData.fwidth + minxBB + 1] << 16) |
-                 (uint32_t)(Frame[ty * g_serumData.fwidth + minxBB + 2] << 24);
+        mdword = (uint32_t)(Frame[ty * nativeWidth + minxBB] << 8) |
+                 (uint32_t)(Frame[ty * nativeWidth + minxBB + 1] << 16) |
+                 (uint32_t)(Frame[ty * nativeWidth + minxBB + 2] << 24);
         for (short tx = minxBB; tx <= maxxBB - 3; tx++) {
-          uint32_t tj = ty * g_serumData.fwidth + tx;
+          uint32_t tj = ty * nativeWidth + tx;
           mdword = (mdword >> 8) | (uint32_t)(Frame[tj + 3] << 24);
           // we look for the magic dword first:
           const uint16_t sddp = detMeta.detectionWordPos;
@@ -5603,7 +5685,7 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                 const uint32_t spriteBase =
                     spriteRow * MAX_SPRITE_WIDTH + segFrom;
                 const uint32_t frameBase =
-                    static_cast<uint32_t>(tk + offsy) * g_serumData.fwidth +
+                    static_cast<uint32_t>(tk + offsy) * nativeWidth +
                     static_cast<uint32_t>(segFrom - detx + offsx);
                 for (uint16_t x = segFrom; x < segTo; ++x) {
                   const uint32_t spriteOffset = spriteBase + (x - segFrom);
@@ -6113,15 +6195,19 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     }
     memset(isdynapix, 0, g_serumData.fheight_extra * g_serumData.fwidth_extra);
     const bool upscaleExtra = ExtraPlaneNeedsUpscaling();
+    const bool extraIsNative = ExtraPlaneIsNative();
     for (tj = 0; tj < g_serumData.fheight_extra; tj++) {
       for (ti = 0; ti < g_serumData.fwidth_extra; ti++) {
         uint16_t tk = tj * g_serumData.fwidth_extra + ti;
-        // The uncolorized ROM frame only exists at original resolution, so
-        // the source shade for this extra-plane pixel has to be scaled.
+        // The ROM frame normally has the original plane's geometry, so the
+        // source shade for this extra-plane pixel has to be scaled. Unless
+        // this plane is the one with the ROM frame's own geometry: then it is
+        // simply that pixel.
         const uint8_t srcShade =
-            upscaleExtra ? SampleUpscaled2x(frame, g_serumData.fwidth,
-                                            g_serumData.fheight, ti, tj)
-                         : frame[tj * 2 * g_serumData.fwidth + ti * 2];
+            extraIsNative  ? frame[tk]
+            : upscaleExtra ? SampleUpscaled2x(frame, g_serumData.fwidth,
+                                              g_serumData.fheight, ti, tj)
+                           : frame[tj * 2 * g_serumData.fwidth + ti * 2];
 
         // A pixel whose SD source is inside a dynamic zone is underlay: the
         // layer will paint over it. Deciding it by srcShade instead makes
@@ -6559,6 +6645,18 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
       prt = g_serumData.colorrotations_v2_extra[IDfound];
       cshft = colorshifts64;
     }
+    // An extra plane with the ROM frame's own geometry takes the sprite where
+    // it was found and as large as it was found: its sprite arrays line up
+    // with `spriteoriginal` pixel for pixel.
+    const bool extraIsNative = ExtraPlaneIsNative();
+    if (extraIsNative) {
+      thei = hei;
+      twid = wid;
+      tfrx = frx;
+      tfry = fry;
+      tspx = spx;
+      tspy = spy;
+    }
     for (uint16_t tj = 0; tj < thei; tj++) {
       for (uint16_t ti = 0; ti < twid; ti++) {
         uint16_t tk = (tfry + tj) * g_serumData.fwidth_extra + tfrx + ti;
@@ -6616,11 +6714,12 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
             // Same original-resolution source frame as in Colorize_Framev2,
             // addressed through the sprite's extra-plane position.
             const uint8_t srcShade =
-                upscaleExtra ? SampleUpscaled2x(oframe, g_serumData.fwidth,
-                                                g_serumData.fheight, tfrx + ti,
-                                                tfry + tj)
-                             : oframe[(tj * 2 + fry) * g_serumData.fwidth +
-                                      ti * 2 + frx];
+                extraIsNative  ? oframe[tk]
+                : upscaleExtra ? SampleUpscaled2x(oframe, g_serumData.fwidth,
+                                                  g_serumData.fheight,
+                                                  tfrx + ti, tfry + tj)
+                               : oframe[(tj * 2 + fry) * g_serumData.fwidth +
+                                        ti * 2 + frx];
             pfr[tk] =
                 g_serumData.dynasprite4cols_extra
                     [nosprite][dynacouche * g_serumData.nocolors + srcShade];
@@ -6928,7 +7027,14 @@ static bool CaptureMonochromePaletteFromFrameV2(uint32_t frameId) {
     monochromePaletteV2Length = 0;
     return false;
   }
-  const uint16_t* dyna = (g_serumData.fheight == 32)
+  // An is256x64 project is rendered from its extra-plane data only, so the
+  // palette is that plane's first colour set too. A frame without extra
+  // content has none to give.
+  if (g_serumData.is256x64 && g_serumData.isextraframe[frameId][0] == 0) {
+    monochromePaletteV2Length = 0;
+    return false;
+  }
+  const uint16_t* dyna = (g_serumData.fheight == 32 && !g_serumData.is256x64)
                              ? g_serumData.dyna4cols_v2[frameId]
                              : g_serumData.dyna4cols_v2_extra[frameId];
   if (!dyna) {
@@ -7111,8 +7217,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     frameID = Identify_Frame(frame, sceneFrameRequested);
   }
   if (frame && g_serumData.fwidth > 0 && g_serumData.fheight > 0) {
-    g_debugCurrentInputCrc =
-        crc32_fast(frame, g_serumData.fwidth * g_serumData.fheight);
+    g_debugCurrentInputCrc = crc32_fast(frame, NativeFramePixels());
   }
   if (DebugTraceAllInputsEnabled()) {
     Log("Serum debug input: api=v2 inputCrc=%u sceneRequested=%s "
@@ -7135,7 +7240,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     // frame until a frame in the project is detected again. The code below
     // takes care of that.
     if ((!monochromeMode && !monochromePaletteMode) ||
-        !IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
+        !IsFullBlackFrame(frame, NativeFramePixels())) {
       monochromeMode =
           (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
       monochromePaletteMode = false;
@@ -7245,7 +7350,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
           lastTriggerID);
     }
     if (!sceneFrameRequested) {
-      memcpy(lastFrame, frame, g_serumData.fwidth * g_serumData.fheight);
+      memcpy(lastFrame, frame, NativeFramePixels());
       lastFrameId = frameID;
       const uint32_t matchedTriggerId = g_serumData.triggerIDs[lastfound][0];
 
@@ -7680,7 +7785,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
        (now - firstUnknownFrameTimestamp) >= ignoreUnknownFramesTimeout) ||
       (maxFramesToSkip && (frameID == IDENTIFY_NO_FRAME) &&
        (++framesSkippedCounter >= maxFramesToSkip))) {
-    // Apply monochrome to original resolution
+    // Apply monochrome to original resolution. An is256x64 project has no
+    // such plane (frame32 is never allocated for it), so it takes the last
+    // branch and gets its one plane, the 256x64 one, from the block below.
     uint16_t* monochromeFrame = nullptr;
     if (g_serumData.fheight == 32 && mySerum.frame32) {
       monochromeFrame = mySerum.frame32;
@@ -7731,10 +7838,14 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
       extraPlaneIsDerived = false;
       // Scale from original frame to extra resolution
       const bool upscaleExtra = IsExactDoubleExtraPlane();
+      const bool extraIsNative = ExtraPlaneIsNative();
       for (uint16_t y = 0; y < g_serumData.fheight_extra; y++) {
         for (uint16_t x = 0; x < g_serumData.fwidth_extra; x++) {
           uint8_t src;
-          if (upscaleExtra) {
+          if (extraIsNative) {
+            // The ROM frame has this plane's geometry: nothing to scale.
+            src = frame[(uint32_t)y * g_serumData.fwidth_extra + x];
+          } else if (upscaleExtra) {
             src = SampleUpscaled2x(frame, g_serumData.fwidth,
                                    g_serumData.fheight, x, y);
           } else {

@@ -178,6 +178,11 @@ Requested-output mode:
 - Authoring/update load flows may still widen internal load flags so both
   planes remain available for `.cROMc` regeneration, but runtime output
   behavior must continue to follow the caller's original request flags.
+- An `is256x64` project has one plane, the `256x64` one, and none of the modes
+  above applies to it as written: a `64p` request gets that plane, a
+  `32p`-only request gets nothing, and a `32p`-only request with
+  `FLAG_REQUEST_FALLBACK` gets the `256x64` plane. See "Output contract" under
+  "The ROM frame, and `is256x64` projects".
 
 1. Reset all runtime state via `Serum_free()`.
 2. On real-machine runtime (`is_real_machine()==true`):
@@ -243,6 +248,10 @@ Important:
 
 ## Frame identification
 Main function: `Identify_Frame(uint8_t* frame, bool sceneFrameRequested)`.
+
+The incoming frame is the ROM frame, `NativeFramePixels()` bytes of it: for an
+`is256x64` project that is `256x64`, not the `128x32` its header gives as
+`fwidth x fheight` (see "The ROM frame, and `is256x64` projects").
 
 Identification compares incoming original DMD frame against loaded frame definitions using:
 - `compmaskID` (mask)
@@ -368,6 +377,8 @@ Dynamic-shadow hot path:
   (8-connected neighbors) rather than repeated hand-written branch blocks.
 
 Sprite matching prefilter:
+- `Check_Spritesv2` works on the ROM frame at its own resolution (see "The ROM
+  frame, and `is256x64` projects").
 - `Check_Spritesv2` builds an exact per-frame 32-bit dword index and skips
   detection-area scans for detection words that are not present.
 - This replaces the Bloom prefilter path (no false positives from hash
@@ -422,6 +433,211 @@ Critical-trigger fast rejection:
 - If such a critical monochrome trigger frame does match, it is allowed to
   preempt the non-interruptable scene immediately; libserum stops the current
   scene/end-hold and processes the monochrome-trigger frame normally.
+
+## The ROM frame, and `is256x64` projects
+
+The frame a ROM delivers and the colour planes of a colorization are separate
+things. Everything that touches the ROM frame — the buffer passed to
+`Serum_Colorize()`, its hash, sprite detection, the shade looked up for a
+pixel, the copy in `lastFrame` — goes through the *native frame* accessors in
+`serum-decode.cpp`, never through `fwidth`/`fheight` directly:
+
+- `NativeFrameWidth()`, `NativeFrameHeight()`, `NativeFramePixels()`
+- `ExtraPlaneIsNative()` — the extra plane has the ROM frame's geometry, and is
+  the only plane rendered
+
+There are three layouts:
+
+| | ROM frame | original plane | extra plane | planes libserum renders |
+|---|---|---|---|---|
+| 32-row ROM | `fwidth x 32` | the ROM frame's size | twice it (`64p`) | both |
+| 64-row ROM (e.g. `192x64`) | `fwidth x 64` | the ROM frame's size | half of it (`32p`) | both |
+| `is256x64` | `256x64` | stored at `128x32`, **not used** | the ROM frame's size, `256x64` | the `256x64` one only |
+
+The half-size plane of the 64-row layout exists for legacy layouts and is
+rendered as it always was.
+
+`is256x64` is a header flag (cROM header revision 20, `sizeheader >= 20 * 4`).
+Such a file is accepted only with `fwidth x fheight == 128x32` and an extra
+plane that is `256x64` (or absent); `ValidateNativeGeometry()` refuses anything
+else at load, from a cROM and from a cROMc alike. The flag belongs to the
+colorization and is cleared by `SerumData::Clear()`: an older header and a v1
+file never set it.
+
+**Rule: sprite matching and all rendering happen on the ROM frame at its own
+resolution. libserum does not downscale, so a ROM whose frame is `256x64` has
+no `128x32` output.**
+
+### What an `is256x64` project means at runtime
+
+- The caller passes `256 * 64` bytes to `Serum_Colorize()`.
+- **Identification** hashes all `256 * 64` bytes; comparison masks are `256x64`.
+- **There is one output plane, `256x64`, in `frame64`.** It is the stored extra
+  plane, rendered 1:1 with the ROM frame: plane pixel `(x, y)` reads the ROM
+  shade at `(x, y)`. That shade decides "ROM lit nothing here" for a background
+  mask, indexes a dynamic colour set, and is what the monochrome fallback
+  paints. It is rendered by the historical all-or-nothing path the 64-row
+  layout uses, from `cframes_v2_extra`, `dynamasks_extra`,
+  `dyna4cols_v2_extra`, `backgroundframes_v2_extra`, `backgroundmask_extra`,
+  `dynashadowsdir_extra`/`dynashadowscol_extra` and `colorrotations_v2_extra`.
+- **Nothing is scaled, in either direction.** `upscaleExtraFromOriginal` (layer
+  mode) is never set, and `isoriginalrequested` / `isoriginalfallbackrequested`
+  are never set either, so the original-plane passes of `Colorize_Framev2()`
+  and `Colorize_Spritev2()` do not run. `scaling.txt` and the scaling algorithm
+  have no effect.
+- **The stored `128x32` data is loaded and ignored**: `cframes_v2`,
+  `dynamasks`, `dyna4cols_v2`, `backgroundframes_v2`, `backgroundmask`,
+  `dynashadowsdir`/`dynashadowscol`, `colorrotations_v2`, `spritecolored`,
+  `dynaspritemasks`, `dynasprite4cols`. The Win32 editor writes them, a cROM
+  and a cROMc carry them, and no runtime path reads them.
+- **Sprite detection** (`Check_Spritesv2`) runs on the `256x64` frame.
+  `framespriteBB`, `spritedetareas`, `spritedetdwordpos`, the pixels of
+  `spriteoriginal`, and the reported `frx/fry/spx/spy/wid/hei` are all in
+  ROM-frame pixels. The exact-dword index and the shape-mode copy of the frame
+  (`frameshape`) are sized by the ROM frame.
+- **Sprite drawing** (`Colorize_Spritev2`), for a sprite found at `(frx, fry)`
+  showing its region `(spx, spy, wid, hei)`: plane pixel `(frx + i, fry + j)`
+  takes sprite pixel `(spx + i, spy + j)` for `i < wid`, `j < hei`. Opacity is
+  `spritemask_extra`, colour is `spritecolored_extra`, the dynamic mask is
+  `dynaspritemasks_extra` with `dynasprite4cols_extra`, indexed by the ROM
+  shade at that same pixel. These arrays line up with `spriteoriginal` pixel
+  for pixel.
+- **The monochrome palette trigger** (`MONOCHROME_PALETTE_TRIGGER_ID`) takes its
+  palette from the frame's `dyna4cols_v2_extra` set 0, not `dyna4cols_v2`. On a
+  frame without `isextraframe` there is none and the capture fails, as it does
+  elsewhere when the set is missing.
+- **`lastFrame`**, the copy of the last identified ROM frame that scene handling
+  re-renders, is a whole `256x64` frame.
+- **A black frame** does not end a monochrome stream; "black" is judged over the
+  whole ROM frame.
+- **Scene markers** are `128x32` frames from `SceneGenerator`, in every layout.
+  They are identified like a ROM frame, so for these projects they are hashed as
+  the `4096` marker bytes followed by `12288` zeros — that is what the runtime
+  `sceneFrame` buffer holds, and `BuildFrameLookupVectors()` hashes its
+  generated markers the same way. Nothing draws a marker as a picture; a scene
+  frame's content is whatever the colorization stores for the frame it
+  identifies, i.e. that frame's `256x64` extra-plane data. Scenes, background
+  scenes and their composition therefore all happen on the one plane.
+
+### Output contract
+
+`NativePlaneRequested()` decides whether the plane is produced, and
+`ConfigureRequestedOutputMode()`, `Allocate32OutputPlane()` and
+`Allocate64OutputPlane()` follow it. It follows the precedent of a 64-row
+project asked for `32p` only, mirrored: the plane that would need scaling is
+not available, `FLAG_REQUEST_FALLBACK` means "the other plane will do".
+
+| `Serum_Load()` flags | plane | after `Serum_Load()` | after `Serum_Colorize()` on a renderable frame |
+|---|---|---|---|
+| `64P` | `256x64` | `frame64` allocated, `width64 == 256`; `frame32 == NULL`, `width32 == 0` | `FLAG_RETURNED_64P_FRAME_OK`, `width64 == 256`; no `FLAG_RETURNED_32P_FRAME_OK`, `width32 == 0` |
+| `32P \| 64P` (also: neither, which requests both) | `256x64` | same | same |
+| `32P \| FALLBACK` | `256x64` | same | same |
+| `64P \| FALLBACK`, `32P \| 64P \| FALLBACK` | `256x64` | same | same; there is nothing to fall back to, the flag changes nothing |
+| `32P` | none | load succeeds; `frame32 == NULL`, `frame64 == NULL`, `width32 == width64 == 0` | neither `FRAME_OK` flag, both widths `0` |
+
+- `frame32`, `rotations32`, `rotationsinframe32` and `modifiedelements32` are
+  never allocated for these projects, and `FLAG_RETURNED_32P_FRAME_OK` /
+  `FLAG_RETURNED_V2_ROTATED32` are never reported.
+- `mySerum.flags` after `Serum_Load()` is, as for every project, the request
+  flags plus `FLAG_RETURNED_EXTRA_AVAILABLE` when the plane is requested and at
+  least one frame has extra content.
+- **A `32P`-only request** still loads the colorization and still identifies
+  frames: an identified frame is a "new frame" return (`0`: no plane, so no
+  rotation timer) with `frameID` set, and **triggers are reported**; monochrome
+  mode is tracked. There is only no picture. Because the finished output is
+  then always the same (nothing), `FinishedFrameIsAlreadyOnDisplay()` reports
+  the next identified frame that fires no trigger as `IDENTIFY_SAME_FRAME`,
+  like any other frame that changes nothing on the display.
+- **An unknown frame** (monochrome mode, `Serum_SetMaximumUnknownFramesToSkip()`,
+  `Serum_SetIgnoreUnknownFramesTimeout()`) is painted in grey or in the
+  monochrome palette on the `256x64` plane, pixel for pixel, with
+  `FLAG_RETURNED_64P_FRAME_OK` and `width64 == 256` only. Without the plane
+  (`32P`-only) the call still returns `0` with `frameID == 0xfffffffd`, and
+  both `FRAME_OK` flags and widths are clear.
+- **Extra-plane data is kept at load** whenever the plane is requested,
+  including for `32P | FALLBACK`: the raw v2 loader and the cROMc
+  deserializer (`SerumData::serialize()`) both test for it before dropping the
+  `isextra*` indices.
+- On a real machine `FLAG_REQUEST_64P_FRAMES` is forced on by the existing load
+  policy, so the plane is always produced there.
+
+### Frames without extra-plane data
+
+A frame gets its `256x64` plane only if `CheckExtraFrameAvailable()` holds — the
+frame has `isextraframe`, its background (if any) has `isextrabackground`, and
+**every** sprite listed for the frame has `isextrasprite`. That is the existing
+all-or-nothing rule of the extra plane in the non-layer path.
+
+Where it does not hold there is nothing to fall back to: libserum does not
+upscale the unused `128x32` data, with or without `FLAG_REQUEST_FALLBACK`. The
+frame is treated the way a 64-row project treats a frame without a `32p`
+version under a `32p`-only request: it is identified, `frameID` and the trigger
+are reported and the return value is the usual one, but neither `FRAME_OK` flag
+is set and both widths are `0` for that call. `frame64` is not written and keeps
+the previous picture; both rotation planes are reset. An editor must therefore
+keep all three flags set throughout an `is256x64` project.
+
+A file with the flag and no extra plane at all loads and identifies frames but
+never produces a picture.
+
+### The same statements for the other two layouts
+
+A rendered plane holds its content — frame, masks, sprite picture — at its own
+resolution, and reaches the ROM frame through its scale relative to it.
+
+| | plane the size of the ROM frame | plane half its size | plane twice its size |
+|---|---|---|---|
+| which plane | original (32-row, 64-row); extra (`is256x64`) | extra (64-row) | extra (32-row) |
+| ROM shade for plane pixel `(x, y)` | `(x, y)` | `(2x, 2y)` | `SampleUpscaled2x` at `(x, y)` — but see below |
+| sprite lands at | `(frx, fry)`, `wid x hei` | `(frx/2, fry/2)`, `wid/2 x hei/2` | `(2frx, 2fry)`, `2wid x 2hei` |
+| sprite pixel read | `(spx + i, spy + j)` | `(spx/2 + i, spy/2 + j)` | `(2spx + i, 2spy + j)` |
+| dynamic sprite shade | ROM `(frx + i, fry + j)` | ROM `(frx + 2i, fry + 2j)` | `SampleUpscaled2x` |
+
+Sprite detection, and with it `framespriteBB`, the detection areas and dwords
+and `spriteoriginal`, is in ROM-frame pixels in every layout; for the first two
+that is the original plane, which is why the distinction never showed.
+
+The last column is the historical path. With a `64p` request a 32-row ROM is
+rendered in layer mode instead (next section): dynamic content and sprites
+without HD art are rendered on the original plane and upscaled once, and the
+extra dynamic masks are ignored.
+
+The original plane's sprite arrays (`spritecolored`, `dynaspritemasks`,
+`dynasprite4cols`) and the extra plane's (`spritecolored_extra`,
+`spritemask_extra`, `dynaspritemasks_extra`, `dynasprite4cols_extra`) always
+belong to their plane. Opacity is `spriteoriginal` for the original plane and
+`spritemask_extra` for the extra plane.
+
+### Known gaps in the format for `is256x64`
+
+- Whether `spritemask_extra` may differ from `spriteoriginal`'s opacity here is
+  not defined. libserum draws the plane through `spritemask_extra`, as it does
+  for every extra plane; detection uses `spriteoriginal`.
+- `dynasprite4cols_extra` and `dynaspritemasks_extra` are loaded with
+  `isextraframe` as their parent, indexed by sprite id. That is existing
+  behaviour in every layout — a sprite's extra dynamic data is dropped when the
+  *frame* with the same index has no extra content — but here those arrays are
+  the only ones the sprite is drawn from.
+- Scene markers have no `256x64` form (above).
+- The header's `fwidth x fheight` still reads `128x32` and the file still
+  carries a full set of original-plane arrays that nothing renders.
+
+### cROMc
+
+`is256x64` has been part of the serialized header since v5, and the comparison
+masks carry their own element size, so the flag and the `256x64` masks survive
+a save/load without any change to the format. The unused original-plane arrays
+are serialized like any others. Nothing else that is persisted depends on the
+ROM frame's size: the sprite runtime sidecars are derived from the sprite
+arrays alone, and the identification lookups are keyed on stored hashes. The
+scene lookups (`frameIsScene`, `sceneFramesBySignature`,
+`sceneFrameIdByTriplet`) are derived by hashing generated markers and so do
+depend on it — they are built at save time with the padded marker described
+above. A cROMc written from an `is256x64` project **with scenes** by a libserum
+older than this rule holds scene lookups hashed past the end of a `128x32`
+buffer, i.e. garbage; it has to be regenerated from the cROM/cRZ. Nothing in
+the file says which libserum wrote it, and the concentrate version was not
+raised for this.
 
 ## Resolution scaling and the two-layer renderer
 

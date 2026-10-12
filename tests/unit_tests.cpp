@@ -2035,6 +2035,1056 @@ static void Test_EmptyRotationSlotIsNotDueNext(void) {
 }
 
 // ---------------------------------------------------------------------------
+// is256x64 projects
+//
+// A cROM whose ROM frame is 256x64 while its header describes a 128x32
+// original plane and a 256x64 extra plane. libserum renders the 256x64 plane
+// only; what the file stores for the 128x32 one is loaded and never used, and
+// the synthetic project gives it colours of its own (0x08xx, 0x2xxx, 0xDxxx,
+// 0xE0xx, 0x01xx, 0xF000) so that any of it reaching the output shows.
+// These go through Serum_Load() on a cROM written to a
+// temporary directory, so they cover the stream loader, the concentrate round
+// trip and the public colorize call rather than a hand-built g_serumData.
+// ---------------------------------------------------------------------------
+
+namespace n256 {
+
+static const uint32_t kNW = 256, kNH = 64, kNPx = kNW * kNH;  // ROM frame
+static const uint32_t kOW = 128, kOH = 32, kOPx = kOW * kOH;  // original plane
+static const uint32_t kSprPx = MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
+static const uint32_t kColors = 4;
+static const char* const kRom = "n256tst";
+static const uint8_t kT = 255;  // transparent sprite pixel
+
+enum : uint32_t {
+  kStatic = 0,
+  kDynamic,
+  kBackground,
+  kMasked,
+  kSprite,
+  kShapeSprite,
+  kRotation,
+  kMonoTrigger,
+  kBlackTop,
+  kScene,
+  kFrameCount
+};
+
+// Where the two sprites sit in their frames, in ROM-frame coordinates. Odd,
+// past column 128 or past row 32: none of it exists in a 128x32 frame.
+static const uint32_t kSprX = 61, kSprY = 37, kSprW = 6, kSprH = 4;
+static const uint32_t kShapeX = 200, kShapeY = 50, kShapeW = 5, kShapeH = 3;
+static const uint8_t kSprite0[kSprH][kSprW] = {{1, 1, 2, 3, 3, 1},
+                                               {2, 1, 2, 3, 1, 3},
+                                               {3, 3, kT, 1, 2, 2},
+                                               {1, 2, 1, 1, 3, kT}};
+static const uint8_t kSprite1[kShapeH][kShapeW] = {
+    {1, 0, 1, 1, 0}, {1, 1, 0, 1, 1}, {0, 1, 1, 1, 0}};
+
+// A shade field with no period of 2 or 128, so reading it with the wrong
+// stride or at the wrong scale cannot land on the right values by accident.
+static uint8_t Shade(uint32_t f, uint32_t x, uint32_t y) {
+  return (uint8_t)((x * 5u + y * 3u + ((x * y) % 7u) +
+                    ((x / 8u + y / 4u) % (2u * f + 3u))) %
+                   kColors);
+}
+// Every pixel of every plane of every frame gets its own colour.
+static uint16_t C32(uint32_t f, uint32_t i) {
+  return (uint16_t)(0x0800 + ((i + f * 977u) % kOPx));
+}
+static uint16_t C64(uint32_t f, uint32_t i) {
+  return (uint16_t)(0x8000 + ((i + f * 977u) % kNPx));
+}
+static uint16_t Bg32(uint32_t i) { return (uint16_t)(0x2000 + i); }
+static uint16_t Bg64(uint32_t i) { return (uint16_t)(0x4000 + i); }
+
+struct Synth {
+  uint32_t nframes = kFrameCount, nsprites = 2, ncompmasks = 3;
+  uint16_t nbackgrounds = 1;
+  bool is256x64 = true;
+  uint32_t headerWidth = kOW;   // what the header claims the original plane is
+  std::vector<uint8_t> native;  // the ROM frames; hashed, not stored
+  std::vector<uint8_t> shapemode, compmaskid, compmasks, isextraframe;
+  std::vector<uint16_t> cframes, cframesx;
+  std::vector<uint8_t> dynamasks, dynamasksx;
+  std::vector<uint16_t> dyna4cols, dyna4colsx;
+  std::vector<uint8_t> isextrasprite, framesprites, spriteoriginal;
+  std::vector<uint16_t> spritecolored;
+  std::vector<uint8_t> spritemaskx;
+  std::vector<uint16_t> spritecoloredx;
+  std::vector<uint8_t> activeframes;
+  std::vector<uint16_t> colorrot, colorrotx;
+  std::vector<uint32_t> detdwords;
+  std::vector<uint16_t> detdwordpos, detareas;
+  std::vector<uint32_t> triggers;
+  std::vector<uint16_t> spritebb;
+  std::vector<uint8_t> isextrabg;
+  std::vector<uint16_t> bgframes, bgframesx, bgids;
+  std::vector<uint8_t> bgmask, bgmaskx;
+  std::vector<uint8_t> shdir, shdirx;
+  std::vector<uint16_t> shcol, shcolx;
+  std::vector<uint16_t> dynspr4cols, dynspr4colsx;
+  std::vector<uint8_t> dynsprmask, dynsprmaskx;
+  std::vector<uint8_t> sprshapemode;
+
+  uint8_t* Native(uint32_t f) { return &native[(size_t)f * kNPx]; }
+  const uint8_t* Native(uint32_t f) const { return &native[(size_t)f * kNPx]; }
+  std::vector<uint8_t> Frame(uint32_t f) const {
+    return std::vector<uint8_t>(Native(f), Native(f) + kNPx);
+  }
+
+  Synth() {
+    native.assign((size_t)nframes * kNPx, 0);
+    shapemode.assign(nframes, 0);
+    compmaskid.assign(nframes, 255);
+    compmasks.assign((size_t)ncompmasks * kNPx, 0);
+    isextraframe.assign(nframes, 1);
+    cframes.resize((size_t)nframes * kOPx);
+    cframesx.resize((size_t)nframes * kNPx);
+    dynamasks.assign((size_t)nframes * kOPx, 255);
+    dynamasksx.assign((size_t)nframes * kNPx, 255);
+    dyna4cols.assign((size_t)nframes * MAX_DYNA_SETS_PER_FRAME_V2 * kColors, 0);
+    dyna4colsx = dyna4cols;
+    isextrasprite.assign(nsprites, 1);
+    framesprites.assign((size_t)nframes * MAX_SPRITES_PER_FRAME, 255);
+    spriteoriginal.assign((size_t)nsprites * kSprPx, kT);
+    spritecolored.assign((size_t)nsprites * kSprPx, 0);
+    spritemaskx.assign((size_t)nsprites * kSprPx, kT);
+    spritecoloredx.assign((size_t)nsprites * kSprPx, 0);
+    activeframes.assign(nframes, 1);
+    colorrot.assign(
+        (size_t)nframes * MAX_LENGTH_COLOR_ROTATION * MAX_COLOR_ROTATION_V2, 0);
+    colorrotx = colorrot;
+    detdwords.assign((size_t)nsprites * MAX_SPRITE_DETECT_AREAS, 0);
+    detdwordpos.assign((size_t)nsprites * MAX_SPRITE_DETECT_AREAS, 0);
+    detareas.assign((size_t)nsprites * 4 * MAX_SPRITE_DETECT_AREAS, 0xffff);
+    triggers.assign(nframes, 0xffffffffu);
+    spritebb.assign((size_t)nframes * MAX_SPRITES_PER_FRAME * 4, 0);
+    isextrabg.assign(nbackgrounds, 1);
+    bgframes.resize((size_t)nbackgrounds * kOPx);
+    bgframesx.resize((size_t)nbackgrounds * kNPx);
+    bgids.assign(nframes, 0xffff);
+    bgmask.assign((size_t)nframes * kOPx, 0);
+    bgmaskx.assign((size_t)nframes * kNPx, 0);
+    shdir.assign((size_t)nframes * MAX_DYNA_SETS_PER_FRAME_V2, 0);
+    shdirx = shdir;
+    shcol.assign((size_t)nframes * MAX_DYNA_SETS_PER_FRAME_V2, 0);
+    shcolx = shcol;
+    dynspr4cols.assign((size_t)nsprites * MAX_DYNA_SETS_PER_SPRITE * kColors,
+                       0);
+    dynspr4colsx = dynspr4cols;
+    dynsprmask.assign((size_t)nsprites * kSprPx, 255);
+    dynsprmaskx = dynsprmask;
+    sprshapemode.assign(nsprites, 0);
+
+    for (uint32_t f = 0; f < nframes; ++f) {
+      for (uint32_t i = 0; i < kOPx; ++i)
+        cframes[(size_t)f * kOPx + i] = C32(f, i);
+      for (uint32_t i = 0; i < kNPx; ++i)
+        cframesx[(size_t)f * kNPx + i] = C64(f, i);
+      for (uint32_t y = 0; y < kNH; ++y)
+        for (uint32_t x = 0; x < kNW; ++x)
+          Native(f)[y * kNW + x] = Shade(f, x, y);
+    }
+    for (uint32_t i = 0; i < kOPx; ++i) bgframes[i] = Bg32(i);
+    for (uint32_t i = 0; i < kNPx; ++i) bgframesx[i] = Bg64(i);
+
+    // kDynamic: one zone over the whole frame on both planes, set 0.
+    memset(&dynamasks[(size_t)kDynamic * kOPx], 0, kOPx);
+    memset(&dynamasksx[(size_t)kDynamic * kNPx], 0, kNPx);
+    for (uint32_t s = 0; s < kColors; ++s) {
+      dyna4cols[(size_t)kDynamic * MAX_DYNA_SETS_PER_FRAME_V2 * kColors + s] =
+          (uint16_t)(0x0100 + s);
+      dyna4colsx[(size_t)kDynamic * MAX_DYNA_SETS_PER_FRAME_V2 * kColors + s] =
+          (uint16_t)(0x0200 + s);
+    }
+
+    // kBackground: mostly unlit, background 0 masked in everywhere.
+    for (uint32_t y = 0; y < kNH; ++y)
+      for (uint32_t x = 0; x < kNW; ++x)
+        Native(kBackground)[y * kNW + x] = ((x + 2 * y) % 5 == 0) ? 2 : 0;
+    bgids[kBackground] = 0;
+    memset(&bgmask[(size_t)kBackground * kOPx], 1, kOPx);
+    memset(&bgmaskx[(size_t)kBackground * kNPx], 1, kNPx);
+
+    // kMasked: comparison mask 0 hides the lower right corner.
+    compmaskid[kMasked] = 0;
+    FillMask(0, 100, 40, 255, 63);
+
+    // kSprite: a dark frame, sprite 0 somewhere inside mask 1 / its bounding
+    // box, one lit pixel far outside to tell the frame apart.
+    memset(Native(kSprite), 0, kNPx);
+    Native(kSprite)[60 * kNW + 250] = 2;
+    compmaskid[kSprite] = 1;
+    FillMask(1, 32, 20, 95, 43);
+    framesprites[(size_t)kSprite * MAX_SPRITES_PER_FRAME] = 0;
+    SetBB(kSprite, 32, 20, 95, 43);
+    for (uint32_t y = 0; y < kSprH; ++y)
+      for (uint32_t x = 0; x < kSprW; ++x) {
+        const uint32_t i = y * MAX_SPRITE_WIDTH + x;
+        spriteoriginal[i] = kSprite0[y][x];
+        spritemaskx[i] = kSprite0[y][x];
+        spritecoloredx[i] = (uint16_t)(0xC000 + y * 16 + x);
+        // The original plane's sprite picture, as the editor stores it: at
+        // that plane's own scale, half the sprite, in the top left of the
+        // array. The runtime never reads it.
+        if (x < kSprW / 2 && y < kSprH / 2)
+          spritecolored[i] = (uint16_t)(0xD000 + y * 16 + x);
+      }
+    detareas[0] = 0, detareas[1] = 0, detareas[2] = kSprW, detareas[3] = kSprH;
+    detdwords[0] = 1u | (2u << 8) | (3u << 16) | (1u << 24);  // row 1, x 1..4
+    detdwordpos[0] = 1 * MAX_SPRITE_WIDTH + 1;
+    dynsprmask[0] = 0;   // original plane: sprite pixel (0,0) is dynamic
+    dynsprmaskx[1] = 0;  // extra plane: sprite pixel (1,0) is dynamic
+    for (uint32_t s = 0; s < kColors; ++s) {
+      dynspr4cols[s] = (uint16_t)(0xE000 + s);
+      dynspr4colsx[s] = (uint16_t)(0xE100 + s);
+    }
+    PlaceSprite0(Native(kSprite), kSprX, kSprY);
+
+    // kShapeSprite: sprite 1 is matched by shape, in the lower right.
+    memset(Native(kShapeSprite), 0, kNPx);
+    Native(kShapeSprite)[61 * kNW + 3] = 1;
+    compmaskid[kShapeSprite] = 2;
+    FillMask(2, 180, 44, 239, 60);
+    framesprites[(size_t)kShapeSprite * MAX_SPRITES_PER_FRAME] = 1;
+    SetBB(kShapeSprite, 180, 44, 239, 60);
+    sprshapemode[1] = 1;
+    for (uint32_t y = 0; y < kShapeH; ++y)
+      for (uint32_t x = 0; x < kShapeW; ++x) {
+        const uint32_t i = kSprPx + y * MAX_SPRITE_WIDTH + x;
+        spriteoriginal[i] = kSprite1[y][x] ? 3 : 0;
+        spritemaskx[i] = spriteoriginal[i];
+        spritecoloredx[i] = (uint16_t)(0xC800 + y * 16 + x);
+        if (x < kShapeW / 2 && y < kShapeH / 2)
+          spritecolored[i] = (uint16_t)(0xD800 + y * 16 + x);
+      }
+    detareas[4 * MAX_SPRITE_DETECT_AREAS + 0] = 0;
+    detareas[4 * MAX_SPRITE_DETECT_AREAS + 1] = 0;
+    detareas[4 * MAX_SPRITE_DETECT_AREAS + 2] = kShapeW;
+    detareas[4 * MAX_SPRITE_DETECT_AREAS + 3] = kShapeH;
+    detdwords[MAX_SPRITE_DETECT_AREAS] = 3u | (3u << 8) | (3u << 24);
+    detdwordpos[MAX_SPRITE_DETECT_AREAS] = 1 * MAX_SPRITE_WIDTH + 0;
+    for (uint32_t y = 0; y < kShapeH; ++y)
+      for (uint32_t x = 0; x < kShapeW; ++x)
+        Native(kShapeSprite)[(kShapeY + y) * kNW + kShapeX + x] =
+            kSprite1[y][x] ? (uint8_t)(1 + (x + y) % 3) : 0;
+
+    // kRotation: one colour per plane, each in a two-colour rotation.
+    for (uint32_t i = 0; i < kOPx; ++i)
+      cframes[(size_t)kRotation * kOPx + i] = 0xF000;
+    for (uint32_t i = 0; i < kNPx; ++i)
+      cframesx[(size_t)kRotation * kNPx + i] = 0xF100;
+    uint16_t* rot = &colorrot[(size_t)kRotation * MAX_LENGTH_COLOR_ROTATION *
+                              MAX_COLOR_ROTATION_V2];
+    rot[0] = 2, rot[1] = 100, rot[2] = 0xF000, rot[3] = 0xF001;
+    rot = &colorrotx[(size_t)kRotation * MAX_LENGTH_COLOR_ROTATION *
+                     MAX_COLOR_ROTATION_V2];
+    rot[0] = 2, rot[1] = 100, rot[2] = 0xF100, rot[3] = 0xF101;
+
+    triggers[kMonoTrigger] = MONOCHROME_TRIGGER_ID;
+
+    // kBlackTop: nothing in the first 4096 bytes, which is all a 128x32
+    // reading of the frame would look at.
+    memset(Native(kBlackTop), 0, kNPx);
+    for (uint32_t y = 40; y < 50; ++y)
+      for (uint32_t x = 10; x < 20; ++x) Native(kBlackTop)[y * kNW + x] = 3;
+  }
+
+  void FillMask(uint32_t mask, uint32_t x0, uint32_t y0, uint32_t x1,
+                uint32_t y1) {
+    for (uint32_t y = y0; y <= y1; ++y)
+      for (uint32_t x = x0; x <= x1; ++x)
+        compmasks[(size_t)mask * kNPx + y * kNW + x] = 1;
+  }
+  void SetBB(uint32_t f, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
+    uint16_t* bb = &spritebb[(size_t)f * MAX_SPRITES_PER_FRAME * 4];
+    bb[0] = x0, bb[1] = y0, bb[2] = x1, bb[3] = y1;
+  }
+  static void PlaceSprite0(uint8_t* frame, uint32_t x0, uint32_t y0) {
+    for (uint32_t y = 0; y < kSprH; ++y)
+      for (uint32_t x = 0; x < kSprW; ++x)
+        // A transparent sprite pixel matches anything; make it something.
+        frame[(y0 + y) * kNW + x0 + x] =
+            kSprite0[y][x] == kT ? 3 : kSprite0[y][x];
+  }
+
+  template <typename T>
+  static void Put(std::vector<uint8_t>& out, const std::vector<T>& v) {
+    const uint8_t* p = (const uint8_t*)v.data();
+    out.insert(out.end(), p, p + v.size() * sizeof(T));
+  }
+  template <typename T>
+  static void PutValue(std::vector<uint8_t>& out, T v) {
+    const uint8_t* p = (const uint8_t*)&v;
+    out.insert(out.end(), p, p + sizeof(T));
+  }
+
+  // The cROM exactly as the editor writes it, header revision 20.
+  std::vector<uint8_t> Serialize() const {
+    if (!crc32_ready) CRC32encode();
+    std::vector<uint32_t> hashes(nframes);
+    const uint32_t hashPx = is256x64 ? kNPx : kOPx;
+    for (uint32_t f = 0; f < nframes; ++f) {
+      uint8_t* fr = const_cast<uint8_t*>(Native(f));
+      uint8_t* mask =
+          compmaskid[f] < 255
+              ? const_cast<uint8_t*>(&compmasks[(size_t)compmaskid[f] * hashPx])
+              : NULL;
+      hashes[f] =
+          mask ? crc32_fast_mask(fr, mask, hashPx) : crc32_fast(fr, hashPx);
+    }
+    std::vector<uint8_t> out;
+    char name[64] = {0};
+    snprintf(name, sizeof(name), "%s", kRom);
+    out.insert(out.end(), name, name + 64);
+    PutValue<uint32_t>(out, 20 * sizeof(uint32_t));
+    PutValue<uint32_t>(out, headerWidth);
+    PutValue<uint32_t>(out, kOH);
+    PutValue<uint32_t>(out, kNW);
+    PutValue<uint32_t>(out, kNH);
+    PutValue<uint32_t>(out, nframes);
+    PutValue<uint32_t>(out, kColors);
+    PutValue<uint32_t>(out, ncompmasks);
+    PutValue<uint32_t>(out, nsprites);
+    PutValue<uint16_t>(out, nbackgrounds);
+    PutValue<int32_t>(out, is256x64 ? 1 : 0);
+    Put(out, hashes);
+    Put(out, shapemode);
+    Put(out, compmaskid);
+    Put(out, compmasks);
+    Put(out, isextraframe);
+    Put(out, cframes);
+    Put(out, cframesx);
+    Put(out, dynamasks);
+    Put(out, dynamasksx);
+    Put(out, dyna4cols);
+    Put(out, dyna4colsx);
+    Put(out, isextrasprite);
+    Put(out, framesprites);
+    Put(out, spriteoriginal);
+    Put(out, spritecolored);
+    Put(out, spritemaskx);
+    Put(out, spritecoloredx);
+    Put(out, activeframes);
+    Put(out, colorrot);
+    Put(out, colorrotx);
+    Put(out, detdwords);
+    Put(out, detdwordpos);
+    Put(out, detareas);
+    Put(out, triggers);
+    Put(out, spritebb);
+    Put(out, isextrabg);
+    Put(out, bgframes);
+    Put(out, bgframesx);
+    Put(out, bgids);
+    Put(out, bgmask);
+    Put(out, bgmaskx);
+    Put(out, shdir);
+    Put(out, shcol);
+    Put(out, shdirx);
+    Put(out, shcolx);
+    Put(out, dynspr4cols);
+    Put(out, dynspr4colsx);
+    Put(out, dynsprmask);
+    Put(out, dynsprmaskx);
+    Put(out, sprshapemode);
+    return out;
+  }
+};
+
+static std::filesystem::path Dir(void) {
+  return std::filesystem::temp_directory_path() / "libserum_tests" / "n256";
+}
+
+static Serum_Frame_Struc* LoadUnchecked(const Synth& s, uint8_t flags,
+                                        bool viaConcentrate, const char* csv) {
+  const std::filesystem::path dir = Dir();
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir / kRom);
+  WriteTestFile(dir / kRom / (std::string(kRom) + ".cROM"), s.Serialize());
+  if (csv) {
+    std::ofstream out(dir / kRom / (std::string(kRom) + ".pup.csv"));
+    out << csv;
+  }
+  Serum_SetGenerateCRomC(viaConcentrate);
+  Serum_SetMaximumUnknownFramesToSkip(0);
+  Serum_SetIgnoreUnknownFramesTimeout(0);
+  Serum_Frame_Struc* loaded = Serum_Load(dir.string().c_str(), kRom, flags);
+  Serum_SetGenerateCRomC(true);
+  return loaded;
+}
+
+// Load the project through the public call. With `viaConcentrate` the raw
+// cROM is converted and the generated cROMc is what ends up loaded, which is
+// the path a player takes from its second start on.
+static bool Load(const Synth& s, uint8_t flags, bool viaConcentrate,
+                 const char* csv = NULL) {
+  const std::filesystem::path dir = Dir();
+  Serum_Frame_Struc* loaded = LoadUnchecked(s, flags, viaConcentrate, csv);
+  CHECK(loaded != NULL);
+  CHECK_EQ(std::filesystem::exists(dir / kRom / (std::string(kRom) + ".cROMc")),
+           viaConcentrate);
+  // The trigger last reported outlives a colorization and is not repeated
+  // within its timeout; every load here starts as if none had been.
+  lastTriggerID = 0xffffffff;
+  return loaded != NULL;
+}
+
+// Load the cROMc a previous Load(..., true) left behind, directly and with
+// exactly these flags: the path a player takes from its second start on, where
+// nothing widens the request the way a conversion from the cROM does.
+static bool Reload(uint8_t flags) {
+  Serum_Dispose();
+  Serum_SetMaximumUnknownFramesToSkip(0);
+  Serum_SetIgnoreUnknownFramesTimeout(0);
+  const std::filesystem::path dir = Dir();
+  std::filesystem::remove(dir / kRom / (std::string(kRom) + ".cROM"));
+  Serum_Frame_Struc* loaded = Serum_Load(dir.string().c_str(), kRom, flags);
+  CHECK(loaded != NULL);
+  lastTriggerID = 0xffffffff;
+  return loaded != NULL;
+}
+
+static void Unload(void) {
+  Serum_Dispose();
+  Serum_SetMaximumUnknownFramesToSkip(0);
+  std::error_code ec;
+  std::filesystem::remove_all(Dir(), ec);
+}
+
+// The caller's buffer is exactly one ROM frame, on the heap, so a read past
+// it is something the sanitizer build reports.
+static uint32_t Colorize(const std::vector<uint8_t>& native) {
+  std::vector<uint8_t> frame(native.begin(), native.begin() + kNPx);
+  frame.shrink_to_fit();
+  return Serum_Colorize(frame.data());
+}
+
+template <typename Expected>
+static void ExpectPlaneAt(const char* file, int line, const uint16_t* plane,
+                          uint32_t w, uint32_t h, Expected expected) {
+  ++g_checks;
+  if (!plane) {
+    Fail(file, line, "plane is missing");
+    return;
+  }
+  uint32_t bad = 0, bx = 0, by = 0;
+  uint16_t got = 0, want = 0;
+  for (uint32_t y = 0; y < h; ++y)
+    for (uint32_t x = 0; x < w; ++x) {
+      const uint16_t e = expected(x, y);
+      if (plane[y * w + x] == e) continue;
+      if (!bad++) bx = x, by = y, got = plane[y * w + x], want = e;
+    }
+  if (bad)
+    Fail(file, line,
+         "%u of %u pixels differ; first at (%u,%u): got 0x%04x, want 0x%04x",
+         bad, w * h, bx, by, got, want);
+}
+// Variadic because a lambda's capture list has commas in it.
+#define EXPECT_PLANE32(...)                                           \
+  n256::ExpectPlaneAt(__FILE__, __LINE__, mySerum.frame32, n256::kOW, \
+                      n256::kOH, __VA_ARGS__)
+#define EXPECT_PLANE64(...)                                           \
+  n256::ExpectPlaneAt(__FILE__, __LINE__, mySerum.frame64, n256::kNW, \
+                      n256::kNH, __VA_ARGS__)
+
+static const uint8_t kBothPlanes =
+    FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
+
+// The call produced the 256x64 plane and nothing else.
+#define EXPECT_ONLY_PLANE64()                             \
+  do {                                                    \
+    CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);    \
+    CHECK(!(mySerum.flags & FLAG_RETURNED_32P_FRAME_OK)); \
+    CHECK_EQ(mySerum.width64, 256);                       \
+    CHECK_EQ(mySerum.width32, 0);                         \
+  } while (0)
+// The call produced no plane at all.
+#define EXPECT_NO_PLANE()                                                \
+  do {                                                                   \
+    CHECK(!(mySerum.flags &                                              \
+            (FLAG_RETURNED_32P_FRAME_OK | FLAG_RETURNED_64P_FRAME_OK))); \
+    CHECK_EQ(mySerum.width64, 0);                                        \
+    CHECK_EQ(mySerum.width32, 0);                                        \
+  } while (0)
+
+}  // namespace n256
+
+// The flag survives both load paths and leaves one plane: 256x64. There is no
+// 128x32 plane, not even an allocated one. It must not outlive the
+// colorization it came with -- a cROM with an older header, or a v1 one, never
+// mentions it.
+static void Test_N256LoadsAndForgets(void) {
+  const n256::Synth s;
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, n256::kBothPlanes, viaConcentrate != 0)) continue;
+    CHECK(g_serumData.is256x64);
+    CHECK_EQ(NativeFrameWidth(), 256);
+    CHECK_EQ(NativeFrameHeight(), 64);
+    CHECK(ExtraPlaneIsNative());
+    CHECK_EQ(g_serumData.fwidth, 128);
+    CHECK_EQ(g_serumData.fheight, 32);
+    CHECK_EQ(mySerum.width32, 0);
+    CHECK_EQ(mySerum.width64, 256);
+    CHECK(mySerum.frame32 == NULL);
+    CHECK(mySerum.rotations32 == NULL);
+    CHECK(mySerum.rotationsinframe32 == NULL);
+    CHECK(mySerum.frame64 != NULL);
+    CHECK(mySerum.flags & FLAG_RETURNED_EXTRA_AVAILABLE);
+    // Nothing is scaled for these projects, in either direction.
+    CHECK(!upscaleExtraFromOriginal);
+    CHECK(!isoriginalrequested);
+    CHECK(!isoriginalfallbackrequested);
+    n256::Unload();
+    CHECK(!g_serumData.is256x64);
+  }
+}
+
+// The flag means one geometry only. Anything else is refused at load rather
+// than rendered with buffers sized for something the file is not.
+static void Test_N256RejectsOtherGeometry(void) {
+  n256::Synth s;
+  s.headerWidth = 192;
+  CHECK(n256::LoadUnchecked(s, n256::kBothPlanes, false, NULL) == NULL);
+  n256::Unload();
+}
+
+// Identification hashes the whole 256x64 frame: a difference in the last rows
+// is a different frame, and a comparison mask is 256x64 too.
+static void Test_N256Identification(void) {
+  const n256::Synth s;
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, n256::kBothPlanes, viaConcentrate != 0)) continue;
+    for (uint32_t f = 0; f < n256::kScene; ++f) {
+      // Its trigger starts a monochrome stream, which would then show the
+      // unknown frames below; it has a test of its own.
+      if (f == n256::kMonoTrigger) continue;
+      const uint32_t r = n256::Colorize(s.Frame(f));
+      CHECK(r != IDENTIFY_NO_FRAME && r != IDENTIFY_SAME_FRAME);
+      CHECK_EQ(mySerum.frameID, f);
+    }
+    // No mask: one pixel in row 50 makes it a frame nobody knows.
+    std::vector<uint8_t> frame = s.Frame(n256::kStatic);
+    frame[50 * n256::kNW + 200] ^= 1;
+    CHECK_EQ(n256::Colorize(frame), IDENTIFY_NO_FRAME);
+    // Masked: the same change under the mask is still the frame...
+    frame = s.Frame(n256::kMasked);
+    frame[50 * n256::kNW + 200] ^= 1;
+    frame[63 * n256::kNW + 255] ^= 1;
+    CHECK(n256::Colorize(frame) != IDENTIFY_NO_FRAME);
+    CHECK_EQ(mySerum.frameID, n256::kMasked);
+    // ...and outside it, in the same rows, it is not.
+    frame = s.Frame(n256::kMasked);
+    frame[60 * n256::kNW + 5] ^= 1;
+    CHECK_EQ(n256::Colorize(frame), IDENTIFY_NO_FRAME);
+    n256::Unload();
+  }
+}
+
+// Static content: the 256x64 plane shows the frame authored for it, and that
+// is the only plane.
+static void Test_N256StaticContent(void) {
+  const n256::Synth s;
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, FLAG_REQUEST_64P_FRAMES, viaConcentrate != 0)) continue;
+    n256::Colorize(s.Frame(n256::kStatic));
+    CHECK_EQ(mySerum.frameID, n256::kStatic);
+    EXPECT_ONLY_PLANE64();
+    EXPECT_PLANE64([](uint32_t x, uint32_t y) {
+      return n256::C64(n256::kStatic, y * n256::kNW + x);
+    });
+    n256::Unload();
+  }
+}
+
+// Dynamic content: the plane takes the ROM shade of its own pixel and the
+// extra plane's colour set. Nothing is scaled.
+static void Test_N256DynamicContent(void) {
+  const n256::Synth s;
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, FLAG_REQUEST_64P_FRAMES, viaConcentrate != 0)) continue;
+    n256::Colorize(s.Frame(n256::kDynamic));
+    CHECK_EQ(mySerum.frameID, n256::kDynamic);
+    EXPECT_ONLY_PLANE64();
+    EXPECT_PLANE64([](uint32_t x, uint32_t y) {
+      return (uint16_t)(0x0200 + n256::Shade(n256::kDynamic, x, y));
+    });
+    // The copy kept for re-rendering the frame later is the whole frame.
+    CHECK(memcmp(lastFrame, s.Native(n256::kDynamic), n256::kNPx) == 0);
+    n256::Unload();
+  }
+}
+
+// The background shows where its mask is set and the ROM lit nothing, judged
+// on the plane's own ROM pixel.
+static void Test_N256BackgroundOverBlack(void) {
+  const n256::Synth s;
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, FLAG_REQUEST_64P_FRAMES, viaConcentrate != 0)) continue;
+    n256::Colorize(s.Frame(n256::kBackground));
+    CHECK_EQ(mySerum.frameID, n256::kBackground);
+    const uint8_t* rom = s.Native(n256::kBackground);
+    EXPECT_ONLY_PLANE64();
+    EXPECT_PLANE64([rom](uint32_t x, uint32_t y) {
+      const uint32_t i = y * n256::kNW + x;
+      return rom[i] == 0 ? n256::Bg64(i) : n256::C64(n256::kBackground, i);
+    });
+    n256::Unload();
+  }
+}
+
+// What the plane must show for sprite 0 found at ROM position (sx, sy).
+static uint16_t N256SpritePlane64(uint32_t sx, uint32_t sy, uint32_t x,
+                                  uint32_t y) {
+  const uint16_t under = n256::C64(n256::kSprite, y * n256::kNW + x);
+  if (x < sx || y < sy || x >= sx + n256::kSprW || y >= sy + n256::kSprH)
+    return under;
+  const uint32_t px = x - sx, py = y - sy;
+  if (n256::kSprite0[py][px] == n256::kT) return under;
+  // Sprite pixel (1,0) is dynamic on this plane: its own ROM shade picks.
+  if (px == 1 && py == 0) return (uint16_t)(0xE100 + n256::kSprite0[0][1]);
+  return (uint16_t)(0xC000 + py * 16 + px);
+}
+
+// Sprites are looked for in the ROM frame as it is: the bounding box, the
+// detection area and the position found are all 256x64 coordinates. This one
+// sits at an odd position in row 37, which a 128x32 frame does not have.
+static void Test_N256SpriteDetection(void) {
+  const n256::Synth s;
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, n256::kBothPlanes, viaConcentrate != 0)) continue;
+    uint8_t which[MAX_SPRITES_PER_FRAME], count = 0;
+    uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
+        spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
+        wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
+    std::vector<uint8_t> frame = s.Frame(n256::kSprite);
+    CHECK(Check_Spritesv2(frame.data(), n256::kSprite, which, &count, frx, fry,
+                          spx, spy, wid, hei));
+    CHECK_EQ(count, 1);
+    if (count == 1) {
+      CHECK_EQ(which[0], 0);
+      CHECK_EQ(frx[0], n256::kSprX);
+      CHECK_EQ(fry[0], n256::kSprY);
+      CHECK_EQ(spx[0], 0);
+      CHECK_EQ(spy[0], 0);
+      CHECK_EQ(wid[0], n256::kSprW);
+      CHECK_EQ(hei[0], n256::kSprH);
+    }
+    // Moved somewhere else inside the bounding box, it is found there.
+    memset(frame.data(), 0, n256::kNPx);
+    frame[60 * n256::kNW + 250] = 2;
+    n256::Synth::PlaceSprite0(frame.data(), 88, 21);
+    count = 0;
+    CHECK(Check_Spritesv2(frame.data(), n256::kSprite, which, &count, frx, fry,
+                          spx, spy, wid, hei));
+    CHECK_EQ(count, 1);
+    if (count == 1) {
+      CHECK_EQ(frx[0], 88);
+      CHECK_EQ(fry[0], 21);
+    }
+    // Sticking out of the bounding box, it is not a match.
+    memset(frame.data(), 0, n256::kNPx);
+    n256::Synth::PlaceSprite0(frame.data(), 93, 21);
+    count = 0;
+    CHECK(!Check_Spritesv2(frame.data(), n256::kSprite, which, &count, frx, fry,
+                           spx, spy, wid, hei));
+    CHECK_EQ(count, 0);
+
+    // Shape mode goes through its own copy of the frame, which is a whole
+    // ROM frame as well.
+    frame = s.Frame(n256::kShapeSprite);
+    count = 0;
+    CHECK(Check_Spritesv2(frame.data(), n256::kShapeSprite, which, &count, frx,
+                          fry, spx, spy, wid, hei));
+    CHECK_EQ(count, 1);
+    if (count == 1) {
+      CHECK_EQ(which[0], 1);
+      CHECK_EQ(frx[0], n256::kShapeX);
+      CHECK_EQ(fry[0], n256::kShapeY);
+      CHECK_EQ(wid[0], n256::kShapeW);
+      CHECK_EQ(hei[0], n256::kShapeH);
+    }
+    n256::Unload();
+  }
+}
+
+// A sprite found at ROM position (x, y) is drawn there, 1:1, from the
+// extra-plane sprite arrays. The half-size picture the file also stores for
+// the 128x32 plane goes nowhere.
+static void Test_N256SpriteDrawing(void) {
+  const n256::Synth s;
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, FLAG_REQUEST_64P_FRAMES, viaConcentrate != 0)) continue;
+    const uint32_t positions[2][2] = {{n256::kSprX, n256::kSprY}, {88, 21}};
+    for (const auto& pos : positions) {
+      std::vector<uint8_t> frame(n256::kNPx, 0);
+      frame[60 * n256::kNW + 250] = 2;
+      n256::Synth::PlaceSprite0(frame.data(), pos[0], pos[1]);
+      const uint32_t r = n256::Colorize(frame);
+      CHECK(r != IDENTIFY_NO_FRAME && r != IDENTIFY_SAME_FRAME);
+      CHECK_EQ(mySerum.frameID, n256::kSprite);
+      const uint32_t sx = pos[0], sy = pos[1];
+      EXPECT_ONLY_PLANE64();
+      EXPECT_PLANE64([sx, sy](uint32_t x, uint32_t y) {
+        return N256SpritePlane64(sx, sy, x, y);
+      });
+    }
+    n256::Unload();
+  }
+}
+
+// The plane rotates with the extra plane's table, all of it, and nothing is
+// reported for a 32p plane.
+static void Test_N256Rotation(void) {
+  const n256::Synth s;
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, n256::kBothPlanes, viaConcentrate != 0)) continue;
+    const uint32_t timer = n256::Colorize(s.Frame(n256::kRotation));
+    CHECK(timer > 0 && timer <= 100);
+    EXPECT_ONLY_PLANE64();
+    EXPECT_PLANE64([](uint32_t, uint32_t) { return (uint16_t)0xF100; });
+    // Long overdue.
+    colorshiftinittime32[0] = GetMonotonicTimeMs() - 1000;
+    colorshiftinittime64[0] = GetMonotonicTimeMs() - 1000;
+    const uint32_t rotated = Serum_Rotate();
+    CHECK(!(rotated & FLAG_RETURNED_V2_ROTATED32));
+    CHECK(rotated & FLAG_RETURNED_V2_ROTATED64);
+    EXPECT_PLANE64([](uint32_t, uint32_t) { return (uint16_t)0xF101; });
+    n256::Unload();
+  }
+}
+
+// 32p and 64p requested together: the 256x64 plane, and no 32p plane beside
+// it -- no buffer, no flag, no width. A trigger on the frame is reported.
+static void Test_N256RequestBoth(void) {
+  n256::Synth s;
+  s.triggers[n256::kStatic] = 1234;
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, n256::kBothPlanes, viaConcentrate != 0)) continue;
+    CHECK(mySerum.frame32 == NULL);
+    CHECK_EQ(mySerum.width32, 0);
+    CHECK_EQ(mySerum.width64, 256);
+    const uint32_t r = n256::Colorize(s.Frame(n256::kStatic));
+    CHECK_EQ(r, 0);
+    CHECK_EQ(mySerum.frameID, n256::kStatic);
+    CHECK_EQ(mySerum.triggerID, 1234);
+    EXPECT_ONLY_PLANE64();
+    EXPECT_PLANE64([](uint32_t x, uint32_t y) {
+      return n256::C64(n256::kStatic, y * n256::kNW + x);
+    });
+    n256::Unload();
+  }
+}
+
+// 32p alone asks for a plane these projects do not have. The colorization
+// still loads, frames are still identified and their triggers still reported;
+// there is just no picture, known frame or not.
+static void Test_N256Request32pOnly(void) {
+  n256::Synth s;
+  s.triggers[n256::kStatic] = 1234;
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    for (int direct = 0; direct <= viaConcentrate; ++direct) {
+      if (!n256::Load(s, FLAG_REQUEST_32P_FRAMES, viaConcentrate != 0))
+        continue;
+      if (direct && !n256::Reload(FLAG_REQUEST_32P_FRAMES)) continue;
+      CHECK(g_serumData.is256x64);
+      CHECK(mySerum.frame32 == NULL);
+      CHECK(mySerum.frame64 == NULL);
+      CHECK_EQ(mySerum.width32, 0);
+      CHECK_EQ(mySerum.width64, 0);
+      CHECK(!isextrarequested);
+
+      uint32_t r = n256::Colorize(s.Frame(n256::kStatic));
+      CHECK_EQ(r, 0);
+      CHECK_EQ(mySerum.frameID, n256::kStatic);
+      CHECK_EQ(mySerum.triggerID, 1234);
+      EXPECT_NO_PLANE();
+
+      // Further frames go through identification, sprite detection and the
+      // render calls with no plane to write to. With no trigger and no
+      // picture they have nothing new to tell the caller, which is what
+      // "already on the display" reports.
+      r = n256::Colorize(s.Frame(n256::kSprite));
+      CHECK_EQ(r, IDENTIFY_SAME_FRAME);
+      CHECK_EQ(lastfound, n256::kSprite);
+      EXPECT_NO_PLANE();
+      r = n256::Colorize(s.Frame(n256::kRotation));
+      CHECK_EQ(r, IDENTIFY_SAME_FRAME);
+      CHECK_EQ(lastfound, n256::kRotation);
+      EXPECT_NO_PLANE();
+      CHECK_EQ(Serum_Rotate() &
+                   (FLAG_RETURNED_V2_ROTATED32 | FLAG_RETURNED_V2_ROTATED64),
+               0);
+
+      // An unknown frame is "shown" in grey on no plane either.
+      Serum_SetMaximumUnknownFramesToSkip(1);
+      std::vector<uint8_t> frame(n256::kNPx);
+      for (uint32_t i = 0; i < n256::kNPx; ++i)
+        frame[i] = n256::Shade(77, i % n256::kNW, i / n256::kNW);
+      CHECK_EQ(n256::Colorize(frame), 0);
+      CHECK_EQ(mySerum.frameID, 0xfffffffd);
+      EXPECT_NO_PLANE();
+      n256::Unload();
+    }
+  }
+}
+
+// FLAG_REQUEST_FALLBACK: "the other plane will do". With a 32p-only request
+// that is the 256x64 plane, for every frame. With a 64p request there is
+// nothing to fall back to and the flag changes nothing.
+static void Test_N256RequestFallback(void) {
+  const n256::Synth s;
+  // FLAG_REQUEST_FORCE keeps a load from the cROM from widening the request,
+  // so there the stream loader has to keep the extra-plane data on its own.
+  const uint8_t requests[4] = {
+      FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_FALLBACK,
+      FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_FALLBACK | FLAG_REQUEST_FORCE,
+      FLAG_REQUEST_64P_FRAMES | FLAG_REQUEST_FALLBACK,
+      n256::kBothPlanes | FLAG_REQUEST_FALLBACK,
+  };
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    for (uint8_t request : requests) {
+      // `direct` loads the generated cROMc on its own, where the extra-plane
+      // data is kept or dropped by these flags alone.
+      for (int direct = 0; direct <= viaConcentrate; ++direct) {
+        if (!n256::Load(s, request, viaConcentrate != 0)) continue;
+        if (direct && !n256::Reload(request)) continue;
+        CHECK(mySerum.frame32 == NULL);
+        CHECK(mySerum.frame64 != NULL);
+        CHECK_EQ(mySerum.width32, 0);
+        CHECK_EQ(mySerum.width64, 256);
+        CHECK(!isoriginalfallbackrequested);
+
+        n256::Colorize(s.Frame(n256::kDynamic));
+        CHECK_EQ(mySerum.frameID, n256::kDynamic);
+        EXPECT_ONLY_PLANE64();
+        EXPECT_PLANE64([](uint32_t x, uint32_t y) {
+          return (uint16_t)(0x0200 + n256::Shade(n256::kDynamic, x, y));
+        });
+
+        n256::Colorize(s.Frame(n256::kSprite));
+        CHECK_EQ(mySerum.frameID, n256::kSprite);
+        EXPECT_ONLY_PLANE64();
+        EXPECT_PLANE64([](uint32_t x, uint32_t y) {
+          return N256SpritePlane64(n256::kSprX, n256::kSprY, x, y);
+        });
+        n256::Unload();
+      }
+    }
+  }
+}
+
+// A frame nobody knows is shown in grey on the 256x64 plane, pixel for pixel,
+// and on that plane only -- whichever request produced the plane.
+static void Test_N256UnknownFrameFallback(void) {
+  const n256::Synth s;
+  const uint8_t requests[3] = {n256::kBothPlanes, FLAG_REQUEST_64P_FRAMES,
+                               FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_FALLBACK};
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    for (uint8_t request : requests) {
+      if (!n256::Load(s, request, viaConcentrate != 0)) continue;
+      Serum_SetMaximumUnknownFramesToSkip(1);
+      std::vector<uint8_t> frame(n256::kNPx);
+      for (uint32_t y = 0; y < n256::kNH; ++y)
+        for (uint32_t x = 0; x < n256::kNW; ++x)
+          frame[y * n256::kNW + x] = n256::Shade(77, x, y);
+      CHECK_EQ(n256::Colorize(frame), 0);
+      CHECK_EQ(mySerum.frameID, 0xfffffffd);
+      EXPECT_ONLY_PLANE64();
+      EXPECT_PLANE64([](uint32_t x, uint32_t y) {
+        return grayscale_4[n256::Shade(77, x, y)];
+      });
+      n256::Unload();
+    }
+  }
+}
+
+// The monochrome palette trigger takes its palette from the frame's
+// extra-plane colour set, the only one these projects are rendered from.
+static void Test_N256MonochromePalette(void) {
+  n256::Synth s;
+  s.triggers[n256::kDynamic] = MONOCHROME_PALETTE_TRIGGER_ID;
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, FLAG_REQUEST_64P_FRAMES, viaConcentrate != 0)) continue;
+    n256::Colorize(s.Frame(n256::kDynamic));
+    CHECK_EQ(mySerum.frameID, n256::kDynamic);
+    CHECK(monochromePaletteMode);
+    std::vector<uint8_t> frame(n256::kNPx);
+    for (uint32_t i = 0; i < n256::kNPx; ++i)
+      frame[i] = n256::Shade(77, i % n256::kNW, i / n256::kNW);
+    CHECK_EQ(n256::Colorize(frame), 0);
+    CHECK_EQ(mySerum.frameID, 0xfffffffd);
+    EXPECT_ONLY_PLANE64();
+    EXPECT_PLANE64([](uint32_t x, uint32_t y) {
+      return (uint16_t)(0x0200 + n256::Shade(77, x, y));
+    });
+    n256::Unload();
+  }
+  // Without extra content the frame has no such set, and the 128x32 plane's
+  // is not taken in its place.
+  s.isextraframe[n256::kDynamic] = 0;
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, FLAG_REQUEST_64P_FRAMES, viaConcentrate != 0)) continue;
+    n256::Colorize(s.Frame(n256::kDynamic));
+    CHECK_EQ(mySerum.frameID, n256::kDynamic);
+    CHECK(!monochromePaletteMode);
+    CHECK_EQ(monochromePaletteV2Length, 0);
+    n256::Unload();
+  }
+}
+
+// A frame, a background or a sprite without extra-plane data leaves its frame
+// with nothing to render: the frame is identified, its trigger is reported,
+// and no plane is produced. What the file stores for the 128x32 plane is not
+// scaled up in its place, with or without FLAG_REQUEST_FALLBACK, and the
+// plane keeps the picture it had.
+static void Test_N256WithoutExtraData(void) {
+  const uint8_t requests[3] = {FLAG_REQUEST_64P_FRAMES,
+                               n256::kBothPlanes | FLAG_REQUEST_FALLBACK,
+                               FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_FALLBACK};
+  // Which piece is missing, and the frame that then has no plane.
+  const uint32_t victims[3] = {n256::kStatic, n256::kBackground, n256::kSprite};
+  for (int missing = 0; missing < 3; ++missing) {
+    n256::Synth s;
+    if (missing == 0) s.isextraframe[n256::kStatic] = 0;
+    if (missing == 1) s.isextrabg[0] = 0;
+    if (missing == 2) s.isextrasprite[0] = 0;
+    const uint32_t victim = victims[missing];
+    s.triggers[victim] = 1234;
+    for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+      for (uint8_t request : requests) {
+        if (!n256::Load(s, request, viaConcentrate != 0)) continue;
+        // A complete frame first, so the plane holds a known picture.
+        n256::Colorize(s.Frame(n256::kDynamic));
+        EXPECT_ONLY_PLANE64();
+
+        const uint32_t r = n256::Colorize(s.Frame(victim));
+        CHECK_EQ(r, 0);
+        CHECK_EQ(mySerum.frameID, victim);
+        CHECK_EQ(mySerum.triggerID, 1234);
+        EXPECT_NO_PLANE();
+        CHECK(mySerum.frame32 == NULL);
+        EXPECT_PLANE64([](uint32_t x, uint32_t y) {
+          return (uint16_t)(0x0200 + n256::Shade(n256::kDynamic, x, y));
+        });
+
+        // The next complete frame is rendered as usual.
+        n256::Colorize(s.Frame(n256::kRotation));
+        CHECK_EQ(mySerum.frameID, n256::kRotation);
+        EXPECT_ONLY_PLANE64();
+        EXPECT_PLANE64([](uint32_t, uint32_t) { return (uint16_t)0xF100; });
+        n256::Unload();
+      }
+    }
+  }
+}
+
+// A black frame does not end a monochrome stream -- but only a frame that is
+// black all the way down. This one is black in its first 4096 bytes and lit
+// below, so it does end it, and the unknown frame after it is not shown.
+static void Test_N256BlackFrameIsJudgedWhole(void) {
+  const n256::Synth s;
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, n256::kBothPlanes, viaConcentrate != 0)) continue;
+    std::vector<uint8_t> unknown(n256::kNPx);
+    for (uint32_t i = 0; i < n256::kNPx; ++i)
+      unknown[i] = n256::Shade(91, i % n256::kNW, i / n256::kNW);
+
+    n256::Colorize(s.Frame(n256::kMonoTrigger));
+    CHECK_EQ(mySerum.frameID, n256::kMonoTrigger);
+    CHECK(monochromeMode);
+    CHECK_EQ(n256::Colorize(unknown), 0);
+    CHECK_EQ(mySerum.frameID, 0xfffffffd);
+
+    n256::Colorize(s.Frame(n256::kBlackTop));
+    CHECK_EQ(mySerum.frameID, n256::kBlackTop);
+    CHECK(!monochromeMode);
+    CHECK_EQ(n256::Colorize(unknown), IDENTIFY_NO_FRAME);
+    n256::Unload();
+  }
+}
+
+// Scene markers are 128x32 frames from the scene generator. In these projects
+// they are identified like any other frame, over 16384 bytes: the marker
+// followed by zeros. The lookup built at load time has to hash them the same
+// way, and must not read past the marker it generated.
+static void Test_N256SceneLookup(void) {
+  const char* const csv = "7,2,100\n";
+  n256::Synth s;
+  {
+    const std::filesystem::path dir = n256::Dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "scene.csv").string();
+    {
+      std::ofstream out(path);
+      out << csv;
+    }
+    SceneGenerator generator;
+    CHECK(generator.parseCSV(path));
+    generator.setDepth(2);
+    memset(s.Native(n256::kScene), 0, n256::kNPx);
+    CHECK_EQ(generator.generateFrame(7, 1, s.Native(n256::kScene), 1, true),
+             0xffff);
+  }
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, n256::kBothPlanes, viaConcentrate != 0, csv)) continue;
+    CHECK_EQ(g_serumData.frameIsScene.size(), n256::kFrameCount);
+    if (g_serumData.frameIsScene.size() == n256::kFrameCount) {
+      CHECK_EQ(g_serumData.frameIsScene[n256::kScene], 1);
+      CHECK_EQ(g_serumData.frameIsScene[n256::kStatic], 0);
+    }
+    if (viaConcentrate) {
+      const auto it =
+          g_serumData.sceneFrameIdByTriplet.find(MakeSceneTripletKey(7, 1, 1));
+      CHECK(it != g_serumData.sceneFrameIdByTriplet.end());
+      if (it != g_serumData.sceneFrameIdByTriplet.end())
+        CHECK_EQ(it->second, n256::kScene);
+    }
+    n256::Unload();
+  }
+}
+
+// The same file without the flag is an ordinary 128x32 project with a 256x64
+// extra plane, and nothing about it may change: the ROM frame is 128x32, the
+// 128x32 plane is rendered from its own data, the extra plane is the scaled
+// layer, and sprites are looked for at 128x32.
+static void Test_N256FlagOffIsUnchanged(void) {
+  n256::Synth s;
+  s.is256x64 = false;
+  // Without the flag the ROM frame is the first 128x32 of each buffer, the
+  // masks are 128x32, and there are no sprites to speak of.
+  s.compmasks.assign((size_t)s.ncompmasks * n256::kOPx, 0);
+  s.compmaskid.assign(s.nframes, 255);
+  s.framesprites.assign(s.framesprites.size(), 255);
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, n256::kBothPlanes, viaConcentrate != 0)) continue;
+    CHECK(!g_serumData.is256x64);
+    CHECK_EQ(NativeFrameWidth(), 128);
+    CHECK_EQ(NativeFrameHeight(), 32);
+    CHECK(!ExtraPlaneIsNative());
+    CHECK(upscaleExtraFromOriginal);
+    CHECK(mySerum.frame32 != NULL);
+    CHECK_EQ(mySerum.width32, 128);
+    std::vector<uint8_t> frame(s.Native(n256::kDynamic),
+                               s.Native(n256::kDynamic) + n256::kOPx);
+    frame.shrink_to_fit();
+    Serum_Colorize(frame.data());
+    CHECK_EQ(mySerum.frameID, n256::kDynamic);
+    CHECK(mySerum.flags & FLAG_RETURNED_32P_FRAME_OK);
+    CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+    CHECK_EQ(mySerum.width32, 128);
+    const uint8_t* rom = s.Native(n256::kDynamic);
+    EXPECT_PLANE32([rom](uint32_t x, uint32_t y) {
+      return (uint16_t)(0x0100 + rom[y * n256::kOW + x]);
+    });
+    n256::Unload();
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 struct TestCase {
   const char* name;
@@ -2112,6 +3162,24 @@ static const TestCase kTests[] = {
      Test_RotationAdvancesTaggedPixelsOnly},
     {"rotation/wraps_at_length", Test_RotationWrapsAtItsLength},
     {"rotation/empty_slot_not_due_next", Test_EmptyRotationSlotIsNotDueNext},
+    {"n256/loads_and_forgets", Test_N256LoadsAndForgets},
+    {"n256/rejects_other_geometry", Test_N256RejectsOtherGeometry},
+    {"n256/identification", Test_N256Identification},
+    {"n256/static_content", Test_N256StaticContent},
+    {"n256/dynamic_content", Test_N256DynamicContent},
+    {"n256/background_over_black", Test_N256BackgroundOverBlack},
+    {"n256/sprite_detection", Test_N256SpriteDetection},
+    {"n256/sprite_drawing", Test_N256SpriteDrawing},
+    {"n256/rotation", Test_N256Rotation},
+    {"n256/request_both", Test_N256RequestBoth},
+    {"n256/request_32p_only", Test_N256Request32pOnly},
+    {"n256/request_fallback", Test_N256RequestFallback},
+    {"n256/unknown_frame_fallback", Test_N256UnknownFrameFallback},
+    {"n256/monochrome_palette", Test_N256MonochromePalette},
+    {"n256/without_extra_data", Test_N256WithoutExtraData},
+    {"n256/black_frame_is_judged_whole", Test_N256BlackFrameIsJudgedWhole},
+    {"n256/scene_lookup", Test_N256SceneLookup},
+    {"n256/flag_off_is_unchanged", Test_N256FlagOffIsUnchanged},
 };
 
 int main(int argc, char** argv) {

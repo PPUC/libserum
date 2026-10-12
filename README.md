@@ -315,6 +315,38 @@ read and the values stored in the `*.cROMc` are used.
 Downscaling is not done by `libserum`. A `128x32` request against `64p`-only
 content still returns the `64p` frame, and the host decides how to reduce it.
 
+### ROMs with a `256x64` frame
+
+A few ROMs deliver `256x64` frames. Their colorizations (`is256x64` in the cROM
+header) are rendered at that resolution only, and the frame you pass to
+`Serum_Colorize()` is `256 * 64` bytes.
+
+`libserum` does not downscale, so these colorizations have **no `128x32`
+output**. Frames are identified, sprites are looked for and everything is drawn
+on the `256x64` ROM frame, pixel for pixel, into `frame64`. The file still
+stores a `128x32` plane, written by the editor; it is loaded and not used.
+`scaling.txt` has no effect on such a colorization.
+
+What you get depends on the flags passed to `Serum_Load()`:
+
+| request | result |
+|---|---|
+| `FLAG_REQUEST_64P_FRAMES`, alone or with `FLAG_REQUEST_32P_FRAMES` | the `256x64` plane: `FLAG_RETURNED_64P_FRAME_OK`, `width64 == 256` |
+| `FLAG_REQUEST_32P_FRAMES` with `FLAG_REQUEST_FALLBACK` | the same `256x64` plane, in place of the `128x32` one that does not exist |
+| `FLAG_REQUEST_32P_FRAMES` alone | no plane. The colorization loads, frames are identified and triggers are reported, but neither `FLAG_RETURNED_*_FRAME_OK` flag is set and `width32` and `width64` are `0` |
+
+In every case `frame32` is `NULL`, `width32` is `0` and
+`FLAG_RETURNED_32P_FRAME_OK` is never set. A frame that is not part of the
+colorization is shown in grey (or in the monochrome palette) on the `256x64`
+plane as well.
+
+A frame whose `256x64` data is incomplete — the frame itself, its background or
+one of the sprites assigned to it has no extra-resolution version — produces no
+plane for that call: it is identified and its trigger is reported, both
+`FRAME_OK` flags are clear and both widths are `0`, and `frame64` keeps its
+previous content. The `128x32` data is not scaled up in its place, with or
+without `FLAG_REQUEST_FALLBACK`.
+
 ## Frames that are already on the display
 
 A colorization exists to turn many slightly different ROM frames into one

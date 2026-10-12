@@ -131,6 +131,10 @@ SerumData::~SerumData() {}
 
 void SerumData::Clear() {
   m_packingSidecarsNormalized = false;
+  // Part of the colorization, not of the library: a cROM with a header older
+  // than revision 20, or a v1 one, never sets it, so it has to go with the
+  // rest or the next load would hash 256x64 pixels of a 128x32 frame.
+  is256x64 = false;
   scalingAlgorithm = SERUM_SCALING_SCALE2X;
   shadowOffsetMode = SERUM_SHADOW_OFFSET_NATIVE;
   hashcodes.clear();

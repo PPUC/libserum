@@ -16,6 +16,15 @@ The one test that can use a real file takes its path from the environment:
 Frame buffers come from `AllocateFrameWorkBuffers()`, the same function both
 load paths call, so a buffer added there is present here too.
 
+The `n256/` tests are the exception to building `g_serumData` by hand. They
+serialize a small cROM exactly as the editor writes one (`n256::Synth`), put it
+in a temporary directory and go through `Serum_Load()` and `Serum_Colorize()`,
+once from the cROM and once from the cROMc generated from it. That covers the
+stream loader, the concentrate round trip, identification and the sprite
+sidecars without a fixture file. The ROM frame handed to `Serum_Colorize()` is a
+heap buffer of exactly one frame, so a read past it is something the sanitizer
+build names.
+
 ## Running
 
     cmake --build <build dir> --target serum_unit_tests
@@ -108,11 +117,61 @@ and a packing bug corrupts every colorization at once.
 | `rotation/wraps_at_length` | the shift wraps at the rotation's length instead of running off its colour list |
 | `rotation/empty_slot_not_due_next` | a slot with no colours or no delay is not a rotation and is not reported as due |
 
+### `is256x64` projects
+
+A cROM whose ROM frame is `256x64` while its header describes a `128x32`
+original plane and a `256x64` extra plane. libserum renders the `256x64` plane
+only and has no `128x32` output for these; the synthetic project gives the
+stored `128x32` data colours of its own, so any of it reaching a plane fails a
+pixel comparison. `AGENTS.md` ("The ROM frame, and `is256x64` projects") has the
+rule each test pins.
+
+| test | what it pins |
+|---|---|
+| `n256/loads_and_forgets` | the flag leaves one plane, `256x64`; no `32p` buffer is allocated, the scaled layer and the original-plane passes stay off, and the flag is gone again after `Serum_free()` |
+| `n256/rejects_other_geometry` | the flag with any other original plane is refused at load |
+| `n256/identification` | the hash covers all `256x64` pixels and a comparison mask is `256x64` |
+| `n256/static_content` | the plane shows the frame authored for it, and only `FLAG_RETURNED_64P_FRAME_OK` / `width64` are reported |
+| `n256/dynamic_content` | the plane takes the ROM shade of its own pixel and the extra plane's colour set; `lastFrame` holds the whole frame |
+| `n256/background_over_black` | "the ROM lit nothing here" is judged on the plane's own ROM pixel |
+| `n256/sprite_detection` | a sprite at an odd position in row 37 is found there, by value and by shape, where a `128x32` reading has no such row; the bounding box is in ROM-frame pixels |
+| `n256/sprite_drawing` | a sprite is drawn 1:1 where it was found, from the extra arrays, dynamic pixel included |
+| `n256/rotation` | the plane rotates with the extra table and nothing is reported for a `32p` plane |
+| `n256/request_both` | `32P \| 64P`: the `256x64` plane, no `32p` buffer, flag or width; the frame's trigger is reported |
+| `n256/request_32p_only` | `32P` alone: the colorization loads from cROM, generated cROMc and a direct cROMc load; frames are identified and a trigger is reported, but there is no buffer and no plane, for a known frame and an unknown one, and plane-less frames after the first read as already on display |
+| `n256/request_fallback` | `32P \| FALLBACK` gets the `256x64` plane, also from a direct cROMc load and from a forced cROM load, where nothing widens the request; with `64P` the flag changes nothing |
+| `n256/unknown_frame_fallback` | the grey fallback is the ROM frame pixel for pixel on the `256x64` plane only, for every request that has a plane |
+| `n256/monochrome_palette` | the monochrome palette trigger takes the extra plane's colour set, and none when the frame has no extra content |
+| `n256/without_extra_data` | a frame, a background or a sprite without extra data leaves its frame with no plane for that call, with or without `FALLBACK`: identified, trigger reported, `frame64` untouched, and the next complete frame renders |
+| `n256/black_frame_is_judged_whole` | a frame that is black in its first 4096 bytes and lit below is not a black frame |
+| `n256/scene_lookup` | scene markers are hashed as the marker followed by zeros, at load and at save, without reading past the generated marker |
+| `n256/flag_off_is_unchanged` | the same file without the flag is an ordinary `128x32` project in layer mode, with its `32p` plane rendered from its own data |
+
+Each was checked the way the section below asks: one mutation at a time on a
+copy of the tree, under the sanitizer build — 26 of them, covering the native
+frame accessors, the request-mode decisions (`NativePlaneRequested()`, the
+`is256x64` branch of `ConfigureRequestedOutputMode()`, the `32p` allocation),
+both places that keep or drop extra-plane data at load, the palette source and
+the no-upscale rule for a frame without extra data. Three are only caught by
+the sanitizer — a `frameshape` buffer or a generated scene marker sized
+`128x32` is an out-of-bounds read, not a wrong pixel, and a sprite doubled into
+the `256x64` plane writes past it before any pixel is compared. And taking the
+geometry check out does not fail an assertion either: the loader then reads a
+file shorter than the header claims and exits.
+
+One thing is reasoned rather than tested: the frame dword table is sized from
+the ROM frame so that it can never fill. Undersizing it would hang the probe
+loop instead of failing a check, and it takes more distinct four-pixel windows
+than a four-shade test frame can hold.
+
 ## Not covered yet
 
 In rough order of what is worth doing next:
 
-- **`Identify_Frame()`** — which colorization frame a ROM frame is. Attempted and
+- **`Identify_Frame()`** on a hand-built `g_serumData` — which colorization
+  frame a ROM frame is. The `n256/` tests reach it through `Serum_Load()`
+  instead, and an ordinary `128x32` project could be covered the same way.
+  The in-memory attempt was
   backed out: the fixture needs more than the render does. Two things are
   already solved for whoever picks it up. `hashcodes` is index-based, so
   `set()` refuses it, but `readFromCRomReader()` takes any object with a
@@ -124,9 +183,10 @@ In rough order of what is worth doing next:
   teardown crashes, so something else in the identification state is uninitialized.
 - **Scene playback** and the finish/background flag semantics, several of which
   have their own bug history.
-- **Sprite detection** (`Check_Spritesv2`) and `Colorize_Spritev2()`.
-- **A cROMc save/load round trip**, which needs no fixture file at all: build
-  `g_serumData`, save, reload, compare.
+- **Sprite detection** (`Check_Spritesv2`) and `Colorize_Spritev2()` for the
+  32-row and 64-row layouts; the `n256/` tests cover the third one only.
+- **A cROMc save/load round trip** that compares the model rather than the
+  rendered output. `n256/` renders from both and expects the same pixels.
 - **The wiring of `FinishedFrameIsAlreadyOnDisplay()` into
   `Serum_ColorizeWithMetadatav2Internal()`.** The decision itself is covered;
   reaching it from a colorize call needs a frame to be identified, so it is
