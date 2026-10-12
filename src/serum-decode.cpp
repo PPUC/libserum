@@ -7861,6 +7861,13 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     if (monochromeFrameExtra && g_serumData.fwidth_extra > 0 &&
         g_serumData.fheight_extra > 0) {
       extraPlaneIsDerived = false;
+      // The plane now holds the monochrome picture. lastUpscaledSdCrc still
+      // describes the colorized frame it was last derived from, and the
+      // frame that ends the monochrome stretch is very often that same
+      // picture again -- so without this the plane would be kept, and the
+      // colorized 32p frame would stand beside a grey 64p one until the
+      // picture changed.
+      if (monochromeFrameExtra == mySerum.frame64) ExtraPlaneNoLongerDerived();
       // Scale from original frame to extra resolution
       const bool upscaleExtra = IsExactDoubleExtraPlane();
       const bool extraIsNative = ExtraPlaneIsNative();

@@ -95,6 +95,7 @@ and a packing bug corrupts every colorization at once.
 | `separator/envelope_follows_the_font` | how tall a separator may be follows the height of the text it belongs to; the width bound is still fixed, and the test says so |
 | `colorize/unchanged_picture_keeps_extra_plane` | an unchanged `128x32` picture keeps the `256x64` plane already derived from it, and a changed one derives again; the state does not outlive the colorization |
 | `colorize/hd_sprite_art_blocks_reuse` | HD sprite artwork lands in the plane after the composite, so the plane can no longer be kept |
+| `colorize/monochrome_frame_blocks_reuse` | a monochrome frame written into an authored `64`-row plane ends the kept plane, so the colorized picture that follows it -- the same `128x32` picture as before the monochrome frame -- is derived again instead of standing beside a grey plane; from a cROM and from its cROMc, for `64P` and `32P \| 64P` |
 | `colorize/hd_static_frame_is_not_reused` | frames that composite HD statics each draw their own artwork, whichever frame the plane was last derived from |
 | `colorize/finished_frame_already_on_display` | a finished frame that matches the picture the caller already has is not announced again — unless it rotates differently, or a scene or trigger makes it news whatever it looks like |
 | `colorize/static_content` | a frame's own colours come through untouched, whatever the ROM shade was |
@@ -215,10 +216,11 @@ In rough order of what is worth doing next:
   scene and trigger conditions are checked only as arguments to the predicate,
   not as the states that produce them.
 - **Two of the `ExtraPlaneNoLongerDerived()` sites**: the monochrome fallback
-  and scene-finish blanking. Both write the extra plane outside the upscale, so
-  a later frame with a matching `frame32` must not keep it — the same rule the
-  sprite case pins, on paths that need the fixtures above. The sprite site is
-  covered; these two are reasoned, not tested.
+  on a colorization *without* an authored extra plane, and scene-finish
+  blanking. Both write the extra plane outside the upscale, so a later frame
+  with a matching `frame32` must not keep it — the same rule the sprite case
+  pins. The sprite site and the monochrome fallback into an authored extra
+  plane are covered; these two are reasoned, not tested.
 
 ## What must not be covered
 

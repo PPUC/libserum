@@ -789,6 +789,17 @@ Two things make it correct rather than merely cheap:
   away. Both guards are load-bearing and neither can be
   mutation-tested while the other stands; `tests/README.md` says how that trap
   reads.
+- **Every other writer of the plane ends the record too.** The monochrome /
+  unknown-frame path paints `frame64` itself, in two ways: on a colorization
+  with no authored extra plane it upscales the grey `frame32`, and on one that
+  has an authored `64p` plane it writes the grey picture straight into it.
+  Both call `ExtraPlaneNoLongerDerived()`. The second did not at first, and the
+  frame that ends a monochrome stretch is very often the picture shown before
+  it, reached from a ROM frame that differs only under the comparison mask --
+  same `frame32`, same CRC -- so the grey `64p` plane was kept beside a
+  colorized `32p` one until the picture changed. On `spagb_100` that was the
+  first identified frame after a monochrome frame, 99 times in 85516 dump
+  frames; nothing else moved.
 
 `Serum_free()` clears both, so one colorization can never inherit another's
 plane, and the CRC table is initialized at the comparison site — a zeroed table

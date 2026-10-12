@@ -3448,6 +3448,79 @@ static void Test_SpriteInLayerModeEndToEnd(void) {
   }
 }
 
+// A monochrome frame paints both planes itself. On a project with an authored
+// 64-row plane it writes that plane directly, and the plane is then not the
+// upscale of the last colorized picture any more: the frame that ends the
+// monochrome stretch -- the same picture again, reached from a ROM frame that
+// differs only under the comparison mask -- has to derive it afresh instead of
+// keeping the grey one.
+static void Test_MonochromeFrameBlocksReuse(void) {
+  using namespace n256;
+  Synth s;
+  s.is256x64 = false;
+  s.compmasks.assign((size_t)s.ncompmasks * kOPx, 0);
+  s.compmaskid.assign(s.nframes, 255);
+  s.framesprites.assign(s.framesprites.size(), 255);
+  // A frame with no HD content of its own, so its 64-row plane is derived,
+  // and a comparison mask that hides one corner of it.
+  s.isextraframe[kStatic] = 0;
+  s.compmaskid[kStatic] = 1;
+  for (uint32_t y = 20; y < 30; ++y)
+    for (uint32_t x = 100; x < 120; ++x)
+      s.compmasks[(size_t)1 * kOPx + y * kOW + x] = 1;
+
+  const auto known = [&s](uint8_t hidden) {
+    std::vector<uint8_t> frame(s.Native(kStatic), s.Native(kStatic) + kOPx);
+    frame[25 * kOW + 110] = hidden;  // under the mask: same frame, new CRC
+    frame.shrink_to_fit();
+    return frame;
+  };
+  const auto expectColorized = [&](bool both) {
+    CHECK_EQ(mySerum.frameID, kStatic);
+    CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+    CHECK_EQ(mySerum.width64, 256);
+    EXPECT_PLANE64([](uint32_t x, uint32_t y) {
+      if ((x == 0 || x == kNW - 1) && (y == 0 || y == kNH - 1))
+        return (uint16_t)0;
+      return C32(kStatic, (y / 2) * kOW + x / 2);
+    });
+    if (both)
+      EXPECT_PLANE32(
+          [](uint32_t x, uint32_t y) { return C32(kStatic, y * kOW + x); });
+  };
+
+  for (uint8_t flags : {(uint8_t)FLAG_REQUEST_64P_FRAMES, kBothPlanes}) {
+    const bool both = flags == kBothPlanes;
+    for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+      if (!Load(s, flags, viaConcentrate != 0)) continue;
+      CHECK(upscaleExtraFromOriginal);
+      std::vector<uint8_t> first = known(0);
+      uint32_t r = Serum_Colorize(first.data());
+      CHECK(r != IDENTIFY_NO_FRAME && r != IDENTIFY_SAME_FRAME);
+      expectColorized(both);
+
+      // An unknown frame, shown in grey on both planes.
+      Serum_SetMaximumUnknownFramesToSkip(1);
+      std::vector<uint8_t> unknown(kOPx, 3);
+      unknown[0] = 0;
+      unknown.shrink_to_fit();
+      r = Serum_Colorize(unknown.data());
+      CHECK_EQ(r, 0);
+      CHECK_EQ(mySerum.frameID, 0xfffffffd);
+      CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+      CHECK_EQ(mySerum.frame64[20 * kNW + 20], grayscale_4[3]);
+
+      // The colorized picture again. Its 128x32 plane is what the 64-row
+      // plane was last derived from; the 64-row plane itself is grey.
+      std::vector<uint8_t> again = known(1);
+      r = Serum_Colorize(again.data());
+      CHECK(r != IDENTIFY_NO_FRAME && r != IDENTIFY_SAME_FRAME);
+      expectColorized(both);
+      Unload();
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 struct TestCase {
@@ -3549,6 +3622,7 @@ static const TestCase kTests[] = {
      Test_FrameShadowInsideSpriteRegion},
     {"sprite/scaled_sprite_blocks_reuse", Test_ScaledSpriteBlocksReuse},
     {"sprite/layer_mode_end_to_end", Test_SpriteInLayerModeEndToEnd},
+    {"colorize/monochrome_frame_blocks_reuse", Test_MonochromeFrameBlocksReuse},
 };
 
 int main(int argc, char** argv) {
