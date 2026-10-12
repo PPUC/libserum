@@ -164,6 +164,24 @@ the ROM frame so that it can never fill. Undersizing it would hang the probe
 loop instead of failing a check, and it takes more distinct four-pixel windows
 than a four-shade test frame can hold.
 
+### Sprites in layer mode
+
+A `128x32` project asked for its `64`-row plane, which libserum upscales. The
+sprite is drawn into the `128x32` plane and its region is composited into the
+extra plane from there; `AGENTS.md` ("Sprites in layer mode") has the rules.
+
+| test | what it pins |
+|---|---|
+| `sprite/drawn_for_64p_only_request` | a `64P`-only request shows the sprite at twice its position and size, dynamic pixel included, with and without HD art, in both algorithms — the same plane a `32P \| 64P` request gets — and still reports only the `64`-row plane |
+| `sprite/frame_shadow_inside_sprite_region` | a frame's dynamic shadow under a transparent sprite pixel survives the sprite's composite for a `64P`-only request as it does for `32P \| 64P` |
+| `sprite/scaled_sprite_blocks_reuse` | a sprite without HD art ends the kept extra plane, so it does not stay behind when the next frame has the same `128x32` picture without it |
+| `sprite/layer_mode_end_to_end` | the same through `Serum_Load()` and `Serum_Colorize()`, from a cROM and from its cROMc: a sprite found at one place, then another, then gone, then back, on one frame ID, for `64P` and `32P \| 64P` |
+
+Each of the three rules was taken out by itself on a copy of the tree: asking
+the advertised flag again fails the first, third and fourth test, replaying
+shadows only for a `32p` caller fails the second, and leaving the plane
+derived after a sprite fails the third and fourth.
+
 ## Not covered yet
 
 In rough order of what is worth doing next:
@@ -183,8 +201,11 @@ In rough order of what is worth doing next:
   teardown crashes, so something else in the identification state is uninitialized.
 - **Scene playback** and the finish/background flag semantics, several of which
   have their own bug history.
-- **Sprite detection** (`Check_Spritesv2`) and `Colorize_Spritev2()` for the
-  32-row and 64-row layouts; the `n256/` tests cover the third one only.
+- **Sprite detection** (`Check_Spritesv2`) for the 32-row and 64-row layouts,
+  beyond the one sprite `sprite/layer_mode_end_to_end` finds, and
+  `Colorize_Spritev2()` outside layer mode: a 32-row project asked for `32P`
+  only, and the 64-row layout. The `sprite/` tests cover layer mode and the
+  `n256/` tests the `is256x64` layout.
 - **A cROMc save/load round trip** that compares the model rather than the
   rendered output. `n256/` renders from both and expects the same pixels.
 - **The wiring of `FinishedFrameIsAlreadyOnDisplay()` into

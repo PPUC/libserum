@@ -3085,6 +3085,370 @@ static void Test_N256FlagOffIsUnchanged(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Sprites on a 128x32 project whose 64-row output libserum upscales
+//
+// In layer mode a sprite reaches the 256x64 plane through the 128x32 one: it is
+// drawn there, and its region is composited into the extra plane afterwards.
+// A sprite with HD art still sends its dynamic pixels that way. So the sprite
+// pass has to draw into the 128x32 plane whether or not the caller is given
+// that plane, and what it leaves in the extra plane is not something a later
+// frame may keep.
+// ---------------------------------------------------------------------------
+
+namespace spr32 {
+
+// Where the sprite is found in the ROM frame, and its size there.
+static const uint32_t kX = 5, kY = 3, kWid = 4, kHei = 3;
+static const uint32_t kTransX = 3, kTransY = 2;  // a transparent sprite pixel
+static const uint32_t kDynX = 1, kDynY = 1;      // a dynamic sprite pixel
+static const uint8_t kDynShade = 9;              // the ROM shade under it
+static const uint16_t kFrameColour = 0x0111;
+
+static uint16_t SpriteColour(uint32_t px, uint32_t py) {
+  return (uint16_t)(0x5000 + py * 16 + px);
+}
+static uint16_t HdColour(uint32_t hx, uint32_t hy) {
+  return (uint16_t)(0x9000 + hy * 16 + hx);
+}
+static uint16_t DynColour(uint8_t shade) { return (uint16_t)(0x7000 + shade); }
+
+static std::vector<uint8_t> g_spriteRom;
+
+// One frame of a single static colour and one sprite, requested the way
+// ConfigureRequestedOutputMode() leaves a 128x32 project: `both` is
+// `32P | 64P`, otherwise `64P` alone, where the 128x32 plane is rendered as the
+// upscale source and not handed to the caller.
+static void SetUp(bool both, bool hdArt, uint8_t algorithm) {
+  SetUpColorization();
+  upscaleExtraFromOriginal = true;
+  originalPlaneRequestedByCaller = both;
+  isoriginalrequested = both;
+  isoriginalfallbackrequested = !both;
+  isextrarequested = true;
+  runtimeScalingAlgorithm = algorithm;
+  const size_t px = (size_t)kW * kCH;
+  const std::vector<uint16_t> colours(px, kFrameColour);
+  g_serumData.cframes_v2.set(kFrameId, colours.data(), px);
+
+  g_spriteRom.assign(px, 0);
+  g_spriteRom[(size_t)(kY + kDynY) * kW + kX + kDynX] = kDynShade;
+  romFrameForUpscale = g_spriteRom.data();
+
+  const size_t spritePixels = (size_t)MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
+  g_serumData.nsprites = 1;
+  std::vector<uint8_t> opaque(spritePixels, 0), dynActive(spritePixels, 0);
+  const std::vector<uint8_t> dynLayer(spritePixels, 0);
+  std::vector<uint16_t> art(spritePixels, 0);
+  for (uint32_t y = 0; y < kHei; ++y)
+    for (uint32_t x = 0; x < kWid; ++x) {
+      if (x == kTransX && y == kTransY) continue;
+      opaque[(size_t)y * MAX_SPRITE_WIDTH + x] = 1;
+      art[(size_t)y * MAX_SPRITE_WIDTH + x] = SpriteColour(x, y);
+    }
+  dynActive[(size_t)kDynY * MAX_SPRITE_WIDTH + kDynX] = 1;
+  g_serumData.spriteoriginal_opaque.set(0, opaque.data(), spritePixels);
+  g_serumData.spritecolored.set(0, art.data(), spritePixels);
+  g_serumData.dynaspritemasks.set(0, dynLayer.data(), spritePixels);
+  g_serumData.dynaspritemasks_active.set(0, dynActive.data(), spritePixels);
+  std::vector<uint16_t> sets(
+      (size_t)MAX_DYNA_SETS_PER_SPRITE * g_serumData.nocolors, 0);
+  for (uint32_t shade = 0; shade < g_serumData.nocolors; ++shade)
+    sets[shade] = DynColour((uint8_t)shade);
+  g_serumData.dynasprite4cols.set(0, sets.data(), sets.size());
+  if (!hdArt) return;
+
+  FillIndexed<uint8_t>(g_serumData.isextrasprite, {1}, 1, 1);
+  std::vector<uint8_t> opaqueHd(spritePixels, 0);
+  std::vector<uint16_t> artHd(spritePixels, 0);
+  for (uint32_t y = 0; y < kHei * 2; ++y)
+    for (uint32_t x = 0; x < kWid * 2; ++x) {
+      if (x / 2 == kTransX && y / 2 == kTransY) continue;
+      opaqueHd[(size_t)y * MAX_SPRITE_WIDTH + x] = 1;
+      artHd[(size_t)y * MAX_SPRITE_WIDTH + x] = HdColour(x, y);
+    }
+  g_serumData.spritemask_extra_opaque.set(0, opaqueHd.data(), spritePixels,
+                                          &g_serumData.isextrasprite);
+  g_serumData.spritecolored_extra.set(0, artHd.data(), spritePixels,
+                                      &g_serumData.isextrasprite);
+}
+
+static void DrawSprite(void) {
+  Colorize_Spritev2(g_spriteRom.data(), 0, kX, kY, /*spx=*/0, /*spy=*/0, kWid,
+                    kHei, kFrameId);
+}
+
+// The sprite pixel a 128x32 position belongs to, or false.
+static bool InSprite(uint32_t sx, uint32_t sy, uint32_t* px, uint32_t* py) {
+  if (sx < kX || sy < kY || sx >= kX + kWid || sy >= kY + kHei) return false;
+  *px = sx - kX;
+  *py = sy - kY;
+  return !(*px == kTransX && *py == kTransY);
+}
+
+static uint16_t Expected32(uint32_t x, uint32_t y) {
+  uint32_t px, py;
+  if (!InSprite(x, y, &px, &py)) return kFrameColour;
+  if (px == kDynX && py == kDynY) return DynColour(kDynShade);
+  return SpriteColour(px, py);
+}
+
+// With line doubling: twice the position, twice the size, every 128x32 sprite
+// pixel a 2x2 block -- or the sprite's own 256x64 picture where it has one,
+// except for its dynamic pixel, which always comes through the scaled layer.
+static uint16_t Expected64(bool hdArt, uint32_t x, uint32_t y) {
+  uint32_t px, py;
+  if (!InSprite(x / 2, y / 2, &px, &py)) return kFrameColour;
+  if (px == kDynX && py == kDynY) return DynColour(kDynShade);
+  return hdArt ? HdColour(x - kX * 2, y - kY * 2) : SpriteColour(px, py);
+}
+
+static unsigned Mismatches64(bool hdArt) {
+  unsigned bad = 0;
+  for (uint32_t y = 0; y < kCH * 2; ++y)
+    for (uint32_t x = 0; x < kW * 2; ++x)
+      if (mySerum.frame64[(size_t)y * kW * 2 + x] != Expected64(hdArt, x, y))
+        ++bad;
+  return bad;
+}
+
+}  // namespace spr32
+
+// A caller that asks for the 64-row plane only is not handed the 128x32 one,
+// but the sprite still has to be drawn into it: that is where the extra plane
+// gets it from. Whether the plane is advertised and whether it was rendered
+// are different questions, and the sprite pass used to ask the first. A sprite
+// without HD art then never appeared at all, and one with HD art lost its
+// dynamic pixels.
+static void Test_SpriteIsDrawnFor64pOnlyRequest(void) {
+  const size_t px = (size_t)kW * kCH;
+  for (int hdArt = 0; hdArt < 2; ++hdArt) {
+    for (uint8_t algorithm : {(uint8_t)SERUM_SCALING_LINE_DOUBLING,
+                              (uint8_t)SERUM_SCALING_SCALE2X}) {
+      const bool exact = algorithm == SERUM_SCALING_LINE_DOUBLING;
+      // Both planes requested: the reference.
+      spr32::SetUp(/*both=*/true, hdArt != 0, algorithm);
+      Colorize_Framev2(spr32::g_spriteRom.data(), kFrameId);
+      spr32::DrawSprite();
+      CHECK(mySerum.flags & FLAG_RETURNED_32P_FRAME_OK);
+      CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+      unsigned bad32 = 0;
+      for (uint32_t y = 0; y < kCH; ++y)
+        for (uint32_t x = 0; x < kW; ++x)
+          if (mySerum.frame32[(size_t)y * kW + x] != spr32::Expected32(x, y))
+            ++bad32;
+      CHECK_EQ(bad32, 0);
+      if (exact) CHECK_EQ(spr32::Mismatches64(hdArt != 0), 0);
+      const std::vector<uint16_t> reference(mySerum.frame64,
+                                            mySerum.frame64 + px * 4);
+      TearDownFrame();
+
+      // The 64-row plane alone: the same picture, and still only that plane.
+      spr32::SetUp(/*both=*/false, hdArt != 0, algorithm);
+      Colorize_Framev2(spr32::g_spriteRom.data(), kFrameId);
+      CHECK(!(mySerum.flags & FLAG_RETURNED_32P_FRAME_OK));
+      CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+      spr32::DrawSprite();
+      CHECK(!(mySerum.flags & FLAG_RETURNED_32P_FRAME_OK));
+      CHECK_EQ(mySerum.width32, 0);
+      CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+      CHECK_EQ(mySerum.width64, kW * 2);
+      if (exact) CHECK_EQ(spr32::Mismatches64(hdArt != 0), 0);
+      unsigned differs = 0;
+      for (size_t i = 0; i < px * 4; ++i)
+        if (mySerum.frame64[i] != reference[i]) ++differs;
+      CHECK_EQ(differs, 0);
+      TearDownFrame();
+    }
+  }
+}
+
+// A frame's dynamic shadow that falls inside a sprite's rectangle is repainted
+// by the sprite's own composite, out of the 128x32 plane. So that plane has to
+// hold the shadow by then, for a caller that never sees the plane as well --
+// otherwise the composite paints the shadow away wherever the sprite is
+// transparent, and the two requests show different pictures.
+static void Test_FrameShadowInsideSpriteRegion(void) {
+  const size_t px = (size_t)kW * kCH;
+  const uint16_t kShadow = 0x0444, kGlyph = 0x0333;
+  // A lit dynamic pixel just under the sprite's rectangle, casting its shadow
+  // upwards onto the sprite's transparent pixel.
+  const uint32_t gx = spr32::kX + spr32::kTransX, gy = spr32::kY + spr32::kHei;
+  for (uint8_t algorithm :
+       {(uint8_t)SERUM_SCALING_LINE_DOUBLING, (uint8_t)SERUM_SCALING_SCALE2X}) {
+    std::vector<uint16_t> reference;
+    for (int both = 1; both >= 0; --both) {
+      spr32::SetUp(both != 0, /*hdArt=*/false, algorithm);
+      std::vector<uint8_t> active(px, 0);
+      active[(size_t)gy * kW + gx] = 1;
+      std::vector<uint16_t> shadeToColour(16, kGlyph);
+      shadeToColour[0] = spr32::kFrameColour;
+      GiveFrameADynamicZone(active, /*couche=*/2, shadeToColour);
+      std::vector<uint8_t> dir(MAX_DYNA_SETS_PER_FRAME_V2, 0);
+      std::vector<uint16_t> col(MAX_DYNA_SETS_PER_FRAME_V2, 0);
+      dir[2] = 1u << 1;  // up
+      col[2] = kShadow;
+      g_serumData.dynashadowsdir.set(kFrameId, dir.data(), dir.size());
+      g_serumData.dynashadowscol.set(kFrameId, col.data(), col.size());
+      spr32::g_spriteRom[(size_t)gy * kW + gx] = 5;
+
+      Colorize_Framev2(spr32::g_spriteRom.data(), kFrameId);
+      spr32::DrawSprite();
+      CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+      CHECK_EQ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) != 0, both != 0);
+      // The shadow is there, in the block of the transparent sprite pixel.
+      unsigned shadow = 0;
+      for (uint32_t dy = 0; dy < 2; ++dy)
+        for (uint32_t dx = 0; dx < 2; ++dx)
+          if (mySerum.frame64[(size_t)((gy - 1) * 2 + dy) * kW * 2 + gx * 2 +
+                              dx] == kShadow)
+            ++shadow;
+      CHECK(shadow > 0);
+      if (both) {
+        reference.assign(mySerum.frame64, mySerum.frame64 + px * 4);
+      } else {
+        unsigned differs = 0;
+        for (size_t i = 0; i < px * 4; ++i)
+          if (mySerum.frame64[i] != reference[i]) ++differs;
+        CHECK_EQ(differs, 0);
+      }
+      TearDownFrame();
+    }
+  }
+}
+
+// A sprite without HD art lands in the extra plane after the frame's composite,
+// exactly as HD sprite art does, so the plane is no longer the upscale of the
+// frame's own 128x32 picture. The next frame with that same picture -- the
+// sprite gone, or somewhere else -- has to derive the plane again, or the
+// sprite stays where it was.
+static void Test_ScaledSpriteBlocksReuse(void) {
+  const size_t at = (size_t)(spr32::kY * 2) * (kW * 2) + spr32::kX * 2;
+  for (int both = 0; both < 2; ++both) {
+    spr32::SetUp(both != 0, /*hdArt=*/false, SERUM_SCALING_SCALE2X);
+    uint8_t* rom = spr32::g_spriteRom.data();
+    extraPlaneReuseCount = 0;
+    Colorize_Framev2(rom, kFrameId);
+    CHECK_EQ(extraPlaneReuseCount, 0);
+    // The same picture again, with no sprite: kept, as the rule says.
+    Colorize_Framev2(rom, kFrameId);
+    CHECK_EQ(extraPlaneReuseCount, 1);
+    CHECK_EQ(mySerum.frame64[at], spr32::kFrameColour);
+    const std::vector<uint16_t> withoutSprite(
+        mySerum.frame64, mySerum.frame64 + (size_t)kW * kCH * 4);
+
+    // Now a frame whose sprite is composited into the plane.
+    Colorize_Framev2(rom, kFrameId);
+    CHECK_EQ(extraPlaneReuseCount, 2);
+    spr32::DrawSprite();
+    CHECK_EQ(mySerum.frame64[at + 2], spr32::SpriteColour(1, 0));
+
+    // The sprite is gone and the 128x32 picture is the one from before it.
+    Colorize_Framev2(rom, kFrameId);
+    CHECK_EQ(extraPlaneReuseCount, 2);
+    unsigned left = 0;
+    for (size_t i = 0; i < withoutSprite.size(); ++i)
+      if (mySerum.frame64[i] != withoutSprite[i]) ++left;
+    CHECK_EQ(left, 0);
+    TearDownFrame();
+  }
+}
+
+// The same through the public calls, on a cROM and on the cROMc made from it:
+// a 128x32 project, a frame with no HD content of its own, and a sprite that
+// moves inside its bounding box and then goes away while the frame stays the
+// same one. Every colour is unique, so nothing is rounded and each 128x32
+// pixel is a 2x2 block of the plane, the frame's corners aside.
+static void Test_SpriteInLayerModeEndToEnd(void) {
+  using namespace n256;
+  Synth s;
+  s.is256x64 = false;
+  // Without the flag the ROM frame is the first 128x32 of each buffer and the
+  // masks are 128x32.
+  s.compmasks.assign((size_t)s.ncompmasks * kOPx, 0);
+  s.compmaskid.assign(s.nframes, 255);
+  s.framesprites.assign(s.framesprites.size(), 255);
+  // The sprite frame: nothing lit but one pixel outside the comparison mask,
+  // which hides the sprite's bounding box. No HD frame, no HD sprite art.
+  const uint32_t bx0 = 10, by0 = 4, bx1 = 100, by1 = 28;
+  s.isextraframe[kSprite] = 0;
+  s.isextrasprite[0] = 0;
+  s.compmaskid[kSprite] = 1;
+  for (uint32_t y = by0; y <= by1; ++y)
+    for (uint32_t x = bx0; x <= bx1; ++x)
+      s.compmasks[(size_t)1 * kOPx + y * kOW + x] = 1;
+  s.framesprites[(size_t)kSprite * MAX_SPRITES_PER_FRAME] = 0;
+  s.SetBB(kSprite, bx0, by0, bx1, by1);
+  for (uint32_t y = 0; y < kSprH; ++y)
+    for (uint32_t x = 0; x < kSprW; ++x)
+      s.spritecolored[y * MAX_SPRITE_WIDTH + x] =
+          (uint16_t)(0xD000 + y * 16 + x);
+  memset(s.Native(kSprite), 0, kOPx);
+  s.Native(kSprite)[30 * kOW + 120] = 2;
+
+  // The ROM frame with the sprite at (sx, sy), or without it.
+  const auto romFrame = [&s](bool withSprite, uint32_t sx, uint32_t sy) {
+    std::vector<uint8_t> frame(s.Native(kSprite), s.Native(kSprite) + kOPx);
+    if (withSprite)
+      for (uint32_t y = 0; y < kSprH; ++y)
+        for (uint32_t x = 0; x < kSprW; ++x)
+          frame[(sy + y) * kOW + sx + x] =
+              kSprite0[y][x] == kT ? 3 : kSprite0[y][x];
+    frame.shrink_to_fit();
+    return frame;
+  };
+  // What a 128x32 position shows. Sprite pixel (0,0) is dynamic.
+  const auto expected32 = [](bool withSprite, uint32_t sx, uint32_t sy,
+                             uint32_t x, uint32_t y) {
+    const uint16_t under = C32(kSprite, y * kOW + x);
+    if (!withSprite || x < sx || y < sy || x >= sx + kSprW || y >= sy + kSprH)
+      return under;
+    const uint32_t px = x - sx, py = y - sy;
+    if (kSprite0[py][px] == kT) return under;
+    if (px == 0 && py == 0) return (uint16_t)(0xE000 + kSprite0[0][0]);
+    return (uint16_t)(0xD000 + py * 16 + px);
+  };
+
+  for (uint8_t flags : {(uint8_t)FLAG_REQUEST_64P_FRAMES, kBothPlanes}) {
+    const bool both = flags == kBothPlanes;
+    for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+      if (!Load(s, flags, viaConcentrate != 0)) continue;
+      CHECK(upscaleExtraFromOriginal);
+      // Found at one place, then at another, then not at all.
+      const struct {
+        bool withSprite;
+        uint32_t sx, sy;
+      } steps[] = {
+          {true, 41, 13}, {true, 70, 9}, {false, 0, 0}, {true, 41, 13}};
+      for (const auto& step : steps) {
+        std::vector<uint8_t> frame =
+            romFrame(step.withSprite, step.sx, step.sy);
+        const uint32_t r = Serum_Colorize(frame.data());
+        CHECK(r != IDENTIFY_NO_FRAME && r != IDENTIFY_SAME_FRAME);
+        CHECK_EQ(mySerum.frameID, kSprite);
+        CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+        CHECK_EQ(mySerum.width64, 256);
+        CHECK_EQ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) != 0, both);
+        CHECK_EQ(mySerum.width32, both ? 128 : 0);
+        const bool with = step.withSprite;
+        const uint32_t sx = step.sx, sy = step.sy;
+        EXPECT_PLANE64([&](uint32_t x, uint32_t y) {
+          // Outside the frame is black, so the frame's own four corners are
+          // rounded into it.
+          if ((x == 0 || x == kNW - 1) && (y == 0 || y == kNH - 1))
+            return (uint16_t)0;
+          return expected32(with, sx, sy, x / 2, y / 2);
+        });
+        if (both)
+          EXPECT_PLANE32([&](uint32_t x, uint32_t y) {
+            return expected32(with, sx, sy, x, y);
+          });
+      }
+      Unload();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 struct TestCase {
   const char* name;
@@ -3180,6 +3544,11 @@ static const TestCase kTests[] = {
     {"n256/black_frame_is_judged_whole", Test_N256BlackFrameIsJudgedWhole},
     {"n256/scene_lookup", Test_N256SceneLookup},
     {"n256/flag_off_is_unchanged", Test_N256FlagOffIsUnchanged},
+    {"sprite/drawn_for_64p_only_request", Test_SpriteIsDrawnFor64pOnlyRequest},
+    {"sprite/frame_shadow_inside_sprite_region",
+     Test_FrameShadowInsideSpriteRegion},
+    {"sprite/scaled_sprite_blocks_reuse", Test_ScaledSpriteBlocksReuse},
+    {"sprite/layer_mode_end_to_end", Test_SpriteInLayerModeEndToEnd},
 };
 
 int main(int argc, char** argv) {

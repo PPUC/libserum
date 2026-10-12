@@ -3435,8 +3435,9 @@ static void GenerateExtraPlaneShadows(uint32_t IDfound) {
 // Paint the recorded original-resolution shadows into the 32p plane.
 //
 // Runs after the upscale, so the picture the extra plane was built from never
-// contained them -- that is the whole point of recording them. A caller that
-// did not ask for the 32p plane never sees this, so it is skipped.
+// contained them -- that is the whole point of recording them. It runs whether
+// or not the caller asked for the 32p plane: the sprites that draw next each
+// composite their own region out of this plane, see Colorize_Framev2().
 //
 // sdDynaLayerMap decides what a shadow may not cover: a pixel that turned out
 // to be lit dynamic content keeps the content. Painting in place got that
@@ -3482,6 +3483,13 @@ static void CompositeSpriteScaledLayer(uint16_t frx, uint16_t fry, uint16_t wid,
   if (wid == 0 || hei == 0) return;
   const uint16_t bounds[4] = {frx, fry, (uint16_t)(frx + wid - 1),
                               (uint16_t)(fry + hei - 1)};
+  // The sprite lands in the extra plane after the frame composite, so the
+  // plane stops being the upscale of the frame's own 32p picture -- the one
+  // lastUpscaledSdCrc was taken from, before any sprite drew. A later frame
+  // with that same picture must derive the plane again, or the sprite stays
+  // where it was after it has moved or gone. The same reason HD sprite art
+  // gives in Colorize_Spritev2().
+  ExtraPlaneNoLongerDerived();
   UpscaleOriginalPlaneIntoExtra(false, /*onlyCoveredPixels=*/true, bounds);
 }
 
@@ -6376,8 +6384,14 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     }
     // The extra plane is finished, so the 32p plane can have its shadows
     // back. Before the upscale would have put them in the picture it reads.
-    if (deferSdShadows && originalPlaneRequestedByCaller)
-      ReplayOriginalPlaneShadows();
+    //
+    // Also for a caller that never sees the 32p plane. A sprite composites
+    // its whole region out of that plane, and the frame's shadows inside the
+    // region reach the extra plane that way: the composite replaces the ones
+    // GenerateExtraPlaneShadows() put there. Without the replay it replaced
+    // them with nothing, so a 64p-only request lost every frame shadow that
+    // fell inside a sprite's rectangle while a 32p|64p request kept it.
+    if (deferSdShadows) ReplayOriginalPlaneShadows();
     // Sprites render next and each scopes the mask to itself; remember what
     // the frame owns so they can restore it rather than lose it.
     if (frameLayerCoverage && scaledLayerCoverage) {
@@ -6504,8 +6518,19 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
     }
     scaledLayerHasCoverage = false;
   }
-  if (((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) &&
-       g_serumData.fheight == 32) ||
+  // Was the 32p plane rendered for this frame? FLAG_RETURNED_32P_FRAME_OK
+  // cannot answer that in layer mode. The flag is what the caller is told,
+  // and for a caller that asked for the 64p plane only the frame composite
+  // takes it back as soon as the plane has been upscaled. Sprites draw after
+  // that, and they reach the extra plane through the 32p one: a sprite pass
+  // that asked the flag found the plane "absent", drew nothing, and the
+  // sprite never appeared -- or, with HD art, appeared without its dynamic
+  // pixels. In layer mode Colorize_Framev2() always renders the plane, as the
+  // scaled layer's source, so the mode itself is the answer.
+  const bool originalPlaneRendered =
+      (mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) != 0 ||
+      (layerMode && mySerum.frame32 != NULL);
+  if ((originalPlaneRendered && g_serumData.fheight == 32) ||
       ((mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) &&
        g_serumData.fheight == 64)) {
     if (g_serumData.fheight == 32) {

@@ -782,7 +782,11 @@ Two things make it correct rather than merely cheap:
   rules out a frame that *is about to* composite them. `Colorize_Spritev2()`
   clears the flag before it draws HD sprite art for the same reason — that art
   lands after the composite, and sprite detection reads the ROM frame, which is
-  precisely what differs here. Both guards are load-bearing and neither can be
+  precisely what differs here. `CompositeSpriteScaledLayer()` clears it too: a
+  sprite without HD art reaches the plane after the frame's composite just the
+  same, and `lastUpscaledSdCrc` was taken before any sprite drew, so keeping
+  the plane left the sprite standing where it had been after it moved or went
+  away. Both guards are load-bearing and neither can be
   mutation-tested while the other stands; `tests/README.md` says how that trap
   reads.
 
@@ -870,7 +874,8 @@ digits, where they read as notches bitten out of the glyph.
 So they are recorded instead (`sdShadowClaim` / `sdShadowColour`) and the pixel is
 left to the static pass, which paints what the shadow sits on and owns it
 normally. `ReplayOriginalPlaneShadows()` puts them into the `32p` plane after the
-upscale, and only for a caller that asked for that plane. Keyed on
+upscale — for every request, not only for a caller that asked for that plane,
+because the sprites that draw next read it (see "Sprites in layer mode"). Keyed on
 `sdDynaLayerMap`, not `isdynapix` — the extra-plane pass clears and refills
 `isdynapix`, so by then it no longer describes the original plane.
 
@@ -884,6 +889,52 @@ The offset is a persisted per-colorization choice, `shadowOffsetMode`:
 produced, and what authors tuned against) or `_PROPORTIONAL` (2 pixels, matching
 the `32p` output's relative thickness). Real colorizations disagree about which
 looks right, hence the setting.
+
+### Sprites in layer mode
+
+A sprite reaches the `64p` plane through the `32p` one. `Colorize_Spritev2()`
+runs after `Colorize_Framev2()` has composited the whole frame, and for each
+sprite, in the order `Check_Spritesv2()` found them:
+
+1. `scaledLayerCoverage` is reset, inside the sprite's rectangle, to what the
+   frame owns there (`frameLayerCoverage`).
+2. The sprite is drawn into `frame32` at `(frx, fry)`, `wid x hei`, from
+   `spritecolored` / `dynaspritemasks` / `dynasprite4cols`, the dynamic colour
+   indexed by the ROM shade of that pixel. Every opaque pixel is drawn. It is
+   *marked* for the scaled layer when the sprite has no HD art, or when the
+   pixel is dynamic in the `32p` mask.
+3. `CompositeSpriteScaledLayer()` upscales the rectangle, grown by one source
+   pixel, from `frame32` into `frame64` with the colorization's algorithm —
+   the same selection as the whole-frame composite, on the whole `frame32`, so
+   the sprite's edges round against whatever the frame shows beside it. It
+   paints the destinations whose own source the mask owns and never yields
+   (`srcBounds`, above). Nothing is painted when the sprite marked no pixel.
+4. A sprite with HD art (`spritecolored_extra` and `spritemask_extra`) is then
+   drawn natively at `(2frx, 2fry)`, `2wid x 2hei`, except where the pixel is
+   dynamic in the `32p` mask; `dynaspritemasks_extra` is not consulted.
+
+Three things follow, and each was a bug:
+
+- **The `32p` plane is drawn into whether or not the caller is given it.** For
+  a `64p`-only request the frame composite takes `FLAG_RETURNED_32P_FRAME_OK`
+  back as soon as the plane has been upscaled, which is before any sprite
+  draws. The sprite pass used to ask that flag whether there was a plane to
+  draw into, so with a `64p`-only request a sprite without HD art never
+  appeared and one with HD art lost its dynamic pixels, on every frame without
+  HD statics (a frame with HD statics keeps the flag). In layer mode the plane
+  is always rendered, so the mode is what the sprite pass asks.
+- **The frame's dynamic shadows inside a sprite's rectangle come from the
+  `32p` plane.** Step 3 repaints the rectangle, including the pixels
+  `GenerateExtraPlaneShadows()` had written there, so what shows afterwards is
+  the upscaled original-resolution shadow, two pixels thick, not the one
+  generated on the extra plane. That requires the replay to have run, for
+  every request; without it a `64p`-only request showed no shadow at all
+  there.
+- **The plane is no longer derived once a sprite has composited into it**, see
+  "Keeping an unchanged plane".
+
+With these the `64p` plane is the same picture for a `64p`-only request and a
+`32p | 64p` one, sprites included.
 
 ### Selection and persistence
 
