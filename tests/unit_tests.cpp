@@ -505,8 +505,9 @@ static void Test_DeferredShadowLeavesThePlaneAlone(void) {
   std::vector<uint8_t> isdynapix((size_t)kW * kH, 0);
   mySerum.frame32[(size_t)6 * kW + 5] = 0xABCD;  // what the shadow will cover
 
-  CheckDynaShadow(mySerum.frame32, dir.data(), col.data(), 0, isdynapix.data(),
-                  5, 5, kW, kH, nullptr, nullptr, /*defer=*/true);
+  CheckDynaShadow(mySerum.frame32, mySerum.rotationsinframe32, dir.data(),
+                  col.data(), 0, isdynapix.data(), 5, 5, kW, kH, nullptr,
+                  nullptr, /*defer=*/true);
 
   const size_t below = (size_t)6 * kW + 5;
   CHECK_EQ(mySerum.frame32[below], 0xABCD);  // untouched, so it can be scaled
@@ -2039,6 +2040,175 @@ static void Test_EmptyRotationSlotIsNotDueNext(void) {
   colorrotnexttime32[0] = 1200;
   CHECK_EQ(Calc_Next_Rotationv2(1000), 200);
   TearDownFrame();
+}
+
+// ---------------------------------------------------------------------------
+// Rotations and dynamic content
+//
+// A rotating background (stars) under a dynamic zone whose glyph has a colour
+// that is one of the rotation's colours, and a dynamic shadow above and below
+// the glyph. Only the background moves: dynamic content is coloured from its
+// set and a shadow is a flat colour, whatever colours the frame's rotations
+// name. afm_113b frames 16 to 77 are this picture: white high-score digits
+// over a sky whose stars rotate through white.
+// ---------------------------------------------------------------------------
+
+static const uint16_t kStarA = 0x0222, kStarB = 0x0333;  // the rotation
+static const uint16_t kGlyphShadow = 0x0444;
+static const uint32_t kGlyphX = 5, kGlyphY = 6;
+static const uint32_t kStarX = 20, kStarY = 20;  // background, far from it
+
+enum RotationRequest { kRequest32, kRequest64, kRequestBoth };
+
+static void RenderGlyphOverRotatingBackground(RotationRequest request) {
+  SetUpColorization();
+  const size_t px = (size_t)kW * kCH;
+  const std::vector<uint16_t> bg(px, kStarA);
+  g_serumData.backgroundframes_v2.set(0, bg.data(), px);
+  const std::vector<uint8_t> mask(px, 1);
+  g_serumData.backgroundmask.set(kFrameId, mask.data(), px);
+  const uint16_t background[1] = {0};
+  g_serumData.backgroundIDs.set(kFrameId, background, 1);
+
+  // A 3x3 zone, lit in the middle only; the glyph takes the rotation's
+  // second colour from its set.
+  std::vector<uint8_t> active(px, 0);
+  for (uint32_t y = kGlyphY - 1; y <= kGlyphY + 1; ++y)
+    for (uint32_t x = kGlyphX - 1; x <= kGlyphX + 1; ++x)
+      active[(size_t)y * kW + x] = 1;
+  std::vector<uint16_t> shadeToColour(16, 0);
+  shadeToColour[5] = kStarB;
+  GiveFrameADynamicZone(active, /*couche=*/0, shadeToColour);
+  std::vector<uint8_t> dir(MAX_DYNA_SETS_PER_FRAME_V2, 0);
+  std::vector<uint16_t> col(MAX_DYNA_SETS_PER_FRAME_V2, 0);
+  // Above, a pixel the raster has rendered already, and below, one it has
+  // not reached yet.
+  dir[0] = (1u << 1) | (1u << 5);
+  col[0] = kGlyphShadow;
+  g_serumData.dynashadowsdir.set(kFrameId, dir.data(), dir.size());
+  g_serumData.dynashadowscol.set(kFrameId, col.data(), col.size());
+
+  const size_t tableSize = MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION;
+  std::vector<uint16_t> table(tableSize, 0);
+  table[0] = 2;   // two colours
+  table[1] = 10;  // every 10 ms
+  table[2] = kStarA;
+  table[3] = kStarB;
+  g_serumData.colorrotations_v2.reserve(tableSize);
+  g_serumData.colorrotations_v2_extra.reserve(tableSize);
+  g_serumData.colorrotations_v2.set(kFrameId, table.data(), tableSize);
+  g_serumData.BuildColorRotationLookup();
+  mySerum.rotations32 = (uint16_t*)calloc(tableSize, sizeof(uint16_t));
+  mySerum.rotations64 = (uint16_t*)calloc(tableSize, sizeof(uint16_t));
+  memcpy(mySerum.rotations32, table.data(), tableSize * sizeof(uint16_t));
+  memcpy(mySerum.rotations64, table.data(), tableSize * sizeof(uint16_t));
+
+  upscaleExtraFromOriginal = request != kRequest32;
+  originalPlaneRequestedByCaller = request != kRequest64;
+  // What an earlier frame left behind, or the allocation on the first frame:
+  // an entry nothing writes would name slot 0.
+  memset(mySerum.rotationsinframe32, 0, px * 2 * sizeof(uint16_t));
+  memset(mySerum.rotationsinframe64, 0, px * 8 * sizeof(uint16_t));
+  memset(colorshifts32, 0, sizeof(colorshifts32));
+  memset(colorshifts64, 0, sizeof(colorshifts64));
+
+  g_rom.assign(px, 0);
+  g_rom[(size_t)kGlyphY * kW + kGlyphX] = 5;
+  romFrameForUpscale = g_rom.data();
+  Colorize_Framev2(g_rom.data(), kFrameId);
+}
+
+// One rotation step on both planes, however long ago the last one was.
+static void StepGlyphRotation(void) {
+  colorshiftinittime32[0] = 0;
+  colorshiftinittime64[0] = 0;
+  Serum_ApplyRotationsv2();
+}
+
+static void Test_DynamicContentAndItsShadowDoNotRotate32(void) {
+  RenderGlyphOverRotatingBackground(kRequest32);
+  CHECK(mySerum.flags & FLAG_RETURNED_32P_FRAME_OK);
+  const size_t glyph = (size_t)kGlyphY * kW + kGlyphX;
+  const size_t above = glyph - kW, below = glyph + kW;
+  const size_t star = (size_t)kStarY * kW + kStarX;
+  CHECK_EQ(mySerum.frame32[glyph], kStarB);
+  CHECK_EQ(mySerum.frame32[above], kGlyphShadow);
+  CHECK_EQ(mySerum.frame32[below], kGlyphShadow);
+  CHECK_EQ(mySerum.frame32[star], kStarA);
+  CHECK_EQ(mySerum.rotationsinframe32[glyph * 2], 0xffff);
+  CHECK_EQ(mySerum.rotationsinframe32[above * 2], 0xffff);
+  CHECK_EQ(mySerum.rotationsinframe32[above * 2 + 1], 0xffff);
+  CHECK_EQ(mySerum.rotationsinframe32[below * 2], 0xffff);
+  CHECK_EQ(mySerum.rotationsinframe32[below * 2 + 1], 0xffff);
+  CHECK_EQ(mySerum.rotationsinframe32[star * 2], 0);
+  // Every pixel is either the background, in the rotation, or not in one.
+  const size_t px = (size_t)kW * kCH;
+  unsigned rotating = 0;
+  for (size_t i = 0; i < px; ++i)
+    if (mySerum.rotationsinframe32[i * 2] != 0xffff) ++rotating;
+  CHECK_EQ(rotating, px - 3);
+
+  for (int step = 1; step <= 4; ++step) {
+    StepGlyphRotation();
+    CHECK_EQ(mySerum.frame32[glyph], kStarB);
+    CHECK_EQ(mySerum.frame32[above], kGlyphShadow);
+    CHECK_EQ(mySerum.frame32[below], kGlyphShadow);
+    CHECK_EQ(mySerum.frame32[star], (step & 1) ? kStarB : kStarA);
+  }
+  TearDownFrame();
+}
+
+// The upscaled plane, for a caller that asked for it alone and for one that
+// asked for both: the glyph's 2x2 block and the shadows generated around it
+// stand still while the background behind them rotates.
+static void CheckUpscaledGlyphDoesNotRotate(RotationRequest request) {
+  RenderGlyphOverRotatingBackground(request);
+  CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+  const uint32_t w = kW * 2;
+  const size_t px = (size_t)w * kCH * 2;
+  const std::vector<uint16_t> first(mySerum.frame64, mySerum.frame64 + px);
+  unsigned glyph = 0, shadow = 0;
+  for (size_t i = 0; i < px; ++i) {
+    if (first[i] == kStarA) {
+      CHECK_EQ(mySerum.rotationsinframe64[i * 2], 0);
+      continue;
+    }
+    // Not the background: the glyph, a shadow, or a frame corner the
+    // upscale rounded away.
+    if (first[i] == kStarB) ++glyph;
+    if (first[i] == kGlyphShadow) ++shadow;
+    CHECK_EQ(mySerum.rotationsinframe64[i * 2], 0xffff);
+  }
+  CHECK_EQ(glyph, 4);
+  CHECK(shadow > 0);
+  CHECK_EQ(first[(size_t)(kGlyphY * 2) * w + kGlyphX * 2], kStarB);
+
+  for (int step = 1; step <= 4; ++step) {
+    StepGlyphRotation();
+    for (size_t i = 0; i < px; ++i) {
+      if (first[i] == kStarA)
+        CHECK_EQ(mySerum.frame64[i], (step & 1) ? kStarB : kStarA);
+      else
+        CHECK_EQ(mySerum.frame64[i], first[i]);
+    }
+    if (request == kRequestBoth) {
+      const size_t at = (size_t)kGlyphY * kW + kGlyphX;
+      CHECK_EQ(mySerum.frame32[at], kStarB);
+      CHECK_EQ(mySerum.frame32[at - kW], kGlyphShadow);
+      CHECK_EQ(mySerum.frame32[at + kW], kGlyphShadow);
+      CHECK_EQ(mySerum.frame32[(size_t)kStarY * kW + kStarX],
+               (step & 1) ? kStarB : kStarA);
+    }
+  }
+  TearDownFrame();
+}
+
+static void Test_DynamicContentAndItsShadowDoNotRotate64(void) {
+  CheckUpscaledGlyphDoesNotRotate(kRequest64);
+}
+
+static void Test_DynamicContentAndItsShadowDoNotRotateBoth(void) {
+  CheckUpscaledGlyphDoesNotRotate(kRequestBoth);
 }
 
 // ---------------------------------------------------------------------------
@@ -3837,6 +4007,12 @@ static const TestCase kTests[] = {
      Test_RotationAdvancesTaggedPixelsOnly},
     {"rotation/wraps_at_length", Test_RotationWrapsAtItsLength},
     {"rotation/empty_slot_not_due_next", Test_EmptyRotationSlotIsNotDueNext},
+    {"rotation/dynamic_content_and_shadow_32p",
+     Test_DynamicContentAndItsShadowDoNotRotate32},
+    {"rotation/dynamic_content_and_shadow_64p",
+     Test_DynamicContentAndItsShadowDoNotRotate64},
+    {"rotation/dynamic_content_and_shadow_both",
+     Test_DynamicContentAndItsShadowDoNotRotateBoth},
     {"n256/loads_and_forgets", Test_N256LoadsAndForgets},
     {"n256/rejects_other_geometry", Test_N256RejectsOtherGeometry},
     {"n256/identification", Test_N256Identification},

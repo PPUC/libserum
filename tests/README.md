@@ -120,6 +120,9 @@ and a packing bug corrupts every colorization at once.
 | `rotation/advances_tagged_pixels_only` | a pixel tagged with a slot advances, a pixel tagged `0xffff` never does |
 | `rotation/wraps_at_length` | the shift wraps at the rotation's length instead of running off its colour list |
 | `rotation/empty_slot_not_due_next` | a slot with no colours or no delay is not a rotation and is not reported as due |
+| `rotation/dynamic_content_and_shadow_32p` | a dynamic pixel in a rotation's colour and the shadow it casts, above and below, have the entry `0xffff` and stand still while the background rotates; without the `0xffff` in `CheckDynaShadow()` the shadow keeps an old entry and rotates |
+| `rotation/dynamic_content_and_shadow_64p` | the same on the upscaled plane for a `64P`-only request |
+| `rotation/dynamic_content_and_shadow_both` | and for `32P \| 64P`, on both planes |
 
 ### `is256x64` projects
 

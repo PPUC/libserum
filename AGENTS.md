@@ -945,6 +945,21 @@ not: a shadow pixel used to keep the entry belonging to the colour it had covere
 so `Serum_Rotate()` would animate the shadow with someone else's rotation. The
 replay stamps `0xffff`.
 
+Outside layer mode `CheckDynaShadow()` paints the shadow in place, and it sets
+the rotation entry of the pixel to `0xffff` with it. It did not before. The
+pixel loop skips a pixel a shadow has claimed, so such a pixel kept the entry an
+earlier frame had left there, or what the allocation held on the first frame
+after a load, and a shadow painted over a pixel already rendered kept that
+pixel's entry. `Serum_Rotate()` then animated the shadow: on `afm_113b` frames
+16 to 77 (white high-score digits over a sky whose stars rotate through white)
+the shadow under every digit ran through the stars' colours. This path is every
+`32p`-only request for a 32-row ROM, and the native plane of the other two
+layouts.
+
+**Rule: neither dynamic-zone content nor a dynamic shadow takes part in a colour
+rotation, even when its colour is one of the rotation's colours.** Both get the
+entry `0xffff`. Background, static and sprite pixels are looked up by colour.
+
 The offset is a persisted per-colorization choice, `shadowOffsetMode`:
 `SERUM_SHADOW_OFFSET_NATIVE` (1 extra-plane pixel — what the pre-layer renderer
 produced, and what authors tuned against) or `_PROPORTIONAL` (2 pixels, matching

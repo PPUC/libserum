@@ -5823,7 +5823,16 @@ static inline bool ColorInRotationOnPlane(bool planeRotates, uint32_t IDfound,
 // sdShadowColour. isdynapix is left alone in that case -- the pixel is not
 // dynamic content yet, and marking it would stop the static pass filling in
 // what the shadow sits on.
-void CheckDynaShadow(uint16_t* pfr, const uint8_t* shadowDirByLayer,
+//
+// prot: the per-pixel rotation entries of the plane pfr is. A shadow painted
+// here is a flat colour and takes no part in a rotation, so its entry is set
+// to 0xffff with it. The pixel loop does not do that: it skips a pixel a
+// shadow has claimed, so the entry kept what an earlier frame had put there,
+// or what the allocation held on the first frame, and Serum_Rotate() then
+// animated the shadow. A shadow painted over a pixel the loop had already
+// rendered kept that pixel's entry the same way.
+void CheckDynaShadow(uint16_t* pfr, uint16_t* prot,
+                     const uint8_t* shadowDirByLayer,
                      const uint16_t* shadowColorByLayer, uint8_t dynacouche,
                      uint8_t* isdynapix, uint16_t fx, uint16_t fy, uint32_t fw,
                      uint32_t fh, const uint8_t* shadowDirFallback = nullptr,
@@ -5857,6 +5866,10 @@ void CheckDynaShadow(uint16_t* pfr, const uint8_t* shadowDirByLayer,
     }
     isdynapix[neighborIndex] = 1;
     pfr[neighborIndex] = tcol;
+    if (prot) {
+      prot[neighborIndex * 2] = 0xffff;
+      prot[neighborIndex * 2 + 1] = 0xffff;
+    }
   }
 }
 
@@ -6068,7 +6081,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                 // picture the upscale reads has to be shadow-free for that to
                 // mean anything. ReplayOriginalPlaneShadows() puts it back
                 // afterwards for the 32p output.
-                CheckDynaShadow(pfr, frameShadowDir, frameShadowColor,
+                CheckDynaShadow(pfr, prot, frameShadowDir, frameShadowColor,
                                 dynacouche, isdynapix, ti, tj,
                                 g_serumData.fwidth, g_serumData.fheight,
                                 shadowDirFallback, shadowColorFallback,
@@ -6279,9 +6292,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                 }
               }
               if (!dynamicBlackSuppressed) {
-                CheckDynaShadow(pfr, frameShadowDirExtra, frameShadowColorExtra,
-                                dynacouche, isdynapix, ti, tj,
-                                g_serumData.fwidth_extra,
+                CheckDynaShadow(pfr, prot, frameShadowDirExtra,
+                                frameShadowColorExtra, dynacouche, isdynapix,
+                                ti, tj, g_serumData.fwidth_extra,
                                 g_serumData.fheight_extra);
                 isdynapix[tk] = 1;
                 pfr[tk] = dynamicColor;
