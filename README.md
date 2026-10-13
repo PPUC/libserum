@@ -82,6 +82,14 @@ On real-machine targets:
 - only `*.cROMc` is supported
 - `*.pup.csv` and `skip-cromc.txt` are ignored
 
+## Loading From Memory
+
+`Serum_LoadFromMemory(crom, size, flags)` loads the bytes of a `cROM` file from
+a buffer the caller owns. It behaves as `Serum_Load(...)` does for that file
+with cROMc generation off, takes the same flags, and reads or writes no file:
+no `cROMc`, no `*.pup.csv`, no `scaling.txt`. It returns `NULL` on failure, with
+the reason in `Serum_GetLastErrorMessage()`. Release with `Serum_Dispose()`.
+
 ## cRZ Archives
 
 A `cRZ` is a zip archive holding one `cROM`. Besides loading one through

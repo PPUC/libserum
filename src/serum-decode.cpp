@@ -17,6 +17,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -1923,9 +1924,13 @@ struct MemoryCRomReader {
   const uint8_t* data = nullptr;
   size_t size = 0;
   size_t offset = 0;
+  // Set for a buffer passed to Serum_LoadFromMemory(): short data throws, so
+  // the load can fail and return instead of ending the process.
+  bool throwOnShortData = false;
 
   bool readExact(void* dst, size_t bytes) {
     if (!data || offset > size || bytes > (size - offset)) {
+      if (throwOnShortData) throw std::runtime_error("cROM data is truncated");
       return false;
     }
     memcpy(dst, data + offset, bytes);
@@ -1933,6 +1938,12 @@ struct MemoryCRomReader {
     return true;
   }
 };
+
+// An element count read from a header cannot exceed the bytes that follow it.
+static bool CountFitsSource(const FileCRomReader&, uint64_t) { return true; }
+static bool CountFitsSource(const MemoryCRomReader& reader, uint64_t count) {
+  return !reader.throwOnShortData || count <= reader.size - reader.offset;
+}
 
 template <typename Reader, typename T>
 static bool ReadValue(Reader& reader, T& value) {
@@ -3782,6 +3793,14 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
     enabled = false;
     return NULL;
   }
+  if (!CountFitsSource(reader, g_serumData.nframes) ||
+      !CountFitsSource(reader, g_serumData.ncompmasks) ||
+      !CountFitsSource(reader, g_serumData.nsprites) ||
+      !CountFitsSource(reader, g_serumData.nbackgrounds)) {
+    Log("Invalid element count in cROM/v2");
+    enabled = false;
+    return NULL;
+  }
   // Older headers do not carry the flag; Serum_free() has already cleared
   // whatever the previous colorization set.
   if (sizeheader >= 20 * sizeof(uint32_t)) {
@@ -4120,6 +4139,15 @@ static Serum_Frame_Struc* Serum_LoadFilev1Stream(Reader& reader,
       g_serumData.nsprites * MAX_SPRITE_SIZE * MAX_SPRITE_SIZE);
   uint8_t* spritedescriptionsc = (uint8_t*)malloc(
       g_serumData.nsprites * MAX_SPRITE_SIZE * MAX_SPRITE_SIZE);
+  // Releases the two buffers if a read throws; they are NULL once freed below.
+  struct FreeOnExit {
+    uint8_t*& a;
+    uint8_t*& b;
+    ~FreeOnExit() {
+      free(a);
+      free(b);
+    }
+  } freeSpriteDescriptions{spritedescriptionso, spritedescriptionsc};
 
   mySerum.frame = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
   mySerum.palette = (uint8_t*)malloc(3 * 64);
@@ -4311,6 +4339,18 @@ Serum_Frame_Struc* Serum_LoadFilev1(const char* const filename,
   return result;
 }
 
+// Parts of the load sequence shared by Serum_Load() and
+// Serum_LoadFromMemory(), defined after them.
+static void BeginColorizationLoad();
+static void RequestBothPlanesByDefault(const bool forceLoadFlags,
+                                       uint8_t& loadFlags,
+                                       uint8_t& runtimeFlags);
+static void FinishColorizationLoad(
+    const bool loadedFromConcentrate, const bool sceneDataUpdatedFromCsv,
+    const std::chrono::steady_clock::time_point loadTotalStart,
+    const double csvUpdateMs, const double cromcLoadMs, const double rawLoadMs,
+    const double cromcReloadMs);
+
 SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
                                         const char* const romname,
                                         uint8_t flags) {
@@ -4324,40 +4364,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   const auto loadTotalStart = g_profileLoadTimes
                                   ? std::chrono::steady_clock::now()
                                   : std::chrono::steady_clock::time_point{};
-  g_profileDynamicHotPaths = IsEnvFlagEnabled("SERUM_PROFILE_DYNAMIC_HOTPATHS");
-  g_profileDynamicHotPathsWindowed =
-      IsEnvFlagEnabled("SERUM_PROFILE_DYNAMIC_HOTPATHS_WINDOWED");
-  g_profileSparseVectors = IsEnvFlagEnabled("SERUM_PROFILE_SPARSE_VECTORS");
-  g_profileRoundTripNs = 0;
-  g_profileColorizeFrameV2Ns = 0;
-  g_profileColorizeSpriteV2Ns = 0;
-  g_profileCheckSpritesV2Ns = 0;
-  g_profileColorizeCalls = 0;
-  g_profileIdentifyTotalNs = 0;
-  g_profileIdentifyNormalNs = 0;
-  g_profileIdentifySceneNs = 0;
-  g_profileIdentifyCriticalNs = 0;
-  g_profileIdentifyNormalCalls = 0;
-  g_profileIdentifySceneCalls = 0;
-  g_profileIdentifyCriticalCalls = 0;
-  g_profilePeakRssBytes = 0;
-  g_profileFrameOperationDepth = 0;
-  g_profileFrameOperationFinished = false;
-  ResetStartupRssProfile();
-
-  mySerum.SerumVersion = g_serumData.SerumVersion = 0;
-  mySerum.flags = 0;
-  mySerum.frame = NULL;
-  mySerum.frame32 = NULL;
-  mySerum.frame64 = NULL;
-  mySerum.palette = NULL;
-  mySerum.rotations = NULL;
-  mySerum.rotations32 = NULL;
-  mySerum.rotations64 = NULL;
-  mySerum.rotationsinframe32 = NULL;
-  mySerum.rotationsinframe64 = NULL;
-  mySerum.modifiedelements32 = NULL;
-  mySerum.modifiedelements64 = NULL;
+  BeginColorizationLoad();
 
   std::string pathbuf = std::string(altcolorpath);
   if (pathbuf.empty() || (pathbuf.back() != '\\' && pathbuf.back() != '/'))
@@ -4370,19 +4377,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   double cromcLoadMs = 0.0;
   double rawLoadMs = 0.0;
   double cromcReloadMs = 0.0;
-  double packingNormalizeMs = 0.0;
-  double frameLookupBuildMs = 0.0;
-  double frameLookupRestoreMs = 0.0;
-  double colorRotationBuildMs = 0.0;
-  double spriteSidecarBuildMs = 0.0;
-  double criticalLookupInitMs = 0.0;
 
-  // If no specific frame type is requested, activate both
-  if (!forceLoadFlags &&
-      (loadFlags & (FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES)) == 0) {
-    runtimeFlags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
-    loadFlags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
-  }
+  RequestBothPlanesByDefault(forceLoadFlags, loadFlags, runtimeFlags);
 
   std::optional<std::string> csvFoundFile;
   ScalingSidecar requestedScaling;
@@ -4588,133 +4584,9 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   if (result && g_serumData.sceneGenerator->isActive())
     g_serumData.sceneGenerator->setDepth(result->nocolors == 16 ? 4 : 2);
   if (result) {
-    const bool rebuildDerivedLookups = !loadedFromConcentrate ||
-                                       g_serumData.concentrateFileVersion < 6 ||
-                                       sceneDataUpdatedFromCsv;
-    if (loadedFromConcentrate && g_serumData.concentrateFileVersion < 6) {
-      const auto stageStart = g_profileLoadTimes
-                                  ? std::chrono::steady_clock::now()
-                                  : std::chrono::steady_clock::time_point{};
-      g_serumData.BuildPackingSidecarsAndNormalize();
-      if (g_profileLoadTimes) {
-        packingNormalizeMs +=
-            DurationMs(stageStart, std::chrono::steady_clock::now());
-      }
-      NoteStartupRssSample("after-packing-sidecar-normalize");
-    }
-    if (rebuildDerivedLookups) {
-      const auto stageStart = g_profileLoadTimes
-                                  ? std::chrono::steady_clock::now()
-                                  : std::chrono::steady_clock::time_point{};
-      BuildFrameLookupVectors();
-      if (g_profileLoadTimes) {
-        frameLookupBuildMs +=
-            DurationMs(stageStart, std::chrono::steady_clock::now());
-      }
-      NoteStartupRssSample("after-frame-lookup-build");
-    } else {
-      const auto stageStart = g_profileLoadTimes
-                                  ? std::chrono::steady_clock::now()
-                                  : std::chrono::steady_clock::time_point{};
-      InitFrameLookupRuntimeStateFromStoredData();
-      if (g_profileLoadTimes) {
-        frameLookupRestoreMs +=
-            DurationMs(stageStart, std::chrono::steady_clock::now());
-      }
-      NoteStartupRssSample("after-frame-lookup-restore");
-    }
-    if (rebuildDerivedLookups ||
-        g_serumData.colorRotationLookupByFrameAndColor.empty()) {
-      const auto stageStart = g_profileLoadTimes
-                                  ? std::chrono::steady_clock::now()
-                                  : std::chrono::steady_clock::time_point{};
-      g_serumData.BuildColorRotationLookup();
-      if (g_profileLoadTimes) {
-        colorRotationBuildMs +=
-            DurationMs(stageStart, std::chrono::steady_clock::now());
-      }
-      NoteStartupRssSample("after-color-rotation-build");
-    }
-    if (!g_serumData.HasSpriteRuntimeSidecars() &&
-        (!loadedFromConcentrate || g_serumData.concentrateFileVersion < 6)) {
-      const auto stageStart = g_profileLoadTimes
-                                  ? std::chrono::steady_clock::now()
-                                  : std::chrono::steady_clock::time_point{};
-      g_serumData.BuildSpriteRuntimeSidecars();
-      if (g_profileLoadTimes) {
-        spriteSidecarBuildMs +=
-            DurationMs(stageStart, std::chrono::steady_clock::now());
-      }
-      NoteStartupRssSample("after-sprite-sidecar-build");
-    }
-    const auto criticalStart = g_profileLoadTimes
-                                   ? std::chrono::steady_clock::now()
-                                   : std::chrono::steady_clock::time_point{};
-    InitCriticalTriggerLookupRuntimeState();
-    if (g_profileLoadTimes) {
-      criticalLookupInitMs +=
-          DurationMs(criticalStart, std::chrono::steady_clock::now());
-    }
-    NoteStartupRssSample("before-runtime");
-    LogStartupRssSummary();
-    if (g_profileLoadTimes) {
-      const double totalMs =
-          DurationMs(loadTotalStart, std::chrono::steady_clock::now());
-      Log("Perf load total: total=%.3fms cROMcLoad=%.3fms rawLoad=%.3fms "
-          "csvUpdate=%.3fms cROMcReload=%.3fms packingNormalize=%.3fms "
-          "frameLookupBuild=%.3fms frameLookupRestore=%.3fms "
-          "colorRotationBuild=%.3fms spriteSidecarBuild=%.3fms "
-          "criticalLookupInit=%.3fms loadedFromConcentrate=%s "
-          "concentrateVersion=%u serumVersion=%u",
-          totalMs, cromcLoadMs, rawLoadMs, csvUpdateMs, cromcReloadMs,
-          packingNormalizeMs, frameLookupBuildMs, frameLookupRestoreMs,
-          colorRotationBuildMs, spriteSidecarBuildMs, criticalLookupInitMs,
-          loadedFromConcentrate ? "true" : "false",
-          g_serumData.concentrateFileVersion, g_serumData.SerumVersion);
-    }
-    ResetDynamicHotPathProfile();
-    // Selects the algorithm only. Do NOT gate this on the extra-plane
-    // geometry: the whole-frame upscale path exists precisely when there is
-    // no extra plane, and every consult site carries its own geometry guard
-    // already.
-    runtimeScalingAlgorithm = g_serumData.scalingAlgorithm;
-    shadowOffsetModeRuntime = g_serumData.shadowOffsetMode;
-    if (upscaleExtraFromOriginal && g_serumData.SerumVersion == SERUM_V2) {
-      // Report where this colorization actually keeps its dynamic-shadow
-      // configuration. Dynamic content is rendered at SD now, so a
-      // colorization that only has shadows in the extra tables relies on the
-      // per-layer fallback in CheckDynaShadow().
-      uint32_t sdOnly = 0, hdOnly = 0, both = 0;
-      for (uint32_t f = 0; f < g_serumData.nframes; ++f) {
-        if (f < g_serumData.frameHasDynamic.size() &&
-            g_serumData.frameHasDynamic[f] == 0)
-          continue;
-        const uint8_t* sd = g_serumData.dynashadowsdir[f];
-        const uint8_t* hd = g_serumData.dynashadowsdir_extra[f];
-        bool anySd = false, anyHd = false;
-        for (uint32_t l = 0; l < MAX_DYNA_SETS_PER_FRAME_V2; ++l) {
-          if (sd && sd[l]) anySd = true;
-          if (hd && hd[l]) anyHd = true;
-        }
-        if (anySd && anyHd)
-          ++both;
-        else if (anySd)
-          ++sdOnly;
-        else if (anyHd)
-          ++hdOnly;
-      }
-      if (sdOnly || hdOnly || both) {
-        Log("Dynamic shadows: frames with SD tables only=%u, extra tables "
-            "only=%u (using fallback), both=%u",
-            sdOnly, hdOnly, both);
-      }
-    }
-    Log("Dynamic shadow offset: %s (%u extra-plane pixel%s)",
-        shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL
-            ? "proportional"
-            : "native",
-        shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL ? 2u : 1u,
-        shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL ? "s" : "");
+    FinishColorizationLoad(loadedFromConcentrate, sceneDataUpdatedFromCsv,
+                           loadTotalStart, csvUpdateMs, cromcLoadMs, rawLoadMs,
+                           cromcReloadMs);
     Log("Upscaling algorithm: %s (source=%s, extra plane: %s)",
         ScalingAlgorithmName(),
         g_serumData.concentrateFileVersion >= 8 ? "cROMc header" : "default",
@@ -4727,6 +4599,254 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
 
   return result;
   SERUM_API_GUARD_END("Serum_Load", nullptr)
+}
+
+SERUM_API Serum_Frame_Struc* Serum_LoadFromMemory(const uint8_t* crom,
+                                                  size_t size, uint8_t flags) {
+  SERUM_API_GUARD_START("Serum_LoadFromMemory")
+  if (!crom || size == 0) {
+    Serum_free();
+    enabled = false;
+    SetLastErrorMessage("Serum_LoadFromMemory: no data");
+    return NULL;
+  }
+  const bool forceLoadFlags = (flags & FLAG_REQUEST_FORCE) != 0;
+  uint8_t runtimeFlags = flags;
+  uint8_t loadFlags = runtimeFlags;
+  Serum_free();
+  g_profileLoadTimes = IsEnvFlagEnabled("SERUM_PROFILE_LOAD_TIMES");
+  const auto loadTotalStart = g_profileLoadTimes
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
+  BeginColorizationLoad();
+  RequestBothPlanesByDefault(forceLoadFlags, loadFlags, runtimeFlags);
+  if (!forceLoadFlags) {
+    // As Serum_Load() does for a raw file: both frame types are loaded.
+    loadFlags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
+  }
+
+  MemoryCRomReader reader{crom, size, 0, true};
+  std::string failure = "not a cROM this library can load";
+  Serum_Frame_Struc* result = NULL;
+  double rawLoadMs = 0.0;
+  const auto rawStageStart = g_profileLoadTimes
+                                 ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
+  try {
+    result = Serum_LoadFilev1Stream(reader, loadFlags, runtimeFlags);
+  } catch (const std::exception& e) {
+    result = NULL;
+    failure = e.what();
+  }
+  if (g_profileLoadTimes) {
+    rawLoadMs += DurationMs(rawStageStart, std::chrono::steady_clock::now());
+  }
+  if (!result) {
+    Serum_free();
+    enabled = false;
+    Log("Failed to load cROM from memory: %s", failure.c_str());
+    SetLastErrorMessage("Serum_LoadFromMemory: %s", failure.c_str());
+    return NULL;
+  }
+  Log("Loaded cROM from memory (Serum v%d)", g_serumData.SerumVersion);
+  FinishColorizationLoad(false, false, loadTotalStart, 0.0, 0.0, rawLoadMs,
+                         0.0);
+  Log("Upscaling algorithm: %s (source=%s, extra plane: %s)",
+      ScalingAlgorithmName(),
+      g_serumData.concentrateFileVersion >= 8 ? "cROMc header" : "default",
+      IsExactDoubleExtraPlane() ? "yes" : "no");
+  return result;
+  SERUM_API_GUARD_END("Serum_LoadFromMemory", nullptr)
+}
+
+// Start of every load, after Serum_free().
+static void BeginColorizationLoad() {
+  g_profileDynamicHotPaths = IsEnvFlagEnabled("SERUM_PROFILE_DYNAMIC_HOTPATHS");
+  g_profileDynamicHotPathsWindowed =
+      IsEnvFlagEnabled("SERUM_PROFILE_DYNAMIC_HOTPATHS_WINDOWED");
+  g_profileSparseVectors = IsEnvFlagEnabled("SERUM_PROFILE_SPARSE_VECTORS");
+  g_profileRoundTripNs = 0;
+  g_profileColorizeFrameV2Ns = 0;
+  g_profileColorizeSpriteV2Ns = 0;
+  g_profileCheckSpritesV2Ns = 0;
+  g_profileColorizeCalls = 0;
+  g_profileIdentifyTotalNs = 0;
+  g_profileIdentifyNormalNs = 0;
+  g_profileIdentifySceneNs = 0;
+  g_profileIdentifyCriticalNs = 0;
+  g_profileIdentifyNormalCalls = 0;
+  g_profileIdentifySceneCalls = 0;
+  g_profileIdentifyCriticalCalls = 0;
+  g_profilePeakRssBytes = 0;
+  g_profileFrameOperationDepth = 0;
+  g_profileFrameOperationFinished = false;
+  ResetStartupRssProfile();
+
+  mySerum.SerumVersion = g_serumData.SerumVersion = 0;
+  mySerum.flags = 0;
+  mySerum.frame = NULL;
+  mySerum.frame32 = NULL;
+  mySerum.frame64 = NULL;
+  mySerum.palette = NULL;
+  mySerum.rotations = NULL;
+  mySerum.rotations32 = NULL;
+  mySerum.rotations64 = NULL;
+  mySerum.rotationsinframe32 = NULL;
+  mySerum.rotationsinframe64 = NULL;
+  mySerum.modifiedelements32 = NULL;
+  mySerum.modifiedelements64 = NULL;
+}
+
+static void RequestBothPlanesByDefault(const bool forceLoadFlags,
+                                       uint8_t& loadFlags,
+                                       uint8_t& runtimeFlags) {
+  // If no specific frame type is requested, activate both
+  if (!forceLoadFlags &&
+      (loadFlags & (FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES)) == 0) {
+    runtimeFlags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
+    loadFlags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
+  }
+}
+
+// What every successful load does after the colorization data is in place.
+static void FinishColorizationLoad(
+    const bool loadedFromConcentrate, const bool sceneDataUpdatedFromCsv,
+    const std::chrono::steady_clock::time_point loadTotalStart,
+    const double csvUpdateMs, const double cromcLoadMs, const double rawLoadMs,
+    const double cromcReloadMs) {
+  double packingNormalizeMs = 0.0;
+  double frameLookupBuildMs = 0.0;
+  double frameLookupRestoreMs = 0.0;
+  double colorRotationBuildMs = 0.0;
+  double spriteSidecarBuildMs = 0.0;
+  double criticalLookupInitMs = 0.0;
+  const bool rebuildDerivedLookups = !loadedFromConcentrate ||
+                                     g_serumData.concentrateFileVersion < 6 ||
+                                     sceneDataUpdatedFromCsv;
+  if (loadedFromConcentrate && g_serumData.concentrateFileVersion < 6) {
+    const auto stageStart = g_profileLoadTimes
+                                ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point{};
+    g_serumData.BuildPackingSidecarsAndNormalize();
+    if (g_profileLoadTimes) {
+      packingNormalizeMs +=
+          DurationMs(stageStart, std::chrono::steady_clock::now());
+    }
+    NoteStartupRssSample("after-packing-sidecar-normalize");
+  }
+  if (rebuildDerivedLookups) {
+    const auto stageStart = g_profileLoadTimes
+                                ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point{};
+    BuildFrameLookupVectors();
+    if (g_profileLoadTimes) {
+      frameLookupBuildMs +=
+          DurationMs(stageStart, std::chrono::steady_clock::now());
+    }
+    NoteStartupRssSample("after-frame-lookup-build");
+  } else {
+    const auto stageStart = g_profileLoadTimes
+                                ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point{};
+    InitFrameLookupRuntimeStateFromStoredData();
+    if (g_profileLoadTimes) {
+      frameLookupRestoreMs +=
+          DurationMs(stageStart, std::chrono::steady_clock::now());
+    }
+    NoteStartupRssSample("after-frame-lookup-restore");
+  }
+  if (rebuildDerivedLookups ||
+      g_serumData.colorRotationLookupByFrameAndColor.empty()) {
+    const auto stageStart = g_profileLoadTimes
+                                ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point{};
+    g_serumData.BuildColorRotationLookup();
+    if (g_profileLoadTimes) {
+      colorRotationBuildMs +=
+          DurationMs(stageStart, std::chrono::steady_clock::now());
+    }
+    NoteStartupRssSample("after-color-rotation-build");
+  }
+  if (!g_serumData.HasSpriteRuntimeSidecars() &&
+      (!loadedFromConcentrate || g_serumData.concentrateFileVersion < 6)) {
+    const auto stageStart = g_profileLoadTimes
+                                ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point{};
+    g_serumData.BuildSpriteRuntimeSidecars();
+    if (g_profileLoadTimes) {
+      spriteSidecarBuildMs +=
+          DurationMs(stageStart, std::chrono::steady_clock::now());
+    }
+    NoteStartupRssSample("after-sprite-sidecar-build");
+  }
+  const auto criticalStart = g_profileLoadTimes
+                                 ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
+  InitCriticalTriggerLookupRuntimeState();
+  if (g_profileLoadTimes) {
+    criticalLookupInitMs +=
+        DurationMs(criticalStart, std::chrono::steady_clock::now());
+  }
+  NoteStartupRssSample("before-runtime");
+  LogStartupRssSummary();
+  if (g_profileLoadTimes) {
+    const double totalMs =
+        DurationMs(loadTotalStart, std::chrono::steady_clock::now());
+    Log("Perf load total: total=%.3fms cROMcLoad=%.3fms rawLoad=%.3fms "
+        "csvUpdate=%.3fms cROMcReload=%.3fms packingNormalize=%.3fms "
+        "frameLookupBuild=%.3fms frameLookupRestore=%.3fms "
+        "colorRotationBuild=%.3fms spriteSidecarBuild=%.3fms "
+        "criticalLookupInit=%.3fms loadedFromConcentrate=%s "
+        "concentrateVersion=%u serumVersion=%u",
+        totalMs, cromcLoadMs, rawLoadMs, csvUpdateMs, cromcReloadMs,
+        packingNormalizeMs, frameLookupBuildMs, frameLookupRestoreMs,
+        colorRotationBuildMs, spriteSidecarBuildMs, criticalLookupInitMs,
+        loadedFromConcentrate ? "true" : "false",
+        g_serumData.concentrateFileVersion, g_serumData.SerumVersion);
+  }
+  ResetDynamicHotPathProfile();
+  // Selects the algorithm only. Do NOT gate this on the extra-plane
+  // geometry: the whole-frame upscale path exists precisely when there is
+  // no extra plane, and every consult site carries its own geometry guard
+  // already.
+  runtimeScalingAlgorithm = g_serumData.scalingAlgorithm;
+  shadowOffsetModeRuntime = g_serumData.shadowOffsetMode;
+  if (upscaleExtraFromOriginal && g_serumData.SerumVersion == SERUM_V2) {
+    // Report where this colorization actually keeps its dynamic-shadow
+    // configuration. Dynamic content is rendered at SD now, so a
+    // colorization that only has shadows in the extra tables relies on the
+    // per-layer fallback in CheckDynaShadow().
+    uint32_t sdOnly = 0, hdOnly = 0, both = 0;
+    for (uint32_t f = 0; f < g_serumData.nframes; ++f) {
+      if (f < g_serumData.frameHasDynamic.size() &&
+          g_serumData.frameHasDynamic[f] == 0)
+        continue;
+      const uint8_t* sd = g_serumData.dynashadowsdir[f];
+      const uint8_t* hd = g_serumData.dynashadowsdir_extra[f];
+      bool anySd = false, anyHd = false;
+      for (uint32_t l = 0; l < MAX_DYNA_SETS_PER_FRAME_V2; ++l) {
+        if (sd && sd[l]) anySd = true;
+        if (hd && hd[l]) anyHd = true;
+      }
+      if (anySd && anyHd)
+        ++both;
+      else if (anySd)
+        ++sdOnly;
+      else if (anyHd)
+        ++hdOnly;
+    }
+    if (sdOnly || hdOnly || both) {
+      Log("Dynamic shadows: frames with SD tables only=%u, extra tables "
+          "only=%u (using fallback), both=%u",
+          sdOnly, hdOnly, both);
+    }
+  }
+  Log("Dynamic shadow offset: %s (%u extra-plane pixel%s)",
+      shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL
+          ? "proportional"
+          : "native",
+      shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL ? 2u : 1u,
+      shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL ? "s" : "");
 }
 
 SERUM_API void Serum_Dispose(void) {

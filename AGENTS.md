@@ -259,6 +259,43 @@ Important:
     `BuildPackingSidecarsAndNormalize()` or rebuild missing sprite runtime
     sidecars on load.
 
+## Loading from memory
+Entry point: `Serum_LoadFromMemory(crom, size, flags)`.
+
+It takes the bytes of a `cROM` file in a buffer the caller owns. It does not
+go through `Serum_Load()`. The two share three helpers, which hold code moved
+out of `Serum_Load()` unchanged:
+- `BeginColorizationLoad()`: the profile and output-pointer resets after
+  `Serum_free()`.
+- `RequestBothPlanesByDefault()`: both planes when the caller requested none.
+- `FinishColorizationLoad()`: steps 7 to 9 of the load flow and the scaling
+  setup.
+
+Between them `Serum_LoadFromMemory()` widens the load flags to both planes
+unless `FLAG_REQUEST_FORCE` is set and reads the buffer with
+`Serum_LoadFilev1Stream()`, as `Serum_Load()` does for a raw file. The result
+equals `Serum_Load()` of the same bytes as a `.cROM` file with
+`Serum_SetGenerateCRomC(false)`.
+
+What differs from `Serum_Load()`:
+- No file is looked up or written: no `cROMc` (neither loaded nor generated),
+  no `*.pup.csv`, no `scaling.txt`, no `skip-cromc.txt`. Scenes are therefore
+  empty, and `scalingAlgorithm` / `shadowOffsetMode` keep their defaults.
+- Only a raw `cROM` is accepted, not a `cROMc` or a `cRZ`.
+- It has no platform branch of its own: the request flags are used as passed,
+  and nothing of `Serum_Load()`'s per-platform load policy is applied. The
+  shared helpers and the renderer behave as they do after `Serum_Load()`.
+- The buffer is read through `MemoryCRomReader` with `throwOnShortData` set.
+  Short data throws instead of reaching `exit(1)` in
+  `SparseVector::readFromCRomReader()`, and `CountFitsSource()` refuses a v2
+  header whose element counts exceed the bytes that follow. Both apply to this
+  entry point only; file and `cRZ` loads read as before.
+- On failure it calls `Serum_free()`, returns `NULL` and stores the reason for
+  `Serum_GetLastErrorMessage()`. Nothing is loaded afterwards.
+- `NULL` or empty input releases the loaded colorization and fails.
+
+The buffer is not kept after the call. Dispose with `Serum_Dispose()`.
+
 ## Frame identification
 Main function: `Identify_Frame(uint8_t* frame, bool sceneFrameRequested)`.
 
@@ -1211,8 +1248,8 @@ What `Serum_CRZ_WriteFromFile()` writes:
     exceptions and Windows structured exceptions (`SEH`) at the DLL boundary.
   - Fatal API-boundary failures are recorded in a process-global message buffer
     exposed through `Serum_GetLastErrorMessage()`.
-  - The same buffer carries the reason a `Serum_CRZ_*` call returned `false`,
-    on every platform.
+  - The same buffer carries the reason a `Serum_CRZ_*` call returned `false`
+    or `Serum_LoadFromMemory()` returned `NULL`, on every platform.
   - Those fatal diagnostics are emitted through the configured log callback and
     also mirrored to `stderr` and `OutputDebugStringA`, so crash reasons remain
     visible even when the host does not install a log callback.

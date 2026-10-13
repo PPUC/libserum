@@ -106,6 +106,9 @@ and a packing bug corrupts every colorization at once.
 | `crz/plain_deflated_zip` | a small cROM yields a plain deflated zip: no zip64, no data descriptor, no UTF-8 flag on an ASCII name — what older readers expect |
 | `crz/failures_are_clean` | a failed read hands back nothing to free and says why; a failed write neither destroys an archive already there nor leaves half of one |
 | `crz/real_archive` | checks nothing unless `SERUM_TEST_CRZ` names a real cRZ, which must then read and survive being written again |
+| `memory/matches_file_load` | `Serum_LoadFromMemory()` gives the same loaded state and the same output as `Serum_Load()` of the same bytes as a `.cROM` file, for a `128x32` and an `is256x64` project and seven request flag combinations |
+| `memory/writes_no_file` | a memory load writes nothing, with cROMc generation on |
+| `memory/failures_are_clean` | `NULL`, empty, truncated at any block, impossible element counts, a refused geometry and bytes that are no cROM all return `NULL` with an error message and nothing loaded; a valid load afterwards works |
 | `sidecar/spellings` | every spelling `scaling.txt` advertises, bare and under `scaling:`/`algorithm:` |
 | `sidecar/shadow_offset` | `native`/`proportional`/`1`/`2`, and both keys in one file |
 | `sidecar/tolerance` | comments, blank lines, padding, case; an unknown key or value leaves the stored choice alone rather than replacing it with a default |

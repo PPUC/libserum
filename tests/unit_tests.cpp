@@ -3528,6 +3528,238 @@ static void Test_MonochromeFrameBlocksReuse(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Serum_LoadFromMemory()
+//
+// The same cROM bytes, once as a file through Serum_Load() and once as a
+// buffer, have to give the same loaded state and the same output.
+
+namespace memload {
+
+struct Capture {
+  uint8_t loadFlags = 0;
+  uint32_t width32 = 0, width64 = 0, ntriggers = 0, nocolors = 0;
+  bool has32 = false, has64 = false;
+  std::vector<uint8_t> frameIsScene, spriteCandidateIds;
+  std::vector<uint32_t> frameToNormalBucket;
+  size_t rotationLookupSize = 0, normalBuckets = 0;
+  std::vector<uint32_t> results;
+  std::vector<uint8_t> output;
+
+  bool operator==(const Capture& o) const {
+    return loadFlags == o.loadFlags && width32 == o.width32 &&
+           width64 == o.width64 && ntriggers == o.ntriggers &&
+           nocolors == o.nocolors && has32 == o.has32 && has64 == o.has64 &&
+           frameIsScene == o.frameIsScene &&
+           spriteCandidateIds == o.spriteCandidateIds &&
+           frameToNormalBucket == o.frameToNormalBucket &&
+           rotationLookupSize == o.rotationLookupSize &&
+           normalBuckets == o.normalBuckets && results == o.results &&
+           output == o.output;
+  }
+};
+
+template <typename T>
+static void Append(std::vector<uint8_t>& out, const T* data, size_t count) {
+  if (!data) return;
+  const uint8_t* p = (const uint8_t*)data;
+  out.insert(out.end(), p, p + count * sizeof(T));
+}
+
+// Everything a caller can see after the load and after each frame.
+static Capture Run(const n256::Synth& s, uint32_t framePixels) {
+  Capture c;
+  c.loadFlags = mySerum.flags;
+  c.width32 = mySerum.width32;
+  c.width64 = mySerum.width64;
+  c.ntriggers = mySerum.ntriggers;
+  c.nocolors = mySerum.nocolors;
+  c.has32 = mySerum.frame32 != NULL;
+  c.has64 = mySerum.frame64 != NULL;
+  c.frameIsScene = g_serumData.frameIsScene;
+  c.spriteCandidateIds = g_serumData.spriteCandidateIds;
+  c.frameToNormalBucket = g_serumData.frameToNormalBucket;
+  c.rotationLookupSize = g_serumData.colorRotationLookupByFrameAndColor.size();
+  c.normalBuckets = g_serumData.normalIdentifyBuckets.size();
+  const uint32_t rotationWords =
+      MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION;
+  // The monochrome trigger goes last: it changes what follows.
+  std::vector<uint32_t> order;
+  for (uint32_t f = 0; f < s.nframes; ++f)
+    if (f != n256::kMonoTrigger) order.push_back(f);
+  order.push_back(n256::kMonoTrigger);
+  order.push_back(n256::kStatic);
+  lastTriggerID = 0xffffffff;
+  for (uint32_t f : order) {
+    std::vector<uint8_t> frame(s.Native(f), s.Native(f) + framePixels);
+    frame.shrink_to_fit();
+    // The time to the first rotation step depends on the clock; whether there
+    // is one does not.
+    const uint32_t result = Serum_Colorize(frame.data());
+    c.results.push_back(result == IDENTIFY_NO_FRAME ||
+                                result == IDENTIFY_SAME_FRAME
+                            ? result
+                            : (result != 0 ? 1u : 0u));
+    c.results.push_back(mySerum.frameID);
+    c.results.push_back(mySerum.triggerID);
+    c.results.push_back(mySerum.flags);
+    c.results.push_back(mySerum.width32);
+    c.results.push_back(mySerum.width64);
+    if (mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) {
+      Append(c.output, mySerum.frame32, (size_t)32 * mySerum.width32);
+      Append(c.output, mySerum.rotations32, rotationWords);
+      Append(c.output, mySerum.rotationsinframe32,
+             (size_t)2 * 32 * mySerum.width32);
+    }
+    if (mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) {
+      Append(c.output, mySerum.frame64, (size_t)64 * mySerum.width64);
+      Append(c.output, mySerum.rotations64, rotationWords);
+      Append(c.output, mySerum.rotationsinframe64,
+             (size_t)2 * 64 * mySerum.width64);
+    }
+  }
+  return c;
+}
+
+static n256::Synth Plain128x32(void) {
+  n256::Synth s;
+  s.is256x64 = false;
+  s.compmasks.assign((size_t)s.ncompmasks * n256::kOPx, 0);
+  s.compmaskid.assign(s.nframes, 255);
+  s.framesprites.assign(s.framesprites.size(), 255);
+  return s;
+}
+
+}  // namespace memload
+
+static void Test_MemoryLoadMatchesFileLoad(void) {
+  const uint8_t requests[] = {
+      0,
+      FLAG_REQUEST_32P_FRAMES,
+      FLAG_REQUEST_64P_FRAMES,
+      n256::kBothPlanes,
+      FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_FALLBACK,
+      FLAG_REQUEST_64P_FRAMES | FLAG_REQUEST_FALLBACK,
+      (uint8_t)(n256::kBothPlanes | FLAG_REQUEST_FILL_MODIFIED_ELEMENTS),
+  };
+  const n256::Synth projects[] = {n256::Synth(), memload::Plain128x32()};
+  for (const n256::Synth& s : projects) {
+    const uint32_t framePixels = s.is256x64 ? n256::kNPx : n256::kOPx;
+    const std::vector<uint8_t> crom = s.Serialize();
+    for (uint8_t flags : requests) {
+      if (!n256::Load(s, flags, false)) continue;
+      const memload::Capture fromFile = memload::Run(s, framePixels);
+      n256::Unload();
+
+      // A copy of exactly the cROM's size, released right after the call.
+      uint8_t* buffer = (uint8_t*)malloc(crom.size());
+      memcpy(buffer, crom.data(), crom.size());
+      Serum_SetMaximumUnknownFramesToSkip(0);
+      Serum_SetIgnoreUnknownFramesTimeout(0);
+      Serum_Frame_Struc* loaded =
+          Serum_LoadFromMemory(buffer, crom.size(), flags);
+      free(buffer);
+      CHECK(loaded == &mySerum);
+      CHECK_EQ(Serum_GetLastErrorMessage()[0], '\0');
+      if (loaded) {
+        CHECK_EQ(g_serumData.is256x64, s.is256x64);
+        CHECK(!g_serumData.sceneGenerator->isActive());
+        const memload::Capture fromMemory = memload::Run(s, framePixels);
+        CHECK(fromMemory == fromFile);
+        CHECK(!fromMemory.output.empty() ||
+              (s.is256x64 && flags == FLAG_REQUEST_32P_FRAMES));
+      }
+      Serum_Dispose();
+      CHECK(!cromloaded);
+    }
+  }
+  Serum_SetMaximumUnknownFramesToSkip(0);
+}
+
+// A buffer has no directory: nothing is written, whatever the cROMc setting.
+static void Test_MemoryLoadWritesNoFile(void) {
+  const n256::Synth s;
+  const std::vector<uint8_t> crom = s.Serialize();
+  const std::filesystem::path dir = n256::Dir();
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  const std::filesystem::path before = std::filesystem::current_path();
+  std::filesystem::current_path(dir);
+  Serum_SetGenerateCRomC(true);
+  CHECK(Serum_LoadFromMemory(crom.data(), crom.size(), n256::kBothPlanes) !=
+        NULL);
+  CHECK(std::filesystem::is_empty(dir));
+  std::filesystem::current_path(before);
+  n256::Unload();
+}
+
+static void Test_MemoryLoadFailuresAreClean(void) {
+  const n256::Synth s;
+  const std::vector<uint8_t> crom = s.Serialize();
+  const auto expectNothingLoaded = [](void) {
+    CHECK(!cromloaded);
+    CHECK(!g_serumData.is256x64);
+    CHECK(mySerum.frame32 == NULL);
+    CHECK(mySerum.frame64 == NULL);
+    CHECK(framechecked == NULL);
+    CHECK(Serum_GetLastErrorMessage()[0] != '\0');
+  };
+  const auto expectFailure = [&](const std::vector<uint8_t>& data) {
+    // An exact-size heap copy, so a read past the end is a sanitizer report.
+    uint8_t* buffer = (uint8_t*)malloc(data.empty() ? 1 : data.size());
+    if (!data.empty()) memcpy(buffer, data.data(), data.size());
+    CHECK(Serum_LoadFromMemory(buffer, data.size(), n256::kBothPlanes) == NULL);
+    free(buffer);
+    expectNothingLoaded();
+  };
+
+  // A failed call also releases what was loaded before it.
+  CHECK(Serum_LoadFromMemory(crom.data(), crom.size(), n256::kBothPlanes) !=
+        NULL);
+  CHECK(Serum_LoadFromMemory(NULL, 100, n256::kBothPlanes) == NULL);
+  expectNothingLoaded();
+  CHECK(Serum_LoadFromMemory(crom.data(), crom.size(), n256::kBothPlanes) !=
+        NULL);
+  expectFailure({});
+
+  // Truncated anywhere: in the name, the header, and every block after it.
+  std::vector<size_t> cuts = {1, 63, 64, 67, 68, 72, 84, 100, 104, 108};
+  for (size_t cut = 200; cut < crom.size(); cut += crom.size() / 37 + 1)
+    cuts.push_back(cut);
+  cuts.push_back(crom.size() - 1);
+  for (size_t cut : cuts)
+    expectFailure(std::vector<uint8_t>(crom.begin(), crom.begin() + cut));
+
+  // Counts the data cannot hold: frames, masks, sprites.
+  for (size_t offset : {(size_t)84, (size_t)92, (size_t)96}) {
+    std::vector<uint8_t> bad = crom;
+    const uint32_t huge = 0xfffffff0u;
+    memcpy(&bad[offset], &huge, sizeof(huge));
+    expectFailure(bad);
+  }
+  // A geometry the loader refuses, and bytes that are no cROM at all.
+  {
+    std::vector<uint8_t> bad = crom;
+    const uint32_t width = 192;
+    memcpy(&bad[68], &width, sizeof(width));
+    expectFailure(bad);
+    expectFailure(std::vector<uint8_t>(4096, 0xa5));
+    expectFailure(std::vector<uint8_t>(4096, 0));
+  }
+
+  // The next valid load is not affected by any of it.
+  CHECK(Serum_LoadFromMemory(crom.data(), crom.size(),
+                             FLAG_REQUEST_64P_FRAMES) != NULL);
+  CHECK(g_serumData.is256x64);
+  n256::Colorize(s.Frame(n256::kStatic));
+  CHECK_EQ(mySerum.frameID, n256::kStatic);
+  EXPECT_ONLY_PLANE64();
+  EXPECT_PLANE64([](uint32_t x, uint32_t y) {
+    return n256::C64(n256::kStatic, y * n256::kNW + x);
+  });
+  n256::Unload();
+}
+
+// ---------------------------------------------------------------------------
 
 struct TestCase {
   const char* name;
@@ -3629,6 +3861,9 @@ static const TestCase kTests[] = {
     {"sprite/scaled_sprite_blocks_reuse", Test_ScaledSpriteBlocksReuse},
     {"sprite/layer_mode_end_to_end", Test_SpriteInLayerModeEndToEnd},
     {"colorize/monochrome_frame_blocks_reuse", Test_MonochromeFrameBlocksReuse},
+    {"memory/matches_file_load", Test_MemoryLoadMatchesFileLoad},
+    {"memory/writes_no_file", Test_MemoryLoadWritesNoFile},
+    {"memory/failures_are_clean", Test_MemoryLoadFailuresAreClean},
 };
 
 int main(int argc, char** argv) {

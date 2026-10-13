@@ -36,6 +36,28 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
                                         const char* const romname,
                                         uint8_t flags);
 
+/** @brief Load a Serum colorization from a cROM held in memory
+ *
+ * Takes the bytes of a .cROM file and loads them as Serum_Load() loads that
+ * file when cROMc generation is off: same flags, same result.
+ *
+ * No file is read or written: no cROMc, no .pup.csv, no scaling.txt, no
+ * skip-cromc.txt. The upscaling algorithm and shadow offset are the defaults.
+ * A cROMc or a cRZ is not accepted.
+ *
+ * The buffer is only read during the call and stays owned by the caller.
+ * A colorization loaded before is released first, also when the call fails.
+ *
+ * @param crom: the cROM bytes
+ * @param size: number of bytes
+ * @param flags: as for Serum_Load()
+ *
+ * @return As Serum_Load(). NULL if the data cannot be loaded; nothing is
+ * loaded then and Serum_GetLastErrorMessage() says why.
+ */
+SERUM_API Serum_Frame_Struc* Serum_LoadFromMemory(const uint8_t* crom,
+                                                  size_t size, uint8_t flags);
+
 /** @brief Set timeout for skipping unknown frames
  *
  * Unknown frames are ignored until this timeout elapses and a full lookup is
@@ -148,7 +170,7 @@ SERUM_API const char* Serum_GetMinorVersion(void);
 /** @brief Get the last fatal runtime error message
  *
  * Returns the most recent top-level exception/fatal error captured by the DLL,
- * or the reason the last Serum_CRZ_* call failed.
+ * or the reason the last Serum_CRZ_* or Serum_LoadFromMemory() call failed.
  * The returned pointer is owned by libserum and remains valid until the next
  * API call that updates the stored error state.
  *
