@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "LZ4Stream.h"
+#include "serum-accel.h"
 
 bool is_real_machine();
 
@@ -277,18 +278,25 @@ class SparseVector {
     const uint8_t modeBits = payload[1];
     prepareDecodedCacheForWrite(elementId);
 
-    for (size_t i = 0; i < elementSize; ++i) {
-      if (modeBits == kValuePackedMode1Bit) {
-        const bool isSet = (payload[2 + (i / 8)] & (1u << (i % 8))) != 0;
-        lastDecompressed[i] = static_cast<T>(isSet ? 1 : 0);
-      } else if (modeBits == kValuePackedMode2Bit) {
-        const size_t bitPos = i * 2;
-        lastDecompressed[i] =
-            static_cast<T>((payload[2 + (bitPos / 8)] >> (bitPos % 8)) & 0x3u);
-      } else {
-        const size_t bitPos = i * 4;
-        lastDecompressed[i] =
-            static_cast<T>((payload[2 + (bitPos / 8)] >> (bitPos % 8)) & 0xFu);
+    // Value `i` is the `modeBits` bits at bit `i * modeBits` of the payload,
+    // lowest bit first.
+    if constexpr (std::is_same<T, uint8_t>::value) {
+      serum_accel::UnpackValues(payload + 2, modeBits, lastDecompressed.data(),
+                                elementSize);
+    } else {
+      for (size_t i = 0; i < elementSize; ++i) {
+        if (modeBits == kValuePackedMode1Bit) {
+          const bool isSet = (payload[2 + (i / 8)] & (1u << (i % 8))) != 0;
+          lastDecompressed[i] = static_cast<T>(isSet ? 1 : 0);
+        } else if (modeBits == kValuePackedMode2Bit) {
+          const size_t bitPos = i * 2;
+          lastDecompressed[i] = static_cast<T>(
+              (payload[2 + (bitPos / 8)] >> (bitPos % 8)) & 0x3u);
+        } else {
+          const size_t bitPos = i * 4;
+          lastDecompressed[i] = static_cast<T>(
+              (payload[2 + (bitPos / 8)] >> (bitPos % 8)) & 0xFu);
+        }
       }
     }
 

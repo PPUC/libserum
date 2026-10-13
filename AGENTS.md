@@ -48,6 +48,19 @@ Core files:
 - `src/serum-decode.h`: Public C API declarations.
 - `src/serum-version.h`: Library and concentrate format versions.
 
+Internal helper interface (`src/serum-accel.h`):
+- The decoder calls a small set of internal helpers through `src/serum-accel.h`.
+  `src/serum-accel-ref.cpp` is the implementation that ships and defines the
+  behaviour.
+- The CMake variable `SERUM_ACCEL_DIR` can substitute other sources for it at
+  build time. This is used for instrumentation and measurement wrappers and for
+  trying out alternative implementations during development. Any substitute
+  must produce bit-identical output.
+- Do not remove or inline these helpers because some look trivial in the
+  reference implementation: a function that always returns the same answer is
+  a deliberate extension point. Do not change a signature without raising
+  `SERUM_ACCEL_SEAM_VERSION`.
+
 Main global runtime state (in `serum-decode.cpp`):
 - Loaded data model: `g_serumData`.
 - Current output: `mySerum` (`Serum_Frame_Struc`).
@@ -802,7 +815,7 @@ Two things make it correct rather than merely cheap:
   frames; nothing else moved.
 
 `Serum_free()` clears both, so one colorization can never inherit another's
-plane, and the CRC table is initialized at the comparison site — a zeroed table
+plane, and the CRC table is a compile-time constant — a zeroed table
 hashes every buffer alike, which would not weaken the test but invert it into
 "always the same" and freeze the plane on the first frame.
 
@@ -1243,7 +1256,8 @@ What `Serum_CRZ_WriteFromFile()` writes:
       stages.
   - If env `SERUM_PROFILE_DYNAMIC_HOTPATHS` is enabled (`1/true/on/yes`),
     periodic average timings are logged for the full end-to-end rendered-frame
-    round trip (`frame`), `Colorize_Framev2`, and `Colorize_Spritev2`, along
+    round trip (`frame`), `Colorize_Framev2`, `Colorize_Spritev2`, and
+    `Check_Spritesv2`, along
     with average identification time (`Identify_Frame`) split into
     normal/scene calls plus the critical-trigger mini-matcher, input/result
     counters (`inputs`, `rendered`, `same`, `noFrame`), and current process

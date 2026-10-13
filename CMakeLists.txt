@@ -6,6 +6,7 @@ set(ARCH "x64" CACHE STRING "Arch")
 option(BUILD_SHARED "Option to build shared library" ON)
 option(BUILD_STATIC "Option to build static library" ON)
 option(ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan for Debug builds" OFF)
+set(SERUM_ACCEL_DIR "" CACHE PATH "Directory whose serum-accel.cmake names the sources to build instead of src/serum-accel-ref.cpp")
 
 message(STATUS "PLATFORM: ${PLATFORM}")
 message(STATUS "ARCH: ${ARCH}")
@@ -13,6 +14,7 @@ message(STATUS "ARCH: ${ARCH}")
 message(STATUS "BUILD_SHARED: ${BUILD_SHARED}")
 message(STATUS "BUILD_STATIC: ${BUILD_STATIC}")
 message(STATUS "ENABLE_SANITIZERS: ${ENABLE_SANITIZERS}")
+message(STATUS "SERUM_ACCEL_DIR: ${SERUM_ACCEL_DIR}")
 
 if(PLATFORM STREQUAL "ios" OR PLATFORM STREQUAL "ios-simulator")
    set(CMAKE_SYSTEM_NAME iOS)
@@ -120,6 +122,67 @@ set(SERUM_INCLUDE_DIRS
    third-party/include
 )
 
+# The functions declared in src/serum-accel.h are built from
+# src/serum-accel-ref.cpp, or, with SERUM_ACCEL_DIR set, from the sources that
+# directory's serum-accel.cmake names. That file must set
+# SERUM_ACCEL_SEAM_VERSION (the SERUM_ACCEL_SEAM_VERSION of serum-accel.h) and
+# SERUM_ACCEL_SOURCES (absolute paths), and may set
+# SERUM_ACCEL_COMPILE_DEFINITIONS and SERUM_ACCEL_INCLUDE_DIRS.
+file(READ src/serum-accel.h _serum_accel_header)
+string(REGEX MATCH "#[ \t]*define[ \t]+SERUM_ACCEL_SEAM_VERSION[ \t]+([0-9]+)" _tmp "${_serum_accel_header}")
+if("${CMAKE_MATCH_1}" STREQUAL "")
+   message(FATAL_ERROR "Failed to parse SERUM_ACCEL_SEAM_VERSION from src/serum-accel.h")
+endif()
+set(SERUM_SEAM_VERSION "${CMAKE_MATCH_1}")
+
+set(SERUM_ACCEL_IS_REFERENCE ON)
+set(SERUM_ACCEL_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/serum-accel-ref.cpp)
+set(SERUM_ACCEL_COMPILE_DEFINITIONS "")
+set(SERUM_ACCEL_INCLUDE_DIRS "")
+if(SERUM_ACCEL_DIR)
+   set(SERUM_ACCEL_IS_REFERENCE OFF)
+   if(NOT IS_DIRECTORY "${SERUM_ACCEL_DIR}")
+      message(FATAL_ERROR
+         "SERUM_ACCEL_DIR is set to '${SERUM_ACCEL_DIR}', which is not a directory.\n"
+         "Point it at a directory holding a serum-accel.cmake, or leave it empty.")
+   endif()
+   if(NOT EXISTS "${SERUM_ACCEL_DIR}/serum-accel.cmake")
+      message(FATAL_ERROR
+         "SERUM_ACCEL_DIR='${SERUM_ACCEL_DIR}' holds no serum-accel.cmake.\n"
+         "That file has to set SERUM_ACCEL_SEAM_VERSION and SERUM_ACCEL_SOURCES; "
+         "see the comment above this check in CMakeLists.txt.")
+   endif()
+   set(SERUM_ACCEL_SOURCES "")
+   unset(SERUM_ACCEL_SEAM_VERSION)
+   include("${SERUM_ACCEL_DIR}/serum-accel.cmake")
+   if(NOT DEFINED SERUM_ACCEL_SEAM_VERSION)
+      message(FATAL_ERROR
+         "${SERUM_ACCEL_DIR}/serum-accel.cmake does not set SERUM_ACCEL_SEAM_VERSION.")
+   endif()
+   if(NOT "${SERUM_ACCEL_SEAM_VERSION}" STREQUAL "${SERUM_SEAM_VERSION}")
+      message(FATAL_ERROR
+         "${SERUM_ACCEL_DIR}/serum-accel.cmake sets SERUM_ACCEL_SEAM_VERSION "
+         "${SERUM_ACCEL_SEAM_VERSION}, and src/serum-accel.h has "
+         "${SERUM_SEAM_VERSION}.")
+   endif()
+   if(NOT SERUM_ACCEL_SOURCES)
+      message(FATAL_ERROR
+         "${SERUM_ACCEL_DIR}/serum-accel.cmake does not set SERUM_ACCEL_SOURCES.")
+   endif()
+   foreach(_serum_accel_source IN LISTS SERUM_ACCEL_SOURCES)
+      if(NOT IS_ABSOLUTE "${_serum_accel_source}" OR NOT EXISTS "${_serum_accel_source}")
+         message(FATAL_ERROR
+            "SERUM_ACCEL_SOURCES names '${_serum_accel_source}', which is not "
+            "an existing file given as an absolute path (set by "
+            "${SERUM_ACCEL_DIR}/serum-accel.cmake).")
+      endif()
+   endforeach()
+   message(STATUS "serum-accel: sources from ${SERUM_ACCEL_DIR} (seam version ${SERUM_SEAM_VERSION})")
+else()
+   message(STATUS "serum-accel: reference implementation (seam version ${SERUM_SEAM_VERSION})")
+endif()
+list(APPEND SERUM_SOURCES ${SERUM_ACCEL_SOURCES})
+
 # FrameUtil.h comes from PPUC/libframeutil, by either of two routes:
 #
 #  * platforms/<platform>/<arch>/external.sh drops it in third-party/include.
@@ -153,6 +216,8 @@ if(BUILD_SHARED)
    add_library(serum_shared SHARED ${SERUM_SOURCES})
 
    target_include_directories(serum_shared PUBLIC ${SERUM_INCLUDE_DIRS})
+   target_include_directories(serum_shared PRIVATE ${SERUM_ACCEL_INCLUDE_DIRS})
+   target_compile_definitions(serum_shared PRIVATE ${SERUM_ACCEL_COMPILE_DEFINITIONS})
 
    if((PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "win-mingw") AND ARCH STREQUAL "x64")
       set(SERUM_OUTPUT_NAME "serum64")
@@ -213,8 +278,8 @@ if(BUILD_SHARED)
          ${CMAKE_CURRENT_SOURCE_DIR}/src
          ${CMAKE_CURRENT_SOURCE_DIR}/third-party/include
       )
-      # Everything SERUM_SOURCES has except serum-decode.cpp, which the test
-      # TU includes itself.
+      # Everything SERUM_SOURCES has except serum-decode.cpp and
+      # serum-accel-ref.cpp, which the test TU includes itself.
       target_sources(serum_unit_tests PRIVATE
          src/SerumData.cpp
          src/SceneGenerator.cpp
@@ -222,6 +287,13 @@ if(BUILD_SHARED)
          third-party/include/lz4/lz4hc.c
          third-party/include/miniz/miniz.c
       )
+      if(SERUM_ACCEL_IS_REFERENCE)
+         target_compile_definitions(serum_unit_tests PRIVATE SERUM_ACCEL_REFERENCE_IN_TEST_TU=1)
+      else()
+         target_sources(serum_unit_tests PRIVATE ${SERUM_ACCEL_SOURCES})
+         target_include_directories(serum_unit_tests PRIVATE ${SERUM_ACCEL_INCLUDE_DIRS})
+         target_compile_definitions(serum_unit_tests PRIVATE ${SERUM_ACCEL_COMPILE_DEFINITIONS})
+      endif()
       add_test(NAME serum_unit_tests COMMAND serum_unit_tests)
    endif()
 endif()
@@ -230,6 +302,8 @@ if(BUILD_STATIC)
    add_library(serum_static STATIC ${SERUM_SOURCES})
 
    target_include_directories(serum_static PUBLIC ${SERUM_INCLUDE_DIRS})
+   target_include_directories(serum_static PRIVATE ${SERUM_ACCEL_INCLUDE_DIRS})
+   target_compile_definitions(serum_static PRIVATE ${SERUM_ACCEL_COMPILE_DEFINITIONS})
 
    if(PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "win-mingw")
       set_target_properties(serum_static PROPERTIES

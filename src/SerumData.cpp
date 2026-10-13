@@ -7,6 +7,7 @@
 
 #include "DecompressingIStream.h"
 #include "miniz/miniz.h"
+#include "serum-accel.h"
 #include "serum-version.h"
 
 #ifdef _MSC_VER
@@ -793,6 +794,7 @@ void SerumData::LogSparseVectorProfileSnapshot() {
 void SerumData::BuildColorRotationLookup() {
   colorRotationLookupByFrameAndColor.clear();
   if (SerumVersion != SERUM_V2 || nframes == 0) {
+    serum_accel::RotationLookupChanged(*this);
     return;
   }
 
@@ -821,6 +823,7 @@ void SerumData::BuildColorRotationLookup() {
 
   buildPlane(false);
   buildPlane(true);
+  serum_accel::RotationLookupChanged(*this);
 }
 
 bool SerumData::TryGetColorRotation(uint32_t frameId, uint16_t color,

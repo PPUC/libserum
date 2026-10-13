@@ -23,6 +23,7 @@
 
 #include "SerumData.h"
 #include "TimeUtils.h"
+#include "serum-accel.h"
 #include "serum-version.h"
 
 #if defined(__APPLE__)
@@ -252,6 +253,7 @@ static bool g_profileSparseVectors = false;
 static uint64_t g_profileRoundTripNs = 0;
 static uint64_t g_profileColorizeFrameV2Ns = 0;
 static uint64_t g_profileColorizeSpriteV2Ns = 0;
+static uint64_t g_profileCheckSpritesV2Ns = 0;
 static uint64_t g_profileColorizeCalls = 0;
 static uint64_t g_profileIdentifyTotalNs = 0;
 static uint64_t g_profileIdentifyNormalNs = 0;
@@ -283,6 +285,9 @@ static bool g_debugBypassSceneGate = false;
 static bool g_debugVerboseIdentify = false;
 static bool g_debugVerboseSprites = false;
 static bool g_debugVerboseScenes = false;
+// Any of the switches above is set, i.e. some log line may quote the input CRC
+// or a stage hash. They are only computed then.
+static bool g_debugAnyTracing = false;
 static std::vector<std::pair<uint8_t, uint8_t>> g_criticalTriggerMaskShapes;
 
 static SerumData g_serumData;
@@ -606,8 +611,6 @@ uint32_t firstUnknownFrameTimestamp = 0;
 uint32_t lastTriggerID = 0xffffffff;  // last trigger ID found
 uint32_t lasttriggerTimestamp = 0;
 bool isrotation = true;     // are there rotations to send
-bool crc32_ready = false;   // is the crc32 table filled?
-uint32_t crc32_table[256];  // initial table
 bool* framechecked = NULL;  // are these frames checked?
 uint16_t ignoreUnknownFramesTimeout = 0;
 uint8_t maxFramesToSkip = 0;
@@ -868,70 +871,6 @@ uint32_t* upscaleIndexPlane = NULL;
 bool separatorMaskValid = false;
 uint32_t separatorMaskCount = 0;
 
-// The set of 4-byte windows present in the current ROM frame, used by sprite
-// detection to reject a sprite's detection word without scanning for it.
-//
-// This was a std::unordered_set rebuilt unconditionally on every frame: ~4000
-// inserts plus a reserve, ~15 us on a 128x32 frame with GCC -mcpu=cortex-a53 --
-// about as much as the entire RGB24 upscale, and paid whether or not any sprite
-// was ever looked for. Open addressing over a table allocated once removes the
-// heap traffic, and a generation stamp removes the clear, so starting a frame
-// costs nothing: ~4 us when the index is needed. Building it lazily removes
-// even that on frames with no sprite candidates -- 89% of bdk_294's frames.
-uint32_t* frameDwordKeys = NULL;
-uint32_t* frameDwordStamps = NULL;
-uint32_t frameDwordMask = 0;
-uint32_t frameDwordShift = 0;
-uint32_t frameDwordGen = 0;
-
-// Sized so the table can never be more than half full: every dword window in
-// the frame could be distinct, and a table that fills would loop forever in the
-// probe below.
-static void AllocateFrameDwordTable(uint32_t width, uint32_t height) {
-  size_t cap = 1024;
-  const size_t want = (size_t)height * (width > 3 ? width - 3 : 1) * 2;
-  while (cap < want) cap <<= 1;
-  frameDwordMask = (uint32_t)(cap - 1);
-  frameDwordShift = 32;
-  while (((size_t)1 << (32 - frameDwordShift)) < cap) frameDwordShift--;
-  frameDwordKeys = (uint32_t*)malloc(cap * sizeof(uint32_t));
-  frameDwordStamps = (uint32_t*)calloc(cap, sizeof(uint32_t));
-  frameDwordGen = 0;
-}
-
-static inline void FrameDwordsBegin() {
-  if (++frameDwordGen == 0) {  // wrapped: old stamps are indistinguishable
-    memset(frameDwordStamps, 0,
-           ((size_t)frameDwordMask + 1) * sizeof(uint32_t));
-    frameDwordGen = 1;
-  }
-}
-// Fibonacci hashing. The product's *high* bits are the mixed ones -- a
-// multiply only propagates entropy upwards, so masking the low bits instead
-// leaves them nearly as correlated as the raw dword. Frame dwords are four
-// pixel bytes drawn from a handful of shades, so that mistake clusters them
-// hard: it measured 22 us/frame on bdk_294 against 4.8 us for this shift.
-static inline uint32_t FrameDwordSlot(uint32_t value) {
-  return (value * 2654435761u) >> frameDwordShift;
-}
-static inline void FrameDwordsInsert(uint32_t value) {
-  uint32_t h = FrameDwordSlot(value);
-  while (frameDwordStamps[h] == frameDwordGen) {
-    if (frameDwordKeys[h] == value) return;
-    h = (h + 1) & frameDwordMask;
-  }
-  frameDwordStamps[h] = frameDwordGen;
-  frameDwordKeys[h] = value;
-}
-static inline bool FrameDwordsContains(uint32_t value) {
-  uint32_t h = FrameDwordSlot(value);
-  while (frameDwordStamps[h] == frameDwordGen) {
-    if (frameDwordKeys[h] == value) return true;
-    h = (h + 1) & frameDwordMask;
-  }
-  return false;
-}
-
 bool scaledLayerHasCoverage = false;  // any pixel owned on the current frame
 
 // Per-pixel dyna layer of LIT dynamic content, "layer + 1" (0 = not lit
@@ -1090,6 +1029,7 @@ static void ResetDynamicHotPathProfile() {
   g_profileRoundTripNs = 0;
   g_profileColorizeFrameV2Ns = 0;
   g_profileColorizeSpriteV2Ns = 0;
+  g_profileCheckSpritesV2Ns = 0;
   g_profileColorizeCalls = 0;
   g_profileIdentifyTotalNs = 0;
   g_profileIdentifyNormalNs = 0;
@@ -1128,6 +1068,11 @@ static void MaybeLogDynamicHotPathProfileWindow(bool sceneFrameRequested) {
                               ? 0.0
                               : (double)g_profileColorizeSpriteV2Ns /
                                     (double)g_profileColorizeCalls / 1000000.0;
+  const double spriteCheckMs = g_profileColorizeCalls == 0
+                                   ? 0.0
+                                   : (double)g_profileCheckSpritesV2Ns /
+                                         (double)g_profileColorizeCalls /
+                                         1000000.0;
   const double identifyMs = g_profileColorizeCalls == 0
                                 ? 0.0
                                 : (double)g_profileIdentifyTotalNs /
@@ -1155,12 +1100,12 @@ static void MaybeLogDynamicHotPathProfileWindow(bool sceneFrameRequested) {
   const double rssMiB = (double)rssBytes / (1024.0 * 1024.0);
   const double peakRssMiB = (double)g_profilePeakRssBytes / (1024.0 * 1024.0);
   Log("Perf dynamic avg: frame=%.3fms Colorize_Framev2=%.3fms "
-      "Colorize_Spritev2=%.3fms Identify=%.3fms "
+      "Colorize_Spritev2=%.3fms Check_Spritesv2=%.3fms Identify=%.3fms "
       "IdentifyNormal=%.3fms IdentifyScene=%.3fms "
       "IdentifyCritical=%.3fms inputs=%llu rendered=%llu "
       "same=%llu noFrame=%llu rss=%.1fMiB peak=%.1fMiB",
-      roundTripMs, frameMs, spriteMs, identifyMs, identifyNormalMs,
-      identifySceneMs, identifyCriticalMs,
+      roundTripMs, frameMs, spriteMs, spriteCheckMs, identifyMs,
+      identifyNormalMs, identifySceneMs, identifyCriticalMs,
       static_cast<unsigned long long>(g_profileIncomingFrameCalls),
       static_cast<unsigned long long>(g_profileColorizeCalls),
       static_cast<unsigned long long>(g_profileSameFrameReturns),
@@ -1188,9 +1133,11 @@ static void InitDebugFrameTracingFromEnv(void) {
   g_debugVerboseIdentify = IsEnvFlagEnabled("SERUM_DEBUG_IDENTIFY_VERBOSE");
   g_debugVerboseSprites = IsEnvFlagEnabled("SERUM_DEBUG_SPRITE_VERBOSE");
   g_debugVerboseScenes = IsEnvFlagEnabled("SERUM_DEBUG_SCENE_VERBOSE");
-  if (g_debugTargetInputCrc != 0 || g_debugTargetFrameId != 0xffffffffu ||
+  g_debugAnyTracing =
+      g_debugTargetInputCrc != 0 || g_debugTargetFrameId != 0xffffffffu ||
       g_debugStageHashes || g_debugTraceAllInputs || g_debugBypassSceneGate ||
-      g_debugVerboseIdentify || g_debugVerboseSprites || g_debugVerboseScenes) {
+      g_debugVerboseIdentify || g_debugVerboseSprites || g_debugVerboseScenes;
+  if (g_debugAnyTracing) {
     Log("Serum debug tracing enabled: inputCrc=%u frameId=%u stageHashes=%s "
         "traceAllInputs=%s bypassSceneGate=%s identifyVerbose=%s "
         "spriteVerbose=%s sceneVerbose=%s",
@@ -1214,6 +1161,14 @@ static void InitDebugFrameTracingFromEnv(void) {
 static bool DebugFrameTracingRequested() {
   InitDebugFrameTracingFromEnv();
   return g_debugTargetInputCrc != 0 || g_debugTargetFrameId != 0xffffffffu;
+}
+
+// The CRC of the incoming ROM frame exists to be quoted in debug logs and to
+// filter them (SERUM_DEBUG_INPUT_CRC). It is only computed when some debug
+// switch is on; without one it reads as 0 and nothing looks at it.
+static bool DebugInputCrcWanted() {
+  InitDebugFrameTracingFromEnv();
+  return g_debugAnyTracing;
 }
 
 static bool DebugTraceMatches(uint32_t inputCrc, uint32_t frameId) {
@@ -1382,15 +1337,18 @@ static uint64_t DebugHashCurrentOutputFrame(uint32_t frameId, bool isExtra) {
   if (!output || width == 0 || height == 0) {
     return 0;
   }
+  // The hash is for the log line below and nothing else.
+  InitDebugFrameTracingFromEnv();
+  if (!g_debugStageHashes ||
+      !DebugTraceMatches(g_debugCurrentInputCrc, frameId)) {
+    return 0;
+  }
   const uint64_t hash = DebugHashBytesFNV1a64(
       output, static_cast<size_t>(width) * height * sizeof(uint16_t));
-  if (g_debugStageHashes &&
-      DebugTraceMatches(g_debugCurrentInputCrc, frameId)) {
-    Log("Serum debug stage hash: frameId=%u inputCrc=%u stage=%s hash=%llu "
-        "size=%ux%u",
-        frameId, g_debugCurrentInputCrc, isExtra ? "base-extra" : "base",
-        static_cast<unsigned long long>(hash), width, height);
-  }
+  Log("Serum debug stage hash: frameId=%u inputCrc=%u stage=%s hash=%llu "
+      "size=%ux%u",
+      frameId, g_debugCurrentInputCrc, isExtra ? "base-extra" : "base",
+      static_cast<unsigned long long>(hash), width, height);
   return hash;
 }
 
@@ -1854,11 +1812,7 @@ void Serum_free(void) {
   separatorMaskValid = false;
   separatorMaskCount = 0;
   rememberedSeparatorCount = 0;
-  Free_element((void**)&frameDwordKeys);
-  Free_element((void**)&frameDwordStamps);
-  frameDwordMask = 0;
-  frameDwordShift = 0;
-  frameDwordGen = 0;
+  serum_accel::ColorizationUnloaded();
   Free_element((void**)&sdDynaLayerMap);
   Free_element((void**)&sdShadowColour);
   Free_element((void**)&sdShadowClaim);
@@ -1918,69 +1872,30 @@ SERUM_API const char* Serum_GetMinorVersion() {
 
 SERUM_API const char* Serum_GetLastErrorMessage() { return g_lastErrorMessage; }
 
-void CRC32encode(void)  // initiating the CRC table, must be called at startup
-{
-  for (int i = 0; i < 256; i++) {
-    uint32_t ch = i;
-    uint32_t crc = 0;
-    for (int j = 0; j < 8; j++) {
-      uint32_t b = (ch ^ crc) & 1;
-      crc >>= 1;
-      if (b != 0) crc = crc ^ 0xEDB88320;
-      ch >>= 1;
-    }
-    crc32_table[i] = crc;
-  }
-  crc32_ready = true;
-}
-
 uint32_t crc32_fast(uint8_t* s, uint32_t n)
-// computing a buffer CRC32, "CRC32encode()" must have been called before the
-// first use version with no mask nor shapemode
+// computing a buffer CRC32, version with no mask nor shapemode
 {
-  uint32_t crc = 0xffffffff;
-  for (int i = 0; i < (int)n; i++)
-    crc = (crc >> 8) ^ crc32_table[(s[i] ^ crc) & 0xFF];
-  return ~crc;
+  return serum_accel::Crc32(s, n);
 }
 
 uint32_t crc32_fast_shape(uint8_t* s, uint32_t n)
-// computing a buffer CRC32, "CRC32encode()" must have been called before the
-// first use version with shapemode and no mask
+// computing a buffer CRC32, version with shapemode and no mask
 {
-  uint32_t crc = 0xffffffff;
-  for (int i = 0; i < (int)n; i++) {
-    uint8_t val = s[i];
-    if (val > 1) val = 1;
-    crc = (crc >> 8) ^ crc32_table[(val ^ crc) & 0xFF];
-  }
-  return ~crc;
+  return serum_accel::Crc32Shape(s, n);
 }
 
 uint32_t crc32_fast_mask(uint8_t* source, uint8_t* mask, uint32_t n)
-// computing a buffer CRC32 on the non-masked area, "CRC32encode()" must have
-// been called before the first use version with a mask and no shape mode
+// computing a buffer CRC32 on the non-masked area, version with a mask and no
+// shape mode
 {
-  uint32_t crc = 0xffffffff;
-  for (uint32_t i = 0; i < n; i++) {
-    if (mask[i] == 0) crc = (crc >> 8) ^ crc32_table[(source[i] ^ crc) & 0xFF];
-  }
-  return ~crc;
+  return serum_accel::Crc32Masked(source, mask, n);
 }
 
 uint32_t crc32_fast_mask_shape(uint8_t* source, uint8_t* mask, uint32_t n)
-// computing a buffer CRC32 on the non-masked area, "CRC32encode()" must have
-// been called before the first use version with a mask and shape mode
+// computing a buffer CRC32 on the non-masked area, version with a mask and
+// shape mode
 {
-  uint32_t crc = 0xffffffff;
-  for (uint32_t i = 0; i < n; i++) {
-    if (mask[i] == 0) {
-      uint8_t val = source[i];
-      if (val > 1) val = 1;
-      crc = (crc >> 8) ^ crc32_table[(val ^ crc) & 0xFF];
-    }
-  }
-  return ~crc;
+  return serum_accel::Crc32MaskedShape(source, mask, n);
 }
 
 uint32_t calc_crc32(uint8_t* source, uint8_t mask, uint32_t n, uint8_t Shape) {
@@ -3117,18 +3032,44 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
     y1 = by1 * 2 + 1;
   }
 
+  // CompositeLineDoubled() does a line-doubling composite completely or not
+  // at all; if not, the loop below does it. The bounds always hold whole
+  // source pixels: they are built from them above.
+  bool lineDoubled = false;
+  if (selectionAlgorithm == FrameUtil::ScalingAlgorithm::LineDoubling) {
+    serum_accel::LineDoubleComposite job;
+    job.srcWidth = srcWidth;
+    job.x0 = x0;
+    job.y0 = y0;
+    job.x1 = x1;
+    job.y1 = y1;
+    job.srcColours = mySerum.frame32;
+    job.dstColours = mySerum.frame64;
+    job.srcCoverage = coverageProtectsHd ? scaledLayerCoverage : NULL;
+    job.srcLayers = respectCoverage && sdDynaLayerMap && hdDynaLayerMap
+                        ? sdDynaLayerMap
+                        : NULL;
+    job.dstLayers = hdDynaLayerMap;
+    job.srcRotations =
+        mySerum.rotationsinframe64 ? mySerum.rotationsinframe32 : NULL;
+    job.dstRotations = mySerum.rotationsinframe64;
+    job.srcModified = propagateModified ? mySerum.modifiedelements32 : NULL;
+    job.dstModified = mySerum.modifiedelements64;
+    lineDoubled = serum_accel::CompositeLineDoubled(job);
+  }
+
   // Whole-frame upscales take the indices in one vectorizable pass. A bounded
   // one (a sprite region) stays per pixel: it touches too few pixels to pay
   // for a full-plane derivation.
   const uint32_t* indexPlane = NULL;
-  if (!srcBounds && upscaleIndexPlane) {
+  if (!lineDoubled && !srcBounds && upscaleIndexPlane) {
     FrameUtil::Helper::SelectUpscaled2xSourceIndices(
         upscaleIndexPlane, selectSource, srcWidth, srcHeight,
         selectionAlgorithm);
     indexPlane = upscaleIndexPlane;
   }
 
-  for (uint32_t y = y0; y <= y1; y++) {
+  for (uint32_t y = y0; !lineDoubled && y <= y1; y++) {
     // Index of the source pixel this destination row belongs to. Both the
     // coverage test and the preserve guard want it, so it is formed once per
     // row and advanced by a shift rather than multiplied per pixel.
@@ -3589,9 +3530,9 @@ bool Serum_SaveConcentrate(const char* filename) {
 // Returns false if any allocation failed; the caller frees and gives up.
 static bool AllocateFrameWorkBuffers(void) {
   const size_t px = (size_t)g_serumData.fwidth * g_serumData.fheight;
-  // Sprite detection works on the ROM frame, so its shape copy and its dword
-  // index are sized by that frame. Everything else here belongs to the scaled
-  // layer and is sized by the original plane it is rendered at.
+  // Sprite detection works on the ROM frame, so its shape copy is sized by
+  // that frame. Everything else here belongs to the scaled layer and is sized
+  // by the original plane it is rendered at.
   frameshape = (uint8_t*)malloc(NativeFramePixels());
   scaledLayerCoverage = (uint8_t*)malloc(px);
   frameLayerCoverage = (uint8_t*)malloc(px);
@@ -3613,7 +3554,6 @@ static bool AllocateFrameWorkBuffers(void) {
       (uint8_t*)malloc((size_t)kSeparatorMaxColors * g_serumData.fwidth);
   separatorTextFrame = (uint16_t*)malloc(px * sizeof(uint16_t));
   upscaleIndexPlane = (uint32_t*)malloc(px * 4 * sizeof(uint32_t));
-  AllocateFrameDwordTable(NativeFrameWidth(), NativeFrameHeight());
   // Zeroed, not just allocated: the separator filter reads sdDynaLayerMap to
   // tell dynamic content from artwork, and it is only cleared per frame once
   // a layer-mode render begins. Before that it would be reading whatever the
@@ -3775,7 +3715,6 @@ static void LogLoadedColorizationSource(const std::string& path,
 Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
                                          const uint8_t loadFlags,
                                          const uint8_t runtimeFlags) {
-  if (!crc32_ready) CRC32encode();
   const bool loadTimingEnabled = IsLoadTimingEnabled();
   const auto totalStart = loadTimingEnabled
                               ? std::chrono::steady_clock::now()
@@ -4341,8 +4280,6 @@ static Serum_Frame_Struc* Serum_LoadFilev1Stream(Reader& reader,
 Serum_Frame_Struc* Serum_LoadFilev1(const char* const filename,
                                     const uint8_t loadFlags,
                                     const uint8_t runtimeFlags) {
-  if (!crc32_ready) CRC32encode();
-
   // check if we're using an uncompressed cROM file
   const char* ext;
   bool uncompressedCROM = false;
@@ -4394,6 +4331,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   g_profileRoundTripNs = 0;
   g_profileColorizeFrameV2Ns = 0;
   g_profileColorizeSpriteV2Ns = 0;
+  g_profileCheckSpritesV2Ns = 0;
   g_profileColorizeCalls = 0;
   g_profileIdentifyTotalNs = 0;
   g_profileIdentifyNormalNs = 0;
@@ -5035,7 +4973,8 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
                     ? lastfound_scene
                     : lastfound_normal;  // stream-local search start
   const uint32_t pixels = NativeFramePixels();
-  const uint32_t inputCrc = crc32_fast(frame, pixels);
+  const uint32_t inputCrc =
+      DebugInputCrcWanted() ? crc32_fast(frame, pixels) : 0;
   uint32_t& lastfound_stream =
       sceneFrameRequested ? lastfound_scene : lastfound_normal;
   bool& first_match =
@@ -5432,37 +5371,7 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
     return false;
   }
 
-  // Exact dword index for this frame (replaces Bloom false-positive path).
-  // Built on first use, like the shape index below: a frame whose candidate
-  // list is empty never pays for it.
-  bool frameDwordsBuilt = false;
-  auto buildFrameDwords = [&]() {
-    if (frameDwordsBuilt) return;
-    frameDwordsBuilt = true;
-    // The load paths that can reach v2 sprite detection all allocate this,
-    // but returning "not present" from a missing table would silently drop
-    // every sprite rather than fail loudly, so allocate rather than trust
-    // that.
-    if (!frameDwordKeys || !frameDwordStamps) {
-      Free_element((void**)&frameDwordKeys);
-      Free_element((void**)&frameDwordStamps);
-      AllocateFrameDwordTable(nativeWidth, nativeHeight);
-      if (!frameDwordKeys || !frameDwordStamps) return;
-    }
-    FrameDwordsBegin();
-    for (uint32_t y = 0; y < nativeHeight; ++y) {
-      const uint32_t rowBase = y * nativeWidth;
-      uint32_t dword = (uint32_t)(recframe[rowBase] << 8) |
-                       (uint32_t)(recframe[rowBase + 1] << 16) |
-                       (uint32_t)(recframe[rowBase + 2] << 24);
-      for (uint32_t x = 0; x <= nativeWidth - 4; ++x) {
-        dword = (dword >> 8) | (uint32_t)(recframe[rowBase + x + 3] << 24);
-        FrameDwordsInsert(dword);
-      }
-    }
-  };
-  std::unordered_set<uint32_t> frameShapeDwords;
-  bool frameShapeDwordsBuilt = false;
+  serum_accel::BeginSpriteDetection();
 
   const uint16_t* frameSpriteBoundingBoxes =
       g_serumData.framespriteBB[quelleframe];
@@ -5482,7 +5391,6 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
     }
   }
 
-  uint32_t mdword;
   bool hasShapeFrameBuffer = false;
   const bool frameHasShapeCandidates =
       hasCandidateSidecars &&
@@ -5516,8 +5424,7 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
         !g_serumData.spriteoriginal_opaque.hasData(qspr)) {
       continue;
     }
-    const uint8_t* spriteOriginal = g_serumData.spriteoriginal[qspr];
-    const uint8_t* spriteOpaque = g_serumData.spriteoriginal_opaque[qspr];
+    serum_accel::BeginSpriteCandidate(g_serumData, qspr);
     uint8_t* Frame = recframe;
     const bool isshapecheck = qspr < g_serumData.spriteUsesShape.size()
                                   ? (g_serumData.spriteUsesShape[qspr] > 0)
@@ -5530,24 +5437,11 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
         hasShapeFrameBuffer = true;
       }
       Frame = frameshape;
-      if (!frameShapeDwordsBuilt) {
-        frameShapeDwords.clear();
-        frameShapeDwords.reserve(static_cast<size_t>(nativeHeight) *
-                                 std::max(1u, nativeWidth - 3));
-        for (uint32_t y = 0; y < nativeHeight; ++y) {
-          const uint32_t rowBase = y * nativeWidth;
-          uint32_t dword = (uint32_t)(frameshape[rowBase] << 8) |
-                           (uint32_t)(frameshape[rowBase + 1] << 16) |
-                           (uint32_t)(frameshape[rowBase + 2] << 24);
-          for (uint32_t x = 0; x <= nativeWidth - 4; ++x) {
-            dword =
-                (dword >> 8) | (uint32_t)(frameshape[rowBase + x + 3] << 24);
-            frameShapeDwords.insert(dword);
-          }
-        }
-        frameShapeDwordsBuilt = true;
-      }
     }
+    // A shape-mode sprite is matched against the lit/unlit copy of the frame,
+    // which is only made when the frame's candidate list announced such a
+    // sprite. Without the announcement the sprite is never found.
+    const bool hasFrameToSearch = !isshapecheck || hasShapeFrameBuffer;
 
     const int spw = (qspr < g_serumData.spriteWidth.size())
                         ? g_serumData.spriteWidth[qspr]
@@ -5574,201 +5468,137 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
     DebugLogSpriteCandidate(quelleframe, qspr, spriteSlot, isshapecheck,
                             detectEnd - detectStart, minxBB, minyBB, maxxBB,
                             maxyBB, spw, sph);
+    if (!hasFrameToSearch) {
+      continue;
+    }
     for (uint32_t tm = detectStart; tm < detectEnd; tm++) {
       const auto& detMeta = g_serumData.spriteDetectMeta[tm];
-      const bool hasDetectionWord =
-          isshapecheck ? (frameShapeDwords.find(detMeta.detectionWord) !=
-                          frameShapeDwords.end())
-                       : (buildFrameDwords(),
-                          frameDwordKeys != NULL &&
-                              FrameDwordsContains(detMeta.detectionWord));
-      if (!hasDetectionWord) {
-        continue;
-      }
-
-      // we look for the sprite in the frame sent
-      for (short ty = minyBB; ty <= maxyBB; ty++) {
-        mdword = (uint32_t)(Frame[ty * nativeWidth + minxBB] << 8) |
-                 (uint32_t)(Frame[ty * nativeWidth + minxBB + 1] << 16) |
-                 (uint32_t)(Frame[ty * nativeWidth + minxBB + 2] << 24);
-        for (short tx = minxBB; tx <= maxxBB - 3; tx++) {
-          uint32_t tj = ty * nativeWidth + tx;
-          mdword = (mdword >> 8) | (uint32_t)(Frame[tj + 3] << 24);
-          // we look for the magic dword first:
-          const uint16_t sddp = detMeta.detectionWordPos;
-          if (mdword == detMeta.detectionWord) {
-            short frax =
-                (short)tx;  // position in the frame of the detection dword
-            short fray = (short)ty;
-            short sprx =
-                (short)(sddp % MAX_SPRITE_WIDTH);  // position in the sprite
-                                                   // of the detection dword
-            short spry = (short)(sddp / MAX_SPRITE_WIDTH);
-            // details of the det area:
-            const short detx = static_cast<short>(detMeta.detectX);
-            const short dety = static_cast<short>(detMeta.detectY);
-            const short detw = static_cast<short>(detMeta.detectWidth);
-            const short deth = static_cast<short>(detMeta.detectHeight);
-            // if the detection area starts before the frame (left or top),
-            // continue:
-            if ((frax - minxBB < sprx - detx) ||
-                (fray - minyBB < spry - dety)) {
-              DebugLogSpriteRejected(quelleframe, qspr, spriteSlot,
-                                     "bbox-start", tm - detectStart, frax, fray,
-                                     0, 0, static_cast<uint32_t>(frax - minxBB),
-                                     static_cast<uint32_t>(sprx - detx),
-                                     static_cast<uint32_t>(fray - minyBB),
-                                     static_cast<uint32_t>(spry - dety));
-              continue;
-            }
-            // position of the detection area in the frame
-            int offsx = frax - sprx + detx;
-            int offsy = fray - spry + dety;
-            // if the detection area extends beyond the bounding box (right or
-            // bottom), continue:
-            if ((offsx + detw > (int)maxxBB + 1) ||
-                (offsy + deth > (int)maxyBB + 1)) {
-              DebugLogSpriteRejected(quelleframe, qspr, spriteSlot, "bbox-end",
-                                     tm - detectStart, frax, fray,
-                                     static_cast<short>(offsx),
-                                     static_cast<short>(offsy),
-                                     static_cast<uint32_t>(offsx + detw),
-                                     static_cast<uint32_t>((int)maxxBB + 1),
-                                     static_cast<uint32_t>(offsy + deth),
-                                     static_cast<uint32_t>((int)maxyBB + 1));
-              continue;
-            }
-            DebugLogSpriteDetectionWord(quelleframe, qspr, tm - detectStart,
-                                        detMeta.detectionWord, frax, fray,
-                                        static_cast<short>(offsx),
-                                        static_cast<short>(offsy), detw, deth);
-            // we can now check if the full detection area is around the found
-            // detection dword
-            bool notthere = false;
-            for (uint16_t tk = 0; tk < deth && !notthere; tk++) {
-              const uint32_t spriteRow = static_cast<uint32_t>(dety + tk);
-              const uint32_t rowIndex =
-                  static_cast<uint32_t>(qspr) * MAX_SPRITE_HEIGHT + spriteRow;
-              if (rowIndex >= g_serumData.spriteOpaqueRowSegmentStart.size()) {
-                DebugLogSpriteRejected(
-                    quelleframe, qspr, spriteSlot, "row-sidecar-oob",
-                    tm - detectStart, frax, fray, static_cast<short>(offsx),
-                    static_cast<short>(offsy), rowIndex,
-                    static_cast<uint32_t>(
-                        g_serumData.spriteOpaqueRowSegmentStart.size()),
-                    spriteRow, static_cast<uint32_t>(tk));
-                notthere = true;
-                break;
-              }
-              const uint32_t segStartIndex =
-                  g_serumData.spriteOpaqueRowSegmentStart[rowIndex];
-              const uint16_t segCount =
-                  g_serumData.spriteOpaqueRowSegmentCount[rowIndex];
-              for (uint16_t seg = 0; seg < segCount && !notthere; ++seg) {
-                const uint32_t segIndex = segStartIndex + seg * 2;
-                if (segIndex + 1 >= g_serumData.spriteOpaqueSegments.size()) {
-                  DebugLogSpriteRejected(
-                      quelleframe, qspr, spriteSlot, "segment-sidecar-oob",
-                      tm - detectStart, frax, fray, static_cast<short>(offsx),
-                      static_cast<short>(offsy), segIndex,
-                      static_cast<uint32_t>(
-                          g_serumData.spriteOpaqueSegments.size()),
-                      segStartIndex, segCount);
-                  notthere = true;
-                  break;
-                }
-                const uint16_t segmentX =
-                    g_serumData.spriteOpaqueSegments[segIndex];
-                const uint16_t segmentLen =
-                    g_serumData.spriteOpaqueSegments[segIndex + 1];
-                const uint16_t segFrom =
-                    std::max<uint16_t>(segmentX, static_cast<uint16_t>(detx));
-                const uint16_t segTo = std::min<uint16_t>(
-                    static_cast<uint16_t>(segmentX + segmentLen),
-                    static_cast<uint16_t>(detx + detw));
-                if (segFrom >= segTo) {
-                  continue;
-                }
-
-                const uint32_t spriteBase =
-                    spriteRow * MAX_SPRITE_WIDTH + segFrom;
-                const uint32_t frameBase =
-                    static_cast<uint32_t>(tk + offsy) * nativeWidth +
-                    static_cast<uint32_t>(segFrom - detx + offsx);
-                for (uint16_t x = segFrom; x < segTo; ++x) {
-                  const uint32_t spriteOffset = spriteBase + (x - segFrom);
-                  const uint32_t frameOffset = frameBase + (x - segFrom);
-                  if (spriteOpaque[spriteOffset] == 0) {
-                    continue;
-                  }
-                  const uint8_t expectedValue =
-                      isshapecheck ? static_cast<uint8_t>(
-                                         spriteOriginal[spriteOffset] > 0)
-                                   : spriteOriginal[spriteOffset];
-                  if (expectedValue != Frame[frameOffset]) {
-                    DebugLogSpriteRejected(
-                        quelleframe, qspr, spriteSlot, "opaque-run-mismatch",
-                        tm - detectStart, frax, fray, static_cast<short>(offsx),
-                        static_cast<short>(offsy), spriteOffset, frameOffset,
-                        expectedValue, Frame[frameOffset]);
-                    notthere = true;
-                    break;
-                  }
-                }
-              }
-            }
-            if (!notthere) {
-              pquelsprites[*nspr] = qspr;
-              if (frax - minxBB < sprx) {
-                pspx[*nspr] =
-                    (uint16_t)(sprx -
-                               (frax - minxBB));  // display sprite from point
-                pfrx[*nspr] = (uint16_t)minxBB;
-                pwid[*nspr] = std::min((uint16_t)(spw - pspx[*nspr]),
-                                       (uint16_t)(maxxBB - minxBB + 1));
-              } else {
-                pspx[*nspr] = 0;
-                pfrx[*nspr] = (uint16_t)(frax - sprx);
-                pwid[*nspr] = std::min((uint16_t)(maxxBB - pfrx[*nspr] + 1),
-                                       (uint16_t)spw);
-              }
-              if (fray - minyBB < spry) {
-                pspy[*nspr] = (uint16_t)(spry - (fray - minyBB));
-                pfry[*nspr] = (uint16_t)minyBB;
-                phei[*nspr] = std::min((uint16_t)(sph - pspy[*nspr]),
-                                       (uint16_t)(maxyBB - minyBB + 1));
-              } else {
-                pspy[*nspr] = 0;
-                pfry[*nspr] = (uint16_t)(fray - spry);
-                phei[*nspr] = std::min((uint16_t)(maxyBB - pfry[*nspr] + 1),
-                                       (uint16_t)sph);
-              }
-              // we check the identical sprites as there may be duplicate due
-              // to the multi detection zones
-              bool identicalfound = false;
-              for (uint8_t tk = 0; tk < *nspr; tk++) {
-                if ((pquelsprites[*nspr] == pquelsprites[tk]) &&
-                    (pfrx[*nspr] == pfrx[tk]) && (pfry[*nspr] == pfry[tk]) &&
-                    (pwid[*nspr] == pwid[tk]) && (phei[*nspr] == phei[tk]))
-                  identicalfound = true;
-              }
-              DebugLogSpriteAccepted(quelleframe, qspr, spriteSlot, pfrx[*nspr],
-                                     pfry[*nspr], pspx[*nspr], pspy[*nspr],
-                                     pwid[*nspr], phei[*nspr], identicalfound);
-              if (identicalfound) {
-                DebugLogSpriteRejected(
-                    quelleframe, qspr, spriteSlot, "duplicate",
-                    tm - detectStart, frax, fray, pfrx[*nspr], pfry[*nspr],
-                    pspx[*nspr], pspy[*nspr], pwid[*nspr], phei[*nspr]);
-              }
-              if (!identicalfound) {
-                (*nspr)++;
-                if (*nspr == MAX_SPRITES_PER_FRAME) return true;
-              }
-            }
+      // The detection word was found at (tx, ty): is the sprite there? Returns
+      // true once the frame's sprite list is full.
+      auto checkAt = [&](short tx, short ty) -> bool {
+        const uint16_t sddp = detMeta.detectionWordPos;
+        short frax = (short)tx;  // position in the frame of the detection dword
+        short fray = (short)ty;
+        short sprx =
+            (short)(sddp % MAX_SPRITE_WIDTH);  // position in the sprite
+                                               // of the detection dword
+        short spry = (short)(sddp / MAX_SPRITE_WIDTH);
+        // details of the det area:
+        const short detx = static_cast<short>(detMeta.detectX);
+        const short dety = static_cast<short>(detMeta.detectY);
+        const short detw = static_cast<short>(detMeta.detectWidth);
+        const short deth = static_cast<short>(detMeta.detectHeight);
+        // if the detection area starts before the frame (left or top),
+        // continue:
+        if ((frax - minxBB < sprx - detx) || (fray - minyBB < spry - dety)) {
+          DebugLogSpriteRejected(quelleframe, qspr, spriteSlot, "bbox-start",
+                                 tm - detectStart, frax, fray, 0, 0,
+                                 static_cast<uint32_t>(frax - minxBB),
+                                 static_cast<uint32_t>(sprx - detx),
+                                 static_cast<uint32_t>(fray - minyBB),
+                                 static_cast<uint32_t>(spry - dety));
+          return false;
+        }
+        // position of the detection area in the frame
+        int offsx = frax - sprx + detx;
+        int offsy = fray - spry + dety;
+        // if the detection area extends beyond the bounding box (right or
+        // bottom), continue:
+        if ((offsx + detw > (int)maxxBB + 1) ||
+            (offsy + deth > (int)maxyBB + 1)) {
+          DebugLogSpriteRejected(
+              quelleframe, qspr, spriteSlot, "bbox-end", tm - detectStart, frax,
+              fray, static_cast<short>(offsx), static_cast<short>(offsy),
+              static_cast<uint32_t>(offsx + detw),
+              static_cast<uint32_t>((int)maxxBB + 1),
+              static_cast<uint32_t>(offsy + deth),
+              static_cast<uint32_t>((int)maxyBB + 1));
+          return false;
+        }
+        DebugLogSpriteDetectionWord(quelleframe, qspr, tm - detectStart,
+                                    detMeta.detectionWord, frax, fray,
+                                    static_cast<short>(offsx),
+                                    static_cast<short>(offsy), detw, deth);
+        // we can now check if the full detection area is around the found
+        // detection dword
+        serum_accel::SpriteAreaMismatch mismatch;
+        const bool notthere = !serum_accel::SpriteAreaMatches(
+            g_serumData, tm, qspr, isshapecheck, Frame, nativeWidth, offsx,
+            offsy, &mismatch);
+        if (notthere) {
+          DebugLogSpriteRejected(
+              quelleframe, qspr, spriteSlot, mismatch.reason, tm - detectStart,
+              frax, fray, static_cast<short>(offsx), static_cast<short>(offsy),
+              mismatch.a, mismatch.b, mismatch.c, mismatch.d);
+        }
+        if (!notthere) {
+          pquelsprites[*nspr] = qspr;
+          if (frax - minxBB < sprx) {
+            pspx[*nspr] =
+                (uint16_t)(sprx -
+                           (frax - minxBB));  // display sprite from point
+            pfrx[*nspr] = (uint16_t)minxBB;
+            pwid[*nspr] = std::min((uint16_t)(spw - pspx[*nspr]),
+                                   (uint16_t)(maxxBB - minxBB + 1));
+          } else {
+            pspx[*nspr] = 0;
+            pfrx[*nspr] = (uint16_t)(frax - sprx);
+            pwid[*nspr] =
+                std::min((uint16_t)(maxxBB - pfrx[*nspr] + 1), (uint16_t)spw);
+          }
+          if (fray - minyBB < spry) {
+            pspy[*nspr] = (uint16_t)(spry - (fray - minyBB));
+            pfry[*nspr] = (uint16_t)minyBB;
+            phei[*nspr] = std::min((uint16_t)(sph - pspy[*nspr]),
+                                   (uint16_t)(maxyBB - minyBB + 1));
+          } else {
+            pspy[*nspr] = 0;
+            pfry[*nspr] = (uint16_t)(fray - spry);
+            phei[*nspr] =
+                std::min((uint16_t)(maxyBB - pfry[*nspr] + 1), (uint16_t)sph);
+          }
+          // we check the identical sprites as there may be duplicate due
+          // to the multi detection zones
+          bool identicalfound = false;
+          for (uint8_t tk = 0; tk < *nspr; tk++) {
+            if ((pquelsprites[*nspr] == pquelsprites[tk]) &&
+                (pfrx[*nspr] == pfrx[tk]) && (pfry[*nspr] == pfry[tk]) &&
+                (pwid[*nspr] == pwid[tk]) && (phei[*nspr] == phei[tk]))
+              identicalfound = true;
+          }
+          DebugLogSpriteAccepted(quelleframe, qspr, spriteSlot, pfrx[*nspr],
+                                 pfry[*nspr], pspx[*nspr], pspy[*nspr],
+                                 pwid[*nspr], phei[*nspr], identicalfound);
+          if (identicalfound) {
+            DebugLogSpriteRejected(quelleframe, qspr, spriteSlot, "duplicate",
+                                   tm - detectStart, frax, fray, pfrx[*nspr],
+                                   pfry[*nspr], pspx[*nspr], pspy[*nspr],
+                                   pwid[*nspr], phei[*nspr]);
+          }
+          if (!identicalfound) {
+            (*nspr)++;
+            if (*nspr == MAX_SPRITES_PER_FRAME) return true;
           }
         }
-      }
+        return false;
+      };
+
+      // Every place the word occurs inside the bounding box, in the order a
+      // row-by-row scan of the box reaches them -- the order sprites are
+      // reported and drawn in.
+      serum_accel::SpriteWordSearch search;
+      search.frame = Frame;
+      search.width = nativeWidth;
+      search.height = nativeHeight;
+      search.word = detMeta.detectionWord;
+      search.minX = minxBB;
+      search.minY = minyBB;
+      search.maxX = maxxBB;
+      search.maxY = maxyBB;
+      const auto visit = [](void* context, short tx, short ty) -> bool {
+        return (*static_cast<decltype(checkAt)*>(context))(tx, ty);
+      };
+      if (serum_accel::FindSpriteWord(search, visit, &checkAt)) return true;
     }
   }
   DebugLogSpriteCheckResult(quelleframe, *nspr);
@@ -5844,6 +5674,19 @@ bool ColorInRotation(uint32_t IDfound, uint16_t col, uint16_t* norot,
   return false;
 }
 
+// ColorInRotation() for a pixel of a plane; `planeRotates` is what
+// serum_accel::PlaneMayRotate() returned for that plane.
+static inline bool ColorInRotationOnPlane(bool planeRotates, uint32_t IDfound,
+                                          uint16_t col, uint16_t* norot,
+                                          uint16_t* posinrot, bool isextra) {
+  if (!planeRotates) {
+    *norot = 0xffff;
+    *posinrot = 0xffff;
+    return false;
+  }
+  return ColorInRotation(IDfound, col, norot, posinrot, isextra);
+}
+
 // shadowDir/ColorFallback: consulted per layer when the primary tables say
 // this layer casts no shadow.
 //
@@ -5911,6 +5754,11 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
   // extra plane is a downscale rather than an upscale -- the historical
   // all-or-nothing path is kept unchanged.
   const bool layerMode = upscaleExtraFromOriginal;
+  // See ColorInRotationOnPlane().
+  const bool originalPlaneRotates =
+      serum_accel::PlaneMayRotate(g_serumData, IDfound, false);
+  const bool extraPlaneRotates =
+      serum_accel::PlaneMayRotate(g_serumData, IDfound, true);
   // Record dynamic shadows rather than painting them; see sdShadowColour.
   const bool deferSdShadows = layerMode && sdShadowClaim && sdShadowColour;
   // In layer mode the HD gate no longer requires every referenced sprite to
@@ -6031,8 +5879,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                                                 g_serumData.fheight);
             } else if (!suppressFrameBackgroundImage) {
               pfr[tk] = frameBackground[tk];
-              if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                  &prot[tk * 2 + 1], false))
+              if (ColorInRotationOnPlane(originalPlaneRotates, IDfound, pfr[tk],
+                                         &prot[tk * 2], &prot[tk * 2 + 1],
+                                         false))
                 pfr[tk] =
                     prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
                         (cshft[prot[tk * 2]] + prot[tk * 2 + 1]) %
@@ -6053,8 +5902,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                                                   g_serumData.fheight);
               } else {
                 pfr[tk] = frameColors[tk];
-                if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                    &prot[tk * 2 + 1], false))
+                if (ColorInRotationOnPlane(originalPlaneRotates, IDfound,
+                                           pfr[tk], &prot[tk * 2],
+                                           &prot[tk * 2 + 1], false))
                   pfr[tk] =
                       prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
                           (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
@@ -6079,8 +5929,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                         ti, tj, g_serumData.fwidth, g_serumData.fheight);
                   } else if (!suppressFrameBackgroundImage) {
                     pfr[tk] = frameBackground[tk];
-                    if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                        &prot[tk * 2 + 1], false))
+                    if (ColorInRotationOnPlane(originalPlaneRotates, IDfound,
+                                               pfr[tk], &prot[tk * 2],
+                                               &prot[tk * 2 + 1], false))
                       pfr[tk] =
                           prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
                               (cshft[prot[tk * 2]] + prot[tk * 2 + 1]) %
@@ -6242,8 +6093,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                   ti, tj, g_serumData.fwidth_extra, g_serumData.fheight_extra);
             } else if (!suppressFrameBackgroundImage) {
               pfr[tk] = frameBackgroundExtra[tk];
-              if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                  &prot[tk * 2 + 1], true)) {
+              if (ColorInRotationOnPlane(extraPlaneRotates, IDfound, pfr[tk],
+                                         &prot[tk * 2], &prot[tk * 2 + 1],
+                                         true)) {
                 pfr[tk] =
                     prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
                         (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
@@ -6265,8 +6117,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                                             g_serumData.fheight_extra);
               } else {
                 pfr[tk] = frameColorsExtra[tk];
-                if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                    &prot[tk * 2 + 1], true)) {
+                if (ColorInRotationOnPlane(extraPlaneRotates, IDfound, pfr[tk],
+                                           &prot[tk * 2], &prot[tk * 2 + 1],
+                                           true)) {
                   pfr[tk] =
                       prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
                           (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
@@ -6291,8 +6144,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                         g_serumData.fheight_extra);
                   } else if (!suppressFrameBackgroundImage) {
                     pfr[tk] = frameBackgroundExtra[tk];
-                    if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                        &prot[tk * 2 + 1], true)) {
+                    if (ColorInRotationOnPlane(extraPlaneRotates, IDfound,
+                                               pfr[tk], &prot[tk * 2],
+                                               &prot[tk * 2 + 1], true)) {
                       pfr[tk] =
                           prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
                               (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
@@ -6344,12 +6198,6 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     // was derived from it, and there is no HD content to composite over -- see
     // lastUpscaledSdCrc. Then the plane still holds the answer and is left
     // alone, shadows and all.
-    //
-    // A zeroed table makes every buffer hash alike, so an uninitialized one
-    // would not degrade the reuse test, it would make it always say "same" and
-    // freeze the extra plane on the first frame. Both load paths fill the
-    // table; this costs one branch to not depend on that.
-    if (!crc32_ready) CRC32encode();
     const uint32_t sdCrc =
         mySerum.frame32
             ? crc32_fast((uint8_t*)mySerum.frame32,
@@ -6445,6 +6293,14 @@ void Colorize_Spritev1(uint8_t nosprite, uint16_t frx, uint16_t fry,
   }
 }
 
+// One colour of a sprite: from the array serum_accel::SpriteColourArray()
+// returned, or from the store where it returned null.
+template <typename Store>
+static inline uint16_t SpriteColourAt(const uint16_t* fetched, Store& store,
+                                      uint8_t sprite, uint32_t index) {
+  return fetched ? fetched[index] : store[sprite][index];
+}
+
 void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
                        uint16_t fry, uint16_t spx, uint16_t spy, uint16_t wid,
                        uint16_t hei, uint32_t IDfound) {
@@ -6463,6 +6319,11 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
   // and upscaled once; only genuinely HD-authored static art is drawn
   // natively.
   const bool layerMode = upscaleExtraFromOriginal;
+  // See ColorInRotationOnPlane().
+  const bool originalPlaneRotates =
+      serum_accel::PlaneMayRotate(g_serumData, IDfound, false);
+  const bool extraPlaneRotates =
+      serum_accel::PlaneMayRotate(g_serumData, IDfound, true);
   const bool spriteHasHdArt =
       hasColorExtra && g_serumData.spritemask_extra_opaque.hasData(nosprite);
   if (!hasOpaque) {
@@ -6544,6 +6405,17 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
       prt = g_serumData.colorrotations_v2[IDfound];
       cshft = colorshifts64;
     }
+    // See SpriteColourAt().
+    const uint16_t* spriteColors =
+        hasColor
+            ? serum_accel::SpriteColourArray(
+                  g_serumData, serum_accel::SpriteColours::Colored, nosprite)
+            : nullptr;
+    const uint16_t* spriteDynaColors =
+        hasDynaActive
+            ? serum_accel::SpriteColourArray(
+                  g_serumData, serum_accel::SpriteColours::Dynamic, nosprite)
+            : nullptr;
     for (uint16_t tj = 0; tj < hei; tj++) {
       for (uint16_t ti = 0; ti < wid; ti++) {
         uint16_t tk = (fry + tj) * g_serumData.fwidth + frx + ti;
@@ -6564,20 +6436,20 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
             return;
           }
           if (!hasDynaActive || spriteDynaActive[tl] == 0) {
-            pfr[tk] = g_serumData.spritecolored[nosprite][tl];
-            if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                &prot[tk * 2 + 1], false))
+            pfr[tk] = SpriteColourAt(spriteColors, g_serumData.spritecolored,
+                                     nosprite, tl);
+            if (ColorInRotationOnPlane(originalPlaneRotates, IDfound, pfr[tk],
+                                       &prot[tk * 2], &prot[tk * 2 + 1], false))
               pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
                             (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
                                 prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
           } else {
             const uint8_t dynacouche = spriteDyna[tl];
-            pfr[tk] =
-                g_serumData.dynasprite4cols[nosprite]
-                                           [dynacouche * g_serumData.nocolors +
-                                            oframe[tk]];
-            if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                &prot[tk * 2 + 1], false))
+            pfr[tk] = SpriteColourAt(
+                spriteDynaColors, g_serumData.dynasprite4cols, nosprite,
+                dynacouche * g_serumData.nocolors + oframe[tk]);
+            if (ColorInRotationOnPlane(originalPlaneRotates, IDfound, pfr[tk],
+                                       &prot[tk * 2], &prot[tk * 2 + 1], false))
               pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
                             (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
                                 prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
@@ -6682,6 +6554,17 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
       tspx = spx;
       tspy = spy;
     }
+    const uint16_t* spriteExtraColors =
+        hasColorExtra ? serum_accel::SpriteColourArray(
+                            g_serumData,
+                            serum_accel::SpriteColours::ColoredExtra, nosprite)
+                      : nullptr;
+    const uint16_t* spriteExtraDynaColors =
+        hasExtraDynaActive
+            ? serum_accel::SpriteColourArray(
+                  g_serumData, serum_accel::SpriteColours::DynamicExtra,
+                  nosprite)
+            : nullptr;
     for (uint16_t tj = 0; tj < thei; tj++) {
       for (uint16_t ti = 0; ti < twid; ti++) {
         uint16_t tk = (tfry + tj) * g_serumData.fwidth_extra + tfrx + ti;
@@ -6725,12 +6608,11 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
           // the scaled layer already; leave them alone so that content shows.
           if (layerMode && spritePixelIsDynamic) continue;
           if (!spritePixelIsDynamic) {
-            pfr[tk] =
-                g_serumData.spritecolored_extra[nosprite]
-                                               [(tj + tspy) * MAX_SPRITE_WIDTH +
-                                                ti + tspx];
-            if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                &prot[tk * 2 + 1], true))
+            pfr[tk] = SpriteColourAt(
+                spriteExtraColors, g_serumData.spritecolored_extra, nosprite,
+                (tj + tspy) * MAX_SPRITE_WIDTH + ti + tspx);
+            if (ColorInRotationOnPlane(extraPlaneRotates, IDfound, pfr[tk],
+                                       &prot[tk * 2], &prot[tk * 2 + 1], true))
               pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
                             (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
                                 prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
@@ -6745,11 +6627,11 @@ void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
                                                   tfrx + ti, tfry + tj)
                                : oframe[(tj * 2 + fry) * g_serumData.fwidth +
                                         ti * 2 + frx];
-            pfr[tk] =
-                g_serumData.dynasprite4cols_extra
-                    [nosprite][dynacouche * g_serumData.nocolors + srcShade];
-            if (ColorInRotation(IDfound, pfr[tk], &prot[tk * 2],
-                                &prot[tk * 2 + 1], true))
+            pfr[tk] = SpriteColourAt(
+                spriteExtraDynaColors, g_serumData.dynasprite4cols_extra,
+                nosprite, dynacouche * g_serumData.nocolors + srcShade);
+            if (ColorInRotationOnPlane(extraPlaneRotates, IDfound, pfr[tk],
+                                       &prot[tk * 2], &prot[tk * 2 + 1], true))
               pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
                             (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
                                 prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
@@ -7134,7 +7016,6 @@ static void ForceNormalFrameRefreshAfterSceneEnd(void) {
 // are mixed rather than added so that a change in one cannot cancel a change
 // in the other.
 static uint32_t CurrentOutputCrc(void) {
-  if (!crc32_ready) CRC32encode();
   uint32_t crc = 0;
   if ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) && mySerum.frame32 &&
       mySerum.width32)
@@ -7154,7 +7035,6 @@ static uint32_t CurrentOutputCrc(void) {
 // and rotate differently, and the caller has to hear about the second one or
 // its colours would never start moving.
 static uint32_t CurrentRotationCrc(void) {
-  if (!crc32_ready) CRC32encode();
   const uint32_t bytes =
       MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * sizeof(uint16_t);
   uint32_t crc = 0;
@@ -7241,7 +7121,8 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   } else {
     frameID = Identify_Frame(frame, sceneFrameRequested);
   }
-  if (frame && g_serumData.fwidth > 0 && g_serumData.fheight > 0) {
+  if (DebugInputCrcWanted() && frame && g_serumData.fwidth > 0 &&
+      g_serumData.fheight > 0) {
     g_debugCurrentInputCrc = crc32_fast(frame, NativeFramePixels());
   }
   if (DebugTraceAllInputsEnabled()) {
@@ -7555,12 +7436,22 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
         wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
     memset(nosprite, 255, MAX_SPRITES_PER_FRAME);
 
+    // Sprite detection is timed for the profiler like the stages after it.
+    const auto spriteCheckStart = g_profileDynamicHotPaths
+                                      ? std::chrono::steady_clock::now()
+                                      : std::chrono::steady_clock::time_point{};
     bool isspr = (sceneFrameRequested && !isBackgroundSceneRequested)
                      ? false
                      : Check_Spritesv2(
                            isBackgroundSceneRequested ? lastFrame : frame,
                            isBackgroundSceneRequested ? lastFrameId : lastfound,
                            nosprite, &nspr, frx, fry, spx, spy, wid, hei);
+    if (g_profileDynamicHotPaths) {
+      g_profileCheckSpritesV2Ns +=
+          (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - spriteCheckStart)
+              .count();
+    }
     if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
         FrameHasRenderableContent(lastfound)) {
       const bool profileNow = g_profileDynamicHotPaths;

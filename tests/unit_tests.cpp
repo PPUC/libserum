@@ -13,6 +13,9 @@
 #include <vector>
 
 #include "serum-decode.cpp"
+#ifdef SERUM_ACCEL_REFERENCE_IN_TEST_TU
+#include "serum-accel-ref.cpp"
+#endif
 
 // ---------------------------------------------------------------------------
 // A very small harness. No dependency, no discovery magic: a test is a function
@@ -559,17 +562,21 @@ static void Test_NoRotationWritesBothHalves(void) {
 // nearly every frame to the same slot -- correct, but 22 us a frame instead of
 // 4.8 on a real colorization.
 static void Test_FrameDwordSlotUsesHighBits(void) {
+#ifdef SERUM_ACCEL_REFERENCE_IN_TEST_TU
+  using namespace serum_accel;
   SetUpFrame();
-  AllocateFrameDwordTable(kW, kH);
+  FrameDwordSet& set = frameDwordSets[0];
+  CHECK(AllocateFrameDwordSet(set, kW, kH));
   // Values that differ only high up. Fibonacci hashing carries its entropy
   // upwards, so taking the low bits of the product sends every one of these to
   // the same slot -- still correct, and 22 us a frame instead of 4.8.
-  std::vector<int> used(frameDwordMask + 1, 0);
-  for (uint32_t i = 1; i <= 64; ++i) used[FrameDwordSlot(i << 24)] = 1;
+  std::vector<int> used(set.mask + 1, 0);
+  for (uint32_t i = 1; i <= 64; ++i) used[FrameDwordSlot(set, i << 24)] = 1;
   int distinct = 0;
   for (size_t i = 0; i < used.size(); ++i) distinct += used[i];
   CHECK(distinct > 32);
   TearDownFrame();
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -2322,7 +2329,6 @@ struct Synth {
 
   // The cROM exactly as the editor writes it, header revision 20.
   std::vector<uint8_t> Serialize() const {
-    if (!crc32_ready) CRC32encode();
     std::vector<uint32_t> hashes(nframes);
     const uint32_t hashPx = is256x64 ? kNPx : kOPx;
     for (uint32_t f = 0; f < nframes; ++f) {

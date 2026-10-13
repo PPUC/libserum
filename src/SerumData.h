@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "SceneGenerator.h"
+#include "serum-accel.h"
 #include "serum.h"
 #include "sparse-vector.h"
 
@@ -398,6 +399,7 @@ class SerumData {
         for (const auto &entry : colorRotationEntries) {
           colorRotationLookupByFrameAndColor[entry.key] = entry.value;
         }
+        serum_accel::RotationLookupChanged(*this);
 
         criticalTriggerFramesBySignature.clear();
         criticalTriggerFramesBySignature.reserve(criticalTriggerEntries.size());
