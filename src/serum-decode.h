@@ -58,6 +58,25 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
 SERUM_API Serum_Frame_Struc* Serum_LoadFromMemory(const uint8_t* crom,
                                                   size_t size, uint8_t flags);
 
+/** @brief Load a raw cROM from memory, with the scenes of a pup.csv
+ *
+ * As Serum_LoadFromMemory(), and for a v2 colorization the scenes of the
+ * pup.csv at csvPath are parsed before the lookups are built, in the order
+ * Serum_Load() uses for a pup.csv beside a cROM. An editor that holds its
+ * project in memory gets the scenes the runtime would have. A NULL or empty
+ * csvPath, or one that cannot be parsed, loads without scenes, as
+ * Serum_LoadFromMemory() does.
+ *
+ * @param crom: the cROM bytes
+ * @param size: number of bytes
+ * @param csvPath: the pup.csv to read the scenes from, or NULL
+ * @param flags: as for Serum_Load()
+ *
+ * @return As Serum_LoadFromMemory().
+ */
+SERUM_API Serum_Frame_Struc* Serum_LoadFromMemoryWithScenes(
+    const uint8_t* crom, size_t size, const char* const csvPath, uint8_t flags);
+
 /** @brief Set timeout for skipping unknown frames
  *
  * Unknown frames are ignored until this timeout elapses and a full lookup is

@@ -260,7 +260,9 @@ Important:
     sidecars on load.
 
 ## Loading from memory
-Entry point: `Serum_LoadFromMemory(crom, size, flags)`.
+Entry points: `Serum_LoadFromMemory(crom, size, flags)` and
+`Serum_LoadFromMemoryWithScenes(crom, size, csvPath, flags)`. Both run the
+internal `LoadFromMemory()`; the first passes no `csvPath`.
 
 It takes the bytes of a `cROM` file in a buffer the caller owns. It does not
 go through `Serum_Load()`. The two share three helpers, which hold code moved
@@ -279,8 +281,17 @@ equals `Serum_Load()` of the same bytes as a `.cROM` file with
 
 What differs from `Serum_Load()`:
 - No file is looked up or written: no `cROMc` (neither loaded nor generated),
-  no `*.pup.csv`, no `scaling.txt`, no `skip-cromc.txt`. Scenes are therefore
-  empty, and `scalingAlgorithm` / `shadowOffsetMode` keep their defaults.
+  no `*.pup.csv`, no `scaling.txt`, no `skip-cromc.txt`. `scalingAlgorithm` /
+  `shadowOffsetMode` keep their defaults. Scenes are empty, unless
+  `Serum_LoadFromMemoryWithScenes()` names a `pup.csv`: for a v2 colorization
+  it is parsed after the cROM is read and before `FinishColorizationLoad()`
+  (whose `sceneDataUpdatedFromCsv` it sets), and the scene depth is set from the
+  colour count, in the order `Serum_Load()` uses for a `pup.csv` beside a raw
+  cROM. `BuildFrameLookupVectors()` therefore sees the scenes, and the result
+  equals `Serum_Load()` of the cROM with that `pup.csv` beside it and
+  `Serum_SetGenerateCRomC(false)`. A `NULL` or empty path, or a file that does
+  not parse, loads without scenes. This is an authoring-time path (an editor
+  holding its project in memory); it has no real-machine branch.
 - Only a raw `cROM` is accepted, not a `cROMc` or a `cRZ`.
 - It has no platform branch of its own: the request flags are used as passed,
   and nothing of `Serum_Load()`'s per-platform load policy is applied. The
@@ -1264,7 +1275,8 @@ What `Serum_CRZ_WriteFromFile()` writes:
   - Fatal API-boundary failures are recorded in a process-global message buffer
     exposed through `Serum_GetLastErrorMessage()`.
   - The same buffer carries the reason a `Serum_CRZ_*` call returned `false`
-    or `Serum_LoadFromMemory()` returned `NULL`, on every platform.
+    or `Serum_LoadFromMemory()` / `Serum_LoadFromMemoryWithScenes()` returned
+    `NULL`, on every platform.
   - Those fatal diagnostics are emitted through the configured log callback and
     also mirrored to `stderr` and `OutputDebugStringA`, so crash reasons remain
     visible even when the host does not install a log callback.

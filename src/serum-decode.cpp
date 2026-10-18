@@ -4601,9 +4601,12 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   SERUM_API_GUARD_END("Serum_Load", nullptr)
 }
 
-SERUM_API Serum_Frame_Struc* Serum_LoadFromMemory(const uint8_t* crom,
-                                                  size_t size, uint8_t flags) {
-  SERUM_API_GUARD_START("Serum_LoadFromMemory")
+// Serum_LoadFromMemory() and Serum_LoadFromMemoryWithScenes(): csvPath, when
+// given, is parsed between reading the cROM and FinishColorizationLoad(), as
+// Serum_Load() parses a pup.csv beside a raw cROM.
+static Serum_Frame_Struc* LoadFromMemory(const uint8_t* crom, size_t size,
+                                         const char* const csvPath,
+                                         uint8_t flags) {
   if (!crom || size == 0) {
     Serum_free();
     enabled = false;
@@ -4649,14 +4652,44 @@ SERUM_API Serum_Frame_Struc* Serum_LoadFromMemory(const uint8_t* crom,
     return NULL;
   }
   Log("Loaded cROM from memory (Serum v%d)", g_serumData.SerumVersion);
-  FinishColorizationLoad(false, false, loadTotalStart, 0.0, 0.0, rawLoadMs,
-                         0.0);
+  bool sceneDataUpdatedFromCsv = false;
+  double csvUpdateMs = 0.0;
+  if (csvPath && csvPath[0] != '\0' && g_serumData.SerumVersion == SERUM_V2) {
+    const auto csvStart = g_profileLoadTimes
+                              ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
+    sceneDataUpdatedFromCsv = g_serumData.sceneGenerator->parseCSV(csvPath);
+    if (g_profileLoadTimes) {
+      csvUpdateMs += DurationMs(csvStart, std::chrono::steady_clock::now());
+    }
+    Log(sceneDataUpdatedFromCsv ? "Scenes read from %s"
+                                : "No scenes read from %s",
+        csvPath);
+  }
+  if (g_serumData.sceneGenerator->isActive())
+    g_serumData.sceneGenerator->setDepth(result->nocolors == 16 ? 4 : 2);
+  FinishColorizationLoad(false, sceneDataUpdatedFromCsv, loadTotalStart,
+                         csvUpdateMs, 0.0, rawLoadMs, 0.0);
   Log("Upscaling algorithm: %s (source=%s, extra plane: %s)",
       ScalingAlgorithmName(),
       g_serumData.concentrateFileVersion >= 8 ? "cROMc header" : "default",
       IsExactDoubleExtraPlane() ? "yes" : "no");
   return result;
+}
+
+SERUM_API Serum_Frame_Struc* Serum_LoadFromMemory(const uint8_t* crom,
+                                                  size_t size, uint8_t flags) {
+  SERUM_API_GUARD_START("Serum_LoadFromMemory")
+  return LoadFromMemory(crom, size, NULL, flags);
   SERUM_API_GUARD_END("Serum_LoadFromMemory", nullptr)
+}
+
+SERUM_API Serum_Frame_Struc* Serum_LoadFromMemoryWithScenes(
+    const uint8_t* crom, size_t size, const char* const csvPath,
+    uint8_t flags) {
+  SERUM_API_GUARD_START("Serum_LoadFromMemoryWithScenes")
+  return LoadFromMemory(crom, size, csvPath, flags);
+  SERUM_API_GUARD_END("Serum_LoadFromMemoryWithScenes", nullptr)
 }
 
 // Start of every load, after Serum_free().

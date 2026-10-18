@@ -3845,6 +3845,59 @@ static void Test_MemoryLoadMatchesFileLoad(void) {
   Serum_SetMaximumUnknownFramesToSkip(0);
 }
 
+// Serum_LoadFromMemoryWithScenes(): the scenes of a pup.csv, parsed before the
+// lookups are built, give the state and output of Serum_Load() with the same
+// pup.csv beside the cROM; without a path it is Serum_LoadFromMemory().
+static void Test_MemoryLoadWithScenes(void) {
+  const char* const csv = "7,2,100\n";
+  n256::Synth s;
+  {
+    const std::filesystem::path dir = n256::Dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "scene.csv").string();
+    {
+      std::ofstream out(path);
+      out << csv;
+    }
+    SceneGenerator generator;
+    CHECK(generator.parseCSV(path));
+    generator.setDepth(2);
+    memset(s.Native(n256::kScene), 0, n256::kNPx);
+    CHECK_EQ(generator.generateFrame(7, 1, s.Native(n256::kScene), 1, true),
+             0xffff);
+  }
+  const uint32_t framePixels = s.is256x64 ? n256::kNPx : n256::kOPx;
+  const std::vector<uint8_t> crom = s.Serialize();
+  if (!n256::Load(s, n256::kBothPlanes, false, csv)) return;
+  CHECK(g_serumData.sceneGenerator->isActive());
+  const memload::Capture fromFile = memload::Run(s, framePixels);
+  Serum_Dispose();
+
+  // The pup.csv stays in the test folder; the cROM comes from memory.
+  const std::string csvPath =
+      (n256::Dir() / n256::kRom / (std::string(n256::kRom) + ".pup.csv"))
+          .string();
+  Serum_SetMaximumUnknownFramesToSkip(0);
+  Serum_SetIgnoreUnknownFramesTimeout(0);
+  CHECK(Serum_LoadFromMemoryWithScenes(crom.data(), crom.size(),
+                                       csvPath.c_str(),
+                                       n256::kBothPlanes) == &mySerum);
+  lastTriggerID = 0xffffffff;
+  CHECK(g_serumData.sceneGenerator->isActive());
+  CHECK_EQ(g_serumData.frameIsScene.size(), n256::kFrameCount);
+  if (g_serumData.frameIsScene.size() == n256::kFrameCount)
+    CHECK_EQ(g_serumData.frameIsScene[n256::kScene], 1);
+  CHECK(memload::Run(s, framePixels) == fromFile);
+  Serum_Dispose();
+
+  // No path: as Serum_LoadFromMemory(), without scenes.
+  CHECK(Serum_LoadFromMemoryWithScenes(crom.data(), crom.size(), NULL,
+                                       n256::kBothPlanes) == &mySerum);
+  CHECK(!g_serumData.sceneGenerator->isActive());
+  n256::Unload();
+}
+
 // A buffer has no directory: nothing is written, whatever the cROMc setting.
 static void Test_MemoryLoadWritesNoFile(void) {
   const n256::Synth s;
@@ -4038,6 +4091,7 @@ static const TestCase kTests[] = {
     {"sprite/layer_mode_end_to_end", Test_SpriteInLayerModeEndToEnd},
     {"colorize/monochrome_frame_blocks_reuse", Test_MonochromeFrameBlocksReuse},
     {"memory/matches_file_load", Test_MemoryLoadMatchesFileLoad},
+    {"memory/with_scenes", Test_MemoryLoadWithScenes},
     {"memory/writes_no_file", Test_MemoryLoadWritesNoFile},
     {"memory/failures_are_clean", Test_MemoryLoadFailuresAreClean},
 };
