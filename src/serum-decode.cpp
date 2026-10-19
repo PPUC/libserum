@@ -6,6 +6,7 @@
 #include <miniz/miniz.h>
 
 #include <algorithm>
+#include <bitset>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -5197,6 +5198,10 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
   }
 
   memset(framechecked, false, g_serumData.nframes);
+  // Every frame with the same mask and shape mode gives the same hash, and the
+  // first hash found among the scene signatures ends the search. So a pair
+  // that found nothing is not hashed again.
+  std::bitset<65536> maskShapeChecked;
   do {
     if (g_serumData.frameIsScene[tj] != (sceneFrameRequested ? 1 : 0)) {
       if (++tj >= g_serumData.nframes) tj = 0;
@@ -5207,6 +5212,13 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested) {
       // shapemode of the current crom frame
       uint8_t mask = g_serumData.compmaskID[tj][0];
       uint8_t Shape = g_serumData.shapecompmode[tj][0];
+      const uint16_t maskShape = (uint16_t(mask) << 8) | Shape;
+      if (maskShapeChecked.test(maskShape)) {
+        framechecked[tj] = true;
+        if (++tj >= g_serumData.nframes) tj = 0;
+        continue;
+      }
+      maskShapeChecked.set(maskShape);
       uint32_t Hashc = calc_crc32(frame, mask, pixels, Shape);
       if (DebugIdentifyVerboseEnabled() && DebugTraceMatches(inputCrc, tj)) {
         Log("Serum debug identify seed: inputCrc=%u startFrame=%u "

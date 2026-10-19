@@ -3223,6 +3223,68 @@ static void Test_N256SceneLookup(void) {
   }
 }
 
+// The scene search hashes a ROM frame once per mask and shape mode, not once
+// per scene frame. Scene frames sharing a pair can still be told apart, a pair
+// that found nothing is passed over for the next one, and the search keeps its
+// order and its "same frame" result.
+static void Test_N256SceneSearchByMaskAndShape(void) {
+  const char* const csv = "7,3,100\n";
+  // Scene frames in search order: two share the pair (255, 0), the one
+  // between them has comparison mask 0.
+  const uint32_t sceneFrames[3] = {n256::kMonoTrigger, n256::kScene,
+                                   n256::kBlackTop};
+  n256::Synth s;
+  std::vector<std::vector<uint8_t>> generated;
+  {
+    const std::filesystem::path dir = n256::Dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "scene.csv").string();
+    {
+      std::ofstream out(path);
+      out << csv;
+    }
+    SceneGenerator generator;
+    CHECK(generator.parseCSV(path));
+    generator.setDepth(2);
+    for (uint16_t frameIndex = 0; frameIndex < 3; ++frameIndex) {
+      std::vector<uint8_t> frame(n256::kNPx, 0);
+      CHECK_EQ(generator.generateFrame(7, frameIndex, frame.data(), 1, true),
+               0xffff);
+      memcpy(s.Native(sceneFrames[frameIndex]), frame.data(), n256::kNPx);
+      generated.push_back(frame);
+    }
+  }
+  CHECK(generated[0] != generated[1]);
+  CHECK(generated[1] != generated[2]);
+  s.compmaskid[n256::kMonoTrigger] = 255;
+  s.compmaskid[n256::kScene] = 255;
+  s.compmaskid[n256::kBlackTop] = 0;
+  std::vector<uint8_t> unknown(n256::kNPx, 1);
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, n256::kBothPlanes, viaConcentrate != 0, csv)) continue;
+    for (uint32_t frameId : sceneFrames)
+      CHECK_EQ(g_serumData.frameIsScene[frameId], 1);
+    if (viaConcentrate) {
+      for (uint16_t frameIndex = 0; frameIndex < 3; ++frameIndex) {
+        const auto it = g_serumData.sceneFrameIdByTriplet.find(
+            MakeSceneTripletKey(7, 1, frameIndex));
+        CHECK(it != g_serumData.sceneFrameIdByTriplet.end());
+        if (it != g_serumData.sceneFrameIdByTriplet.end())
+          CHECK_EQ(it->second, sceneFrames[frameIndex]);
+      }
+    }
+    CHECK_EQ(Identify_Frame(generated[1].data(), true), n256::kScene);
+    // From kScene: (255, 0) finds nothing, kMonoTrigger has the same pair and
+    // is passed over, mask 0 finds kBlackTop.
+    CHECK_EQ(Identify_Frame(generated[2].data(), true), n256::kBlackTop);
+    CHECK_EQ(Identify_Frame(generated[0].data(), true), n256::kMonoTrigger);
+    CHECK_EQ(Identify_Frame(generated[0].data(), true), IDENTIFY_SAME_FRAME);
+    CHECK_EQ(Identify_Frame(unknown.data(), true), IDENTIFY_NO_FRAME);
+    n256::Unload();
+  }
+}
+
 // The same file without the flag is an ordinary 128x32 project with a 256x64
 // extra plane, and nothing about it may change: the ROM frame is 128x32, the
 // 128x32 plane is rendered from its own data, the extra plane is the scaled
@@ -4083,6 +4145,7 @@ static const TestCase kTests[] = {
     {"n256/without_extra_data", Test_N256WithoutExtraData},
     {"n256/black_frame_is_judged_whole", Test_N256BlackFrameIsJudgedWhole},
     {"n256/scene_lookup", Test_N256SceneLookup},
+    {"n256/scene_search_by_mask_and_shape", Test_N256SceneSearchByMaskAndShape},
     {"n256/flag_off_is_unchanged", Test_N256FlagOffIsUnchanged},
     {"sprite/drawn_for_64p_only_request", Test_SpriteIsDrawnFor64pOnlyRequest},
     {"sprite/frame_shadow_inside_sprite_region",

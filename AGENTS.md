@@ -335,6 +335,13 @@ Behavior:
 - Runtime normal identification iterates unique `(mask,shape)` buckets in
   frame-order relative to `lastfound_normal`, so frame-order semantics are
   preserved while each bucket hash is computed only once per input frame.
+- Scene identification walks the scene frames in frame order relative to
+  `lastfound_scene` and hashes the input once per `(mask,shape)` pair: a frame
+  whose pair was already hashed without a match is passed over. The first hash
+  found in `sceneFramesBySignature` ends the search, so this gives the same
+  result as hashing every scene frame. The `sceneFrameIdByTriplet` build at
+  load time identifies every scene marker frame this way, so its cost grows
+  with the number of distinct pairs rather than the number of scene frames.
 - Scene rendering can bypass generic scene identification when a direct triplet
   entry exists in `sceneFrameIdByTriplet`.
 - During scene playback, direct-triplet mode uses libserum-owned timing
