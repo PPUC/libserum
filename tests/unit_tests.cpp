@@ -3939,6 +3939,155 @@ static void Test_SceneDataKeepsAutoStartAndEndHold(void) {
   std::filesystem::remove_all(dir);
 }
 
+namespace settings {
+
+// A cROM settings block: the scene of "7,2,100" and the given scaling.
+static std::vector<uint8_t> Block(uint32_t contents, uint8_t algorithm,
+                                  uint8_t shadowOffset) {
+  std::vector<uint8_t> payload;
+  const auto put = [&payload](const void* data, size_t bytes) {
+    const uint8_t* p = (const uint8_t*)data;
+    payload.insert(payload.end(), p, p + bytes);
+  };
+  put(&contents, 4);
+  if (contents & kCromSettingsScenes) {
+    const uint32_t count = 1;
+    const uint16_t scene[3] = {7, 2, 100};
+    const uint8_t flags[7] = {0, 0, 0, 1, 0, 0, 0};
+    put(&count, 4);
+    put(scene, sizeof(scene));
+    put(flags, sizeof(flags));
+  }
+  if (contents & kCromSettingsScaling) {
+    put(&algorithm, 1);
+    put(&shadowOffset, 1);
+  }
+  std::vector<uint8_t> block;
+  const uint32_t magic = kCromSettingsMagic;
+  const uint32_t size = (uint32_t)payload.size();
+  block.insert(block.end(), (const uint8_t*)&magic, (const uint8_t*)&magic + 4);
+  block.insert(block.end(), (const uint8_t*)&size, (const uint8_t*)&size + 4);
+  block.insert(block.end(), payload.begin(), payload.end());
+  return block;
+}
+
+// Writes the cROM with the block appended, a pup.csv naming another scene and a
+// scaling.txt asking for the other settings, and loads it.
+static Serum_Frame_Struc* Load(const std::vector<uint8_t>& crom,
+                               bool viaConcentrate) {
+  const std::filesystem::path dir = n256::Dir();
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir / n256::kRom);
+  WriteTestFile(dir / n256::kRom / (std::string(n256::kRom) + ".cROM"), crom);
+  {
+    std::ofstream out(dir / n256::kRom /
+                      (std::string(n256::kRom) + ".pup.csv"));
+    out << "9,2,100\n";
+  }
+  {
+    std::ofstream out(dir / n256::kRom / "scaling.txt");
+    out << "scale2x\nshadow-offset: native\n";
+  }
+  Serum_SetGenerateCRomC(viaConcentrate);
+  Serum_SetMaximumUnknownFramesToSkip(0);
+  Serum_SetIgnoreUnknownFramesTimeout(0);
+  Serum_Frame_Struc* loaded =
+      Serum_Load(dir.string().c_str(), n256::kRom, n256::kBothPlanes);
+  Serum_SetGenerateCRomC(true);
+  return loaded;
+}
+
+static bool HasScene(uint16_t sceneId) {
+  uint16_t frameCount, duration;
+  bool interruptable, immediate;
+  uint8_t repeat, options;
+  return g_serumData.sceneGenerator->getSceneInfo(
+      sceneId, frameCount, duration, interruptable, immediate, repeat, options);
+}
+
+}  // namespace settings
+
+// The scenes and scaling settings of a cROM's settings block are the
+// colorization's own: a pup.csv or scaling.txt beside it changes neither, in
+// the cROM, in the cROMc made from it, in that cROMc loaded again, or in a
+// load from memory. Without the block, both sidecars apply as before.
+static void Test_CromSettingsBlock(void) {
+  n256::Synth s;
+  {
+    const std::filesystem::path dir = n256::Dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "scene.csv").string();
+    {
+      std::ofstream out(path);
+      out << "7,2,100\n";
+    }
+    SceneGenerator generator;
+    CHECK(generator.parseCSV(path));
+    generator.setDepth(2);
+    memset(s.Native(n256::kScene), 0, n256::kNPx);
+    CHECK_EQ(generator.generateFrame(7, 1, s.Native(n256::kScene), 1, true),
+             0xffff);
+  }
+  std::vector<uint8_t> crom = s.Serialize();
+  const std::vector<uint8_t> block = settings::Block(
+      kCromSettingsScenes | kCromSettingsScaling, SERUM_SCALING_LINE_DOUBLING,
+      SERUM_SHADOW_OFFSET_PROPORTIONAL);
+  crom.insert(crom.end(), block.begin(), block.end());
+  const auto expectBlock = [](void) {
+    CHECK(g_serumData.scenesFromColorization);
+    CHECK(g_serumData.scalingFromColorization);
+    CHECK(settings::HasScene(7));
+    CHECK(!settings::HasScene(9));
+    CHECK_EQ(g_serumData.frameIsScene.size(), n256::kFrameCount);
+    if (g_serumData.frameIsScene.size() == n256::kFrameCount)
+      CHECK_EQ(g_serumData.frameIsScene[n256::kScene], 1);
+    CHECK_EQ(g_serumData.scalingAlgorithm, SERUM_SCALING_LINE_DOUBLING);
+    CHECK_EQ(g_serumData.shadowOffsetMode, SERUM_SHADOW_OFFSET_PROPORTIONAL);
+  };
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
+    expectBlock();
+    if (viaConcentrate) {
+      CHECK_EQ(g_serumData.concentrateFileVersion, SERUM_CONCENTRATE_VERSION);
+      // The cROMc alone, with both sidecars still beside it.
+      Serum_Dispose();
+      std::filesystem::remove(n256::Dir() / n256::kRom /
+                              (std::string(n256::kRom) + ".cROM"));
+      CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
+                       n256::kBothPlanes) != NULL);
+      expectBlock();
+    }
+    Serum_Dispose();
+  }
+  const std::string csvPath =
+      (n256::Dir() / n256::kRom / (std::string(n256::kRom) + ".pup.csv"))
+          .string();
+  CHECK(Serum_LoadFromMemoryWithScenes(crom.data(), crom.size(),
+                                       csvPath.c_str(),
+                                       n256::kBothPlanes) != NULL);
+  expectBlock();
+  Serum_Dispose();
+
+  // A block that sets nothing leaves both sidecars in charge.
+  std::vector<uint8_t> empty = s.Serialize();
+  const std::vector<uint8_t> nothing = settings::Block(0, 0, 0);
+  empty.insert(empty.end(), nothing.begin(), nothing.end());
+  CHECK(settings::Load(empty, false) != NULL);
+  CHECK(!g_serumData.scenesFromColorization);
+  CHECK(!g_serumData.scalingFromColorization);
+  CHECK(settings::HasScene(9));
+  CHECK(!settings::HasScene(7));
+  Serum_Dispose();
+
+  // A block cut short fails the load.
+  std::vector<uint8_t> cut = crom;
+  cut.resize(cut.size() - 3);
+  CHECK(Serum_LoadFromMemory(cut.data(), cut.size(), n256::kBothPlanes) ==
+        NULL);
+  n256::Unload();
+}
+
 // Serum_LoadFromMemoryWithScenes(): the scenes of a pup.csv, parsed before the
 // lookups are built, give the state and output of Serum_Load() with the same
 // pup.csv beside the cROM; without a path it is Serum_LoadFromMemory().
@@ -4188,6 +4337,7 @@ static const TestCase kTests[] = {
     {"memory/matches_file_load", Test_MemoryLoadMatchesFileLoad},
     {"scenes/stored_data_keeps_timers", Test_SceneDataKeepsAutoStartAndEndHold},
     {"memory/with_scenes", Test_MemoryLoadWithScenes},
+    {"crom/settings_block", Test_CromSettingsBlock},
     {"memory/writes_no_file", Test_MemoryLoadWritesNoFile},
     {"memory/failures_are_clean", Test_MemoryLoadFailuresAreClean},
 };

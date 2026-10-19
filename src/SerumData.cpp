@@ -138,6 +138,8 @@ void SerumData::Clear() {
   is256x64 = false;
   scalingAlgorithm = SERUM_SCALING_SCALE2X;
   shadowOffsetMode = SERUM_SHADOW_OFFSET_NATIVE;
+  scenesFromColorization = false;
+  scalingFromColorization = false;
   hashcodes.clear();
   shapecompmode.clear();
   compmaskID.clear();

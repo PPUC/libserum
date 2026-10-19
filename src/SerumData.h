@@ -163,6 +163,11 @@ class SerumData {
   // plane. Persisted from concentrate version 8 on; older archives default to
   // NATIVE, which is what the pre-layer extra-plane renderer produced.
   uint8_t shadowOffsetMode = SERUM_SHADOW_OFFSET_NATIVE;
+  // The scenes and the scaling settings came with the colorization (the
+  // settings block of the cROM): a pup.csv or scaling.txt beside it does not
+  // change them.
+  bool scenesFromColorization = false;
+  bool scalingFromColorization = false;
 
   // Vector data
   SparseVector<uint32_t> hashcodes;
@@ -528,6 +533,9 @@ class SerumData {
       if (concentrateFileVersion >= 8) {
         ar(scalingAlgorithm, shadowOffsetMode);
       }
+      if (concentrateFileVersion >= 9) {
+        ar(scenesFromColorization, scalingFromColorization);
+      }
     } else {
       if (concentrateFileVersion >= 8) {
         ar(scalingAlgorithm, shadowOffsetMode);
@@ -542,6 +550,12 @@ class SerumData {
       } else {
         scalingAlgorithm = SERUM_SCALING_SCALE2X;
         shadowOffsetMode = SERUM_SHADOW_OFFSET_NATIVE;
+      }
+      if (concentrateFileVersion >= 9) {
+        ar(scenesFromColorization, scalingFromColorization);
+      } else {
+        scenesFromColorization = false;
+        scalingFromColorization = false;
       }
     }
   }

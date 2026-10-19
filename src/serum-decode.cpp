@@ -1703,6 +1703,16 @@ static bool ParseScalingAlgorithm(const std::string& value,
   return false;
 }
 
+// A colorization that carries its scenes or scaling settings is not changed by
+// the sidecars.
+static void LogIgnoredSidecars(const std::optional<std::string>& csvFile,
+                               const ScalingSidecar& scaling) {
+  if (csvFile && g_serumData.scenesFromColorization)
+    Log("Scenes from the colorization, %s not read", csvFile->c_str());
+  if (scaling.any() && g_serumData.scalingFromColorization)
+    Log("Scaling settings from the colorization, scaling.txt not applied");
+}
+
 static ScalingSidecar read_scaling_sidecar(const std::string& dirPath) {
   ScalingSidecar result;
   std::optional<std::string> foundFile =
@@ -1919,6 +1929,8 @@ struct FileCRomReader {
   bool readExact(void* dst, size_t bytes) {
     return fread(dst, 1, bytes, stream) == bytes;
   }
+  // As readExact(), for data that may be missing at the end.
+  bool tryReadExact(void* dst, size_t bytes) { return readExact(dst, bytes); }
 };
 
 struct MemoryCRomReader {
@@ -1937,6 +1949,11 @@ struct MemoryCRomReader {
     memcpy(dst, data + offset, bytes);
     offset += bytes;
     return true;
+  }
+  // As readExact(), for data that may be missing at the end: never throws.
+  bool tryReadExact(void* dst, size_t bytes) {
+    if (!data || offset > size || bytes > (size - offset)) return false;
+    return readExact(dst, bytes);
   }
 };
 
@@ -1961,6 +1978,90 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
                                                  const uint8_t loadFlags,
                                                  const uint8_t runtimeFlags,
                                                  uint32_t sizeheader);
+
+// Optional block after the last block of a v2 cROM: the scenes and scaling
+// settings of the colorization, for an editor that keeps them itself. A cROM
+// without it ends before it, and a library that does not know it stops
+// reading before it.
+//   uint32 magic "SCX1", uint32 payload size, then the payload:
+//   uint32 contents: kCromSettingsScenes | kCromSettingsScaling
+//   scenes:  uint32 count, then per scene uint16 sceneId, frameCount,
+//            durationPerFrame and uint8 interruptable, immediateStart, repeat,
+//            frameGroups, random, autoStart, sceneOptions (13 bytes)
+//   scaling: uint8 algorithm, uint8 shadow offset mode
+// Bytes after these are ignored, so fields can be appended to the payload.
+static constexpr uint32_t kCromSettingsMagic = 0x31584353;  // "SCX1"
+static constexpr uint32_t kCromSettingsScenes = 1;
+static constexpr uint32_t kCromSettingsScaling = 2;
+static constexpr uint32_t kCromSettingsSceneBytes = 13;
+static constexpr uint32_t kCromSettingsMaxScenes = 100000;
+static constexpr uint32_t kCromSettingsMaxBytes = 16u << 20;
+
+// Applies the block from the payload; false when it is malformed.
+static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
+  size_t offset = 0;
+  const auto take = [&](void* dst, size_t bytes) {
+    if (bytes > payload.size() - offset) return false;
+    memcpy(dst, payload.data() + offset, bytes);
+    offset += bytes;
+    return true;
+  };
+  uint32_t contents = 0;
+  if (!take(&contents, sizeof(contents))) return false;
+  if (contents & kCromSettingsScenes) {
+    uint32_t count = 0;
+    if (!take(&count, sizeof(count)) || count > kCromSettingsMaxScenes ||
+        (uint64_t)count * kCromSettingsSceneBytes > payload.size() - offset)
+      return false;
+    std::vector<SceneData> scenes(count);
+    for (SceneData& scene : scenes) {
+      uint8_t flags[7];
+      if (!take(&scene.sceneId, sizeof(scene.sceneId)) ||
+          !take(&scene.frameCount, sizeof(scene.frameCount)) ||
+          !take(&scene.durationPerFrame, sizeof(scene.durationPerFrame)) ||
+          !take(flags, sizeof(flags)))
+        return false;
+      scene.interruptable = flags[0] != 0;
+      scene.immediateStart = flags[1] != 0;
+      scene.repeat = flags[2];
+      scene.frameGroups = flags[3] == 0 ? 1 : flags[3];
+      scene.random = flags[4] != 0;
+      scene.autoStart = flags[5];
+      scene.sceneOptions = flags[6];
+    }
+    g_serumData.sceneGenerator->setSceneData(scenes);
+    g_serumData.scenesFromColorization = true;
+  }
+  if (contents & kCromSettingsScaling) {
+    uint8_t scaling[2];
+    if (!take(scaling, sizeof(scaling))) return false;
+    // Two algorithms; anything else reads as the default, as in a cROMc.
+    g_serumData.scalingAlgorithm = scaling[0] == SERUM_SCALING_LINE_DOUBLING
+                                       ? SERUM_SCALING_LINE_DOUBLING
+                                       : SERUM_SCALING_SCALE2X;
+    g_serumData.shadowOffsetMode =
+        scaling[1] == SERUM_SHADOW_OFFSET_PROPORTIONAL
+            ? SERUM_SHADOW_OFFSET_PROPORTIONAL
+            : SERUM_SHADOW_OFFSET_NATIVE;
+    g_serumData.scalingFromColorization = true;
+  }
+  return true;
+}
+
+// Reads the block if the cROM has one; false when it is malformed.
+template <typename Reader>
+static bool ReadCromSettings(Reader& reader) {
+  uint32_t magic = 0;
+  if (!reader.tryReadExact(&magic, sizeof(magic))) return true;
+  if (magic != kCromSettingsMagic) return true;
+  uint32_t size = 0;
+  if (!ReadValue(reader, size) || size > kCromSettingsMaxBytes ||
+      !CountFitsSource(reader, size))
+    return false;
+  std::vector<uint8_t> payload(size);
+  if (size > 0 && !ReadBytes(reader, payload.data(), size)) return false;
+  return ApplyCromSettings(payload);
+}
 
 template <typename Reader>
 static Serum_Frame_Struc* Serum_LoadFilev1Stream(Reader& reader,
@@ -4024,6 +4125,12 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
     g_serumData.sprshapemode.reserve(g_serumData.nsprites);
   }
 
+  if (!ReadCromSettings(reader)) {
+    Log("Invalid settings block in cROM/v2");
+    enabled = false;
+    return NULL;
+  }
+
   g_serumData.BuildPackingSidecarsAndNormalize();
 
   mySerum.ntriggers = 0;
@@ -4429,7 +4536,9 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
           NoteStartupRssSample("after-cromc-load");
           LogLoadedColorizationSource(*pFoundFile, true);
           bool concentrateNeedsRewrite = false;
-          if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 && ([&]() {
+          LogIgnoredSidecars(csvFoundFile, requestedScaling);
+          if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
+              !g_serumData.scenesFromColorization && ([&]() {
                 const auto csvStart =
                     g_profileLoadTimes
                         ? std::chrono::steady_clock::now()
@@ -4446,7 +4555,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
             concentrateNeedsRewrite = true;
             NoteStartupRssSample("after-csv-update");
           }
-          if (requestedScaling.algorithm &&
+          if (!g_serumData.scalingFromColorization &&
+              requestedScaling.algorithm &&
               *requestedScaling.algorithm != g_serumData.scalingAlgorithm) {
             Log("scaling.txt changes the stored scaling algorithm from %u to "
                 "%u",
@@ -4455,7 +4565,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
             g_serumData.scalingAlgorithm = *requestedScaling.algorithm;
             concentrateNeedsRewrite = true;
           }
-          if (requestedScaling.shadowOffsetMode &&
+          if (!g_serumData.scalingFromColorization &&
+              requestedScaling.shadowOffsetMode &&
               *requestedScaling.shadowOffsetMode !=
                   g_serumData.shadowOffsetMode) {
             Log("scaling.txt changes the stored shadow offset from %u to %u",
@@ -4530,7 +4641,9 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     if (result) {
       NoteStartupRssSample("after-crom-load");
       LogLoadedColorizationSource(*pFoundFile, false);
-      if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2) {
+      LogIgnoredSidecars(csvFoundFile, requestedScaling);
+      if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
+          !g_serumData.scenesFromColorization) {
         const auto csvStart = g_profileLoadTimes
                                   ? std::chrono::steady_clock::now()
                                   : std::chrono::steady_clock::time_point{};
@@ -4543,12 +4656,13 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
           NoteStartupRssSample("after-csv-update");
         }
       }
-      if (requestedScaling.algorithm) {
-        // Raw sources carry no scaling settings, so the sidecar is the only
-        // input for the cROMc generated below.
+      if (!g_serumData.scalingFromColorization && requestedScaling.algorithm) {
+        // A raw source without a settings block carries no scaling settings,
+        // so the sidecar is the only input for the cROMc generated below.
         g_serumData.scalingAlgorithm = *requestedScaling.algorithm;
       }
-      if (requestedScaling.shadowOffsetMode) {
+      if (!g_serumData.scalingFromColorization &&
+          requestedScaling.shadowOffsetMode) {
         g_serumData.shadowOffsetMode = *requestedScaling.shadowOffsetMode;
       }
       if (!realMachine) {
@@ -4655,7 +4769,10 @@ static Serum_Frame_Struc* LoadFromMemory(const uint8_t* crom, size_t size,
   Log("Loaded cROM from memory (Serum v%d)", g_serumData.SerumVersion);
   bool sceneDataUpdatedFromCsv = false;
   double csvUpdateMs = 0.0;
-  if (csvPath && csvPath[0] != '\0' && g_serumData.SerumVersion == SERUM_V2) {
+  if (csvPath && csvPath[0] != '\0' && g_serumData.scenesFromColorization) {
+    Log("Scenes from the colorization, %s not read", csvPath);
+  } else if (csvPath && csvPath[0] != '\0' &&
+             g_serumData.SerumVersion == SERUM_V2) {
     const auto csvStart = g_profileLoadTimes
                               ? std::chrono::steady_clock::now()
                               : std::chrono::steady_clock::time_point{};

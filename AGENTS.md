@@ -216,7 +216,10 @@ Requested-output mode:
    - When such a raw source load produces a new `*.cROMc`, libserum reloads
      that generated `*.cROMc` in the same load cycle so first-run behavior
      matches the next boot.
-5. If CSV exists and format is v2, parse scenes via `SceneGenerator::parseCSV`.
+5. If CSV exists and format is v2, parse scenes via `SceneGenerator::parseCSV`,
+   unless the colorization carries its scenes (`scenesFromColorization`, see
+   "cROM settings block"); then the CSV is not read. `scaling.txt` likewise
+   does not apply when `scalingFromColorization` is set.
    - If CSV parsing updates scene data for a loaded `*.cROMc` and runtime
      generation is enabled, libserum rewrites the `*.cROMc` and reloads it in
      the same load cycle so the current process immediately uses the persisted
@@ -292,6 +295,8 @@ What differs from `Serum_Load()`:
   `Serum_SetGenerateCRomC(false)`. A `NULL` or empty path, or a file that does
   not parse, loads without scenes. This is an authoring-time path (an editor
   holding its project in memory); it has no real-machine branch.
+  A cROM with a settings block that carries scenes keeps them: the `pup.csv`
+  is not read.
 - Only a raw `cROM` is accepted, not a `cROMc` or a `cRZ`.
 - It has no platform branch of its own: the request flags are used as passed,
   and nothing of `Serum_Load()`'s per-platform load policy is applied. The
@@ -306,6 +311,28 @@ What differs from `Serum_Load()`:
 - `NULL` or empty input releases the loaded colorization and fails.
 
 The buffer is not kept after the call. Dispose with `Serum_Dispose()`.
+
+## cROM settings block
+A v2 cROM may end with an optional block after its last data block
+(`ReadCromSettings()` / `ApplyCromSettings()` in `serum-decode.cpp`, which
+document the layout): magic `SCX1`, a payload size, then a contents mask
+(`kCromSettingsScenes`, `kCromSettingsScaling`), the scenes (the fields of a
+`pup.csv` line, 13 bytes each) and the scaling algorithm and shadow offset
+mode. An editor that keeps scenes and scaling settings with the project
+writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
+
+- A cROM without the block ends before it; an older library stops reading
+  before it. Bytes after the known payload fields are ignored, so fields can
+  be appended. A block that is cut short or malformed fails the load.
+- Scenes from the block set `scenesFromColorization`, scaling settings set
+  `scalingFromColorization` (also when the block holds zero scenes). Either
+  makes the matching sidecar (`<rom>.pup.csv`, `scaling.txt`) ignored, in the
+  raw load, in the cROMc made from it, and in `Serum_LoadFromMemoryWithScenes()`.
+  A cROM without the block, or a block that does not set a part, keeps the
+  sidecar behaviour for that part.
+- Both flags are stored in the cROMc from concentrate version 9; older cROMcs
+  load with both false and behave as before.
+- A frame group count of 0 is read as 1, as `parseCSV()` reads it.
 
 ## Frame identification
 Main function: `Identify_Frame(uint8_t* frame, bool sceneFrameRequested)`.
@@ -1035,8 +1062,9 @@ With these the `64p` plane is the same picture for a `64p`-only request and a
 `SERUM_SCALING_*` and `SERUM_SHADOW_OFFSET_*` live in `serum.h`; the shared
 implementation is `FrameUtil::ScalingAlgorithm` in libframeutil, fetched into
 `third-party/include` by `platforms/<platform>/<arch>/external.sh`. Both values
-are stored in the `cROMc` header from concentrate version 8 and are overridable
-per colorization through `altcolor/<romname>/scaling.txt`
+are stored in the `cROMc` header from concentrate version 8, can come with the
+cROM's settings block (then nothing overrides them), and are otherwise
+overridable per colorization through `altcolor/<romname>/scaling.txt`
 (`read_scaling_sidecar()`), which is **not** read on a real machine — the stored
 values are authoritative there, matching how `pup.csv` and `skip-cromc.txt` are
 treated.
@@ -1142,7 +1170,9 @@ Finished-scene default behavior:
   scene frame is incomplete/unavailable.
 
 ## cROMc persistence
-Current concentrate version: **6**.
+Current concentrate version: **9**. Version 9 adds `scenesFromColorization`
+and `scalingFromColorization` after the scaling settings of version 8 (see
+"cROM settings block").
 
 `cROMc` stores the full Serum model and supports both Serum v1 and Serum v2
 content. Real-machine policy may still restrict which source formats are
