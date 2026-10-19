@@ -263,9 +263,23 @@ Important:
     sidecars on load.
 
 ## Loading from memory
-Entry points: `Serum_LoadFromMemory(crom, size, flags)` and
-`Serum_LoadFromMemoryWithScenes(crom, size, csvPath, flags)`. Both run the
-internal `LoadFromMemory()`; the first passes no `csvPath`.
+Entry points: `Serum_LoadFromMemory(crom, size, flags)`,
+`Serum_LoadFromMemoryWithScenes(crom, size, csvPath, flags)` and
+`Serum_LoadFromCallback(read, userData, size, csvPath, flags)`. All run the
+internal template `LoadFromReader()`: the first two with a
+`MemoryCRomReader` over the caller's buffer (the first passes no `csvPath`),
+the third with a `CallbackCRomReader`, which pulls the `size` bytes of the cROM
+from `read()` through a 1 MB buffer (larger reads go straight to the
+destination) and never asks for more than `size` bytes in all. A caller can
+therefore serialize a cROM into the load without holding it; a `read()` that
+returns 0 early fails the load as truncated data does.
+
+These loads pack sparse vectors with LZ4's fast mode instead of LZ4 HC
+(`SparseVectorFastPacking()`, set by a scope in `LoadFromReader()` and reset
+after it, also on failure). No cROMc is written from them, the values read back
+are the same, and the HC levels of `Serum_Load()` and of the real machine are
+untouched. A `Serum_SaveConcentrate()` after such a load writes a valid cROMc
+whose packed payloads differ in bytes from one `Serum_Load()` makes.
 
 It takes the bytes of a `cROM` file in a buffer the caller owns. It does not
 go through `Serum_Load()`. The two share three helpers, which hold code moved

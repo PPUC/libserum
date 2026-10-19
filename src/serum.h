@@ -10,6 +10,12 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+// Serum_LoadFromCallback(): puts up to `size` bytes of the cROM into `buffer`
+// and returns how many (at least 1), or 0 when it cannot deliver more.
+typedef size_t(SERUM_CALLBACK* Serum_ReadCallback)(void* userData,
+                                                   uint8_t* buffer,
+                                                   size_t size);
+
 typedef void(SERUM_CALLBACK* Serum_LogCallback)(const char* format,
                                                 va_list args,
                                                 const void* userData);

@@ -107,6 +107,9 @@ and a packing bug corrupts every colorization at once.
 | `crz/failures_are_clean` | a failed read hands back nothing to free and says why; a failed write neither destroys an archive already there nor leaves half of one |
 | `crz/real_archive` | checks nothing unless `SERUM_TEST_CRZ` names a real cRZ, which must then read and survive being written again |
 | `memory/matches_file_load` | `Serum_LoadFromMemory()` gives the same loaded state and the same output as `Serum_Load()` of the same bytes as a `.cROM` file, for a `128x32` and an `is256x64` project and seven request flag combinations |
+| `memory/callback` | `Serum_LoadFromCallback()` gives the state and output of a memory load however the callback cuts the bytes, asks for no byte past the cROM, and fails cleanly on data that ends early |
+| `scenes/stored_data_keeps_timers` | scenes set from stored data (a cROMc load) keep the auto-start scene and the end-hold durations their pup.csv gives |
+| `crom/settings_block` | a cROM settings block gives scenes and scaling that a pup.csv and scaling.txt beside it do not change, in the cROM, its cROMc, that cROMc alone and a memory load; an empty block leaves the sidecars in charge; a cut block fails |
 | `memory/writes_no_file` | a memory load writes nothing, with cROMc generation on |
 | `memory/failures_are_clean` | `NULL`, empty, truncated at any block, impossible element counts, a refused geometry and bytes that are no cROM all return `NULL` with an error message and nothing loaded; a valid load afterwards works |
 | `sidecar/spellings` | every spelling `scaling.txt` advertises, bare and under `scaling:`/`algorithm:` |
@@ -152,6 +155,7 @@ rule each test pins.
 | `n256/without_extra_data` | a frame, a background or a sprite without extra data leaves its frame with no plane for that call, with or without `FALLBACK`: identified, trigger reported, `frame64` untouched, and the next complete frame renders |
 | `n256/black_frame_is_judged_whole` | a frame that is black in its first 4096 bytes and lit below is not a black frame |
 | `n256/scene_lookup` | scene markers are hashed as the marker followed by zeros, at load and at save, without reading past the generated marker |
+| `n256/scene_search_by_mask_and_shape` | the scene search hashes once per mask and shape mode: scene frames sharing a pair are told apart, a pair that found nothing is passed over, order and the same-frame result stay |
 | `n256/flag_off_is_unchanged` | the same file without the flag is an ordinary `128x32` project in layer mode, with its `32p` plane rendered from its own data |
 
 Each was checked the way the section below asks: one mutation at a time on a

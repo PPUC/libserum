@@ -77,6 +77,28 @@ SERUM_API Serum_Frame_Struc* Serum_LoadFromMemory(const uint8_t* crom,
 SERUM_API Serum_Frame_Struc* Serum_LoadFromMemoryWithScenes(
     const uint8_t* crom, size_t size, const char* const csvPath, uint8_t flags);
 
+/** @brief Load a raw cROM that a callback delivers
+ *
+ * As Serum_LoadFromMemoryWithScenes() for the `size` bytes of a cROM that
+ * read() delivers in order, so that the caller never holds the whole cROM: an
+ * editor can write it into the load as it serializes its project. libserum
+ * asks for a few MB at most at a time and never for more than `size` bytes in
+ * all. A read() that returns 0 before all bytes came fails the load as a
+ * truncated cROM does.
+ *
+ * @param read: delivers the bytes, on the calling thread
+ * @param userData: passed to read()
+ * @param size: number of bytes of the cROM
+ * @param csvPath: the pup.csv to read the scenes from, or NULL
+ * @param flags: as for Serum_Load()
+ *
+ * @return As Serum_LoadFromMemory().
+ */
+SERUM_API Serum_Frame_Struc* Serum_LoadFromCallback(Serum_ReadCallback read,
+                                                    void* userData, size_t size,
+                                                    const char* const csvPath,
+                                                    uint8_t flags);
+
 /** @brief Set timeout for skipping unknown frames
  *
  * Unknown frames are ignored until this timeout elapses and a full lookup is

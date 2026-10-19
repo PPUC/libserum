@@ -4141,6 +4141,75 @@ static void Test_MemoryLoadWithScenes(void) {
   n256::Unload();
 }
 
+namespace callbackload {
+
+// Hands out the bytes in pieces of at most `piece`, and ends early at `end`.
+struct Source {
+  const std::vector<uint8_t>* bytes = nullptr;
+  size_t offset = 0;
+  size_t piece = 0;
+  size_t end = 0;
+  size_t largestRequest = 0;
+};
+
+static size_t Read(void* userData, uint8_t* buffer, size_t size) {
+  Source& source = *static_cast<Source*>(userData);
+  source.largestRequest = std::max(source.largestRequest, size);
+  const size_t count =
+      std::min({size, source.piece, source.end - source.offset});
+  memcpy(buffer, source.bytes->data() + source.offset, count);
+  source.offset += count;
+  return count;
+}
+
+}  // namespace callbackload
+
+// Serum_LoadFromCallback(): the same colorization as from memory, however the
+// callback cuts the bytes, without asking for more than the cROM has; one that
+// ends early fails as a truncated cROM does, and leaves nothing loaded.
+static void Test_CallbackLoadMatchesMemoryLoad(void) {
+  const n256::Synth projects[] = {n256::Synth(), memload::Plain128x32()};
+  for (const n256::Synth& s : projects) {
+    const uint32_t framePixels = s.is256x64 ? n256::kNPx : n256::kOPx;
+    const std::vector<uint8_t> crom = s.Serialize();
+    Serum_SetMaximumUnknownFramesToSkip(0);
+    Serum_SetIgnoreUnknownFramesTimeout(0);
+    CHECK(Serum_LoadFromMemory(crom.data(), crom.size(), n256::kBothPlanes) ==
+          &mySerum);
+    lastTriggerID = 0xffffffff;
+    const memload::Capture fromMemory = memload::Run(s, framePixels);
+    Serum_Dispose();
+    CHECK(!SparseVectorFastPacking());
+
+    for (size_t piece : {(size_t)1 << 30, (size_t)4097, (size_t)7}) {
+      callbackload::Source source{&crom, 0, piece, crom.size(), 0};
+      Serum_SetMaximumUnknownFramesToSkip(0);
+      Serum_SetIgnoreUnknownFramesTimeout(0);
+      CHECK(Serum_LoadFromCallback(callbackload::Read, &source, crom.size(),
+                                   NULL, n256::kBothPlanes) == &mySerum);
+      CHECK_EQ(source.offset, crom.size());
+      CHECK(source.largestRequest <= crom.size());
+      lastTriggerID = 0xffffffff;
+      CHECK(memload::Run(s, framePixels) == fromMemory);
+      Serum_Dispose();
+    }
+
+    callbackload::Source cut{&crom, 0, 4096, crom.size() / 2, 0};
+    CHECK(Serum_LoadFromCallback(callbackload::Read, &cut, crom.size(), NULL,
+                                 n256::kBothPlanes) == NULL);
+    CHECK(!cromloaded);
+    CHECK(Serum_GetLastErrorMessage()[0] != '\0');
+    CHECK(!SparseVectorFastPacking());
+    callbackload::Source whole{&crom, 0, 4096, crom.size(), 0};
+    CHECK(Serum_LoadFromCallback(callbackload::Read, &whole, crom.size() / 2,
+                                 NULL, n256::kBothPlanes) == NULL);
+    CHECK(whole.offset <= crom.size() / 2);
+    CHECK(Serum_LoadFromCallback(NULL, NULL, crom.size(), NULL,
+                                 n256::kBothPlanes) == NULL);
+  }
+  n256::Unload();
+}
+
 // A buffer has no directory: nothing is written, whatever the cROMc setting.
 static void Test_MemoryLoadWritesNoFile(void) {
   const n256::Synth s;
@@ -4337,6 +4406,7 @@ static const TestCase kTests[] = {
     {"memory/matches_file_load", Test_MemoryLoadMatchesFileLoad},
     {"scenes/stored_data_keeps_timers", Test_SceneDataKeepsAutoStartAndEndHold},
     {"memory/with_scenes", Test_MemoryLoadWithScenes},
+    {"memory/callback", Test_CallbackLoadMatchesMemoryLoad},
     {"crom/settings_block", Test_CromSettingsBlock},
     {"memory/writes_no_file", Test_MemoryLoadWritesNoFile},
     {"memory/failures_are_clean", Test_MemoryLoadFailuresAreClean},

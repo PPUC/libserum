@@ -18,6 +18,15 @@
 
 bool is_real_machine();
 
+// Whether set() packs with LZ4's fast mode instead of LZ4 HC. For a
+// colorization loaded to be played only (Serum_LoadFromMemory() and the other
+// authoring loads): no cROMc is written from it, and the values read back are
+// the same.
+inline bool &SparseVectorFastPacking() {
+  static bool fast = false;
+  return fast;
+}
+
 namespace sparse_vector_serialization {
 inline bool &LegacyLoadExpectedFlag() {
   static bool flag = false;
@@ -786,13 +795,22 @@ class SparseVector {
           const size_t maxCompressedSize =
               LZ4_compressBound(static_cast<int>(storeByteSize));
           std::vector<uint8_t> compBuffer(maxCompressedSize);
-          const int compressionLevel =
-              is_real_machine() ? LZ4HC_CLEVEL_MIN : LZ4HC_CLEVEL_MAX;
-          int compressedSize = LZ4_compress_HC(
-              reinterpret_cast<const char *>(storeBytes),
-              reinterpret_cast<char *>(compBuffer.data()),
-              static_cast<int>(storeByteSize),
-              static_cast<int>(maxCompressedSize), compressionLevel);
+          int compressedSize = 0;
+          if (SparseVectorFastPacking()) {
+            compressedSize = LZ4_compress_default(
+                reinterpret_cast<const char *>(storeBytes),
+                reinterpret_cast<char *>(compBuffer.data()),
+                static_cast<int>(storeByteSize),
+                static_cast<int>(maxCompressedSize));
+          } else {
+            const int compressionLevel =
+                is_real_machine() ? LZ4HC_CLEVEL_MIN : LZ4HC_CLEVEL_MAX;
+            compressedSize = LZ4_compress_HC(
+                reinterpret_cast<const char *>(storeBytes),
+                reinterpret_cast<char *>(compBuffer.data()),
+                static_cast<int>(storeByteSize),
+                static_cast<int>(maxCompressedSize), compressionLevel);
+          }
 
           if (compressedSize > 0) {
             data[elementId].assign(compBuffer.begin(),

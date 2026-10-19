@@ -1957,8 +1957,70 @@ struct MemoryCRomReader {
   }
 };
 
+// The cROM of Serum_LoadFromCallback(): pulled from the callback through a
+// buffer, so that small reads do not each call it. Short data throws, as for
+// Serum_LoadFromMemory().
+struct CallbackCRomReader {
+  Serum_ReadCallback read = nullptr;
+  void* userData = nullptr;
+  size_t size = 0;
+  // Bytes handed out so far.
+  size_t offset = 0;
+  std::vector<uint8_t> buffer = std::vector<uint8_t>(1u << 20);
+  size_t bufferStart = 0;
+  size_t bufferEnd = 0;
+
+  size_t remaining() const { return size - offset; }
+
+  // Gets up to `bytes` from the callback, never past `size`.
+  size_t pull(uint8_t* dst, size_t bytes) {
+    size_t done = 0;
+    while (done < bytes) {
+      const size_t got = read(userData, dst + done, bytes - done);
+      if (got == 0 || got > bytes - done) break;
+      done += got;
+    }
+    return done;
+  }
+
+  bool readExact(void* dst, size_t bytes) {
+    if (bytes > remaining()) throw std::runtime_error("cROM data is truncated");
+    uint8_t* out = static_cast<uint8_t*>(dst);
+    size_t left = bytes;
+    const size_t buffered = std::min(left, bufferEnd - bufferStart);
+    memcpy(out, buffer.data() + bufferStart, buffered);
+    bufferStart += buffered;
+    out += buffered;
+    left -= buffered;
+    if (left >= buffer.size()) {
+      if (pull(out, left) != left)
+        throw std::runtime_error("cROM data is truncated");
+      left = 0;
+    } else if (left > 0) {
+      // Not yet handed out: what is not in the buffer.
+      const size_t unread = remaining() - buffered;
+      bufferStart = 0;
+      bufferEnd = pull(buffer.data(), std::min(buffer.size(), unread));
+      if (bufferEnd < left) throw std::runtime_error("cROM data is truncated");
+      memcpy(out, buffer.data(), left);
+      bufferStart = left;
+      left = 0;
+    }
+    offset += bytes;
+    return true;
+  }
+  // As readExact(), for data that may be missing at the end: never throws.
+  bool tryReadExact(void* dst, size_t bytes) {
+    if (bytes > remaining()) return false;
+    return readExact(dst, bytes);
+  }
+};
+
 // An element count read from a header cannot exceed the bytes that follow it.
 static bool CountFitsSource(const FileCRomReader&, uint64_t) { return true; }
+static bool CountFitsSource(const CallbackCRomReader& reader, uint64_t count) {
+  return count <= reader.remaining();
+}
 static bool CountFitsSource(const MemoryCRomReader& reader, uint64_t count) {
   return !reader.throwOnShortData || count <= reader.size - reader.offset;
 }
@@ -4716,18 +4778,23 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   SERUM_API_GUARD_END("Serum_Load", nullptr)
 }
 
-// Serum_LoadFromMemory() and Serum_LoadFromMemoryWithScenes(): csvPath, when
+// Fast packing (SparseVectorFastPacking()) for the duration of a load.
+struct FastPackingScope {
+  FastPackingScope() { SparseVectorFastPacking() = true; }
+  ~FastPackingScope() { SparseVectorFastPacking() = false; }
+  FastPackingScope(const FastPackingScope&) = delete;
+  FastPackingScope& operator=(const FastPackingScope&) = delete;
+};
+
+// Serum_LoadFromMemory(), Serum_LoadFromMemoryWithScenes() and
+// Serum_LoadFromCallback(): the cROM comes from the reader. csvPath, when
 // given, is parsed between reading the cROM and FinishColorizationLoad(), as
-// Serum_Load() parses a pup.csv beside a raw cROM.
-static Serum_Frame_Struc* LoadFromMemory(const uint8_t* crom, size_t size,
+// Serum_Load() parses a pup.csv beside a raw cROM. No cROMc is written from
+// these loads, so they pack with LZ4's fast mode.
+template <typename Reader>
+static Serum_Frame_Struc* LoadFromReader(Reader& reader,
                                          const char* const csvPath,
-                                         uint8_t flags) {
-  if (!crom || size == 0) {
-    Serum_free();
-    enabled = false;
-    SetLastErrorMessage("Serum_LoadFromMemory: no data");
-    return NULL;
-  }
+                                         uint8_t flags, const char* api) {
   const bool forceLoadFlags = (flags & FLAG_REQUEST_FORCE) != 0;
   uint8_t runtimeFlags = flags;
   uint8_t loadFlags = runtimeFlags;
@@ -4743,7 +4810,7 @@ static Serum_Frame_Struc* LoadFromMemory(const uint8_t* crom, size_t size,
     loadFlags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
   }
 
-  MemoryCRomReader reader{crom, size, 0, true};
+  const FastPackingScope fastPacking;
   std::string failure = "not a cROM this library can load";
   Serum_Frame_Struc* result = NULL;
   double rawLoadMs = 0.0;
@@ -4762,11 +4829,11 @@ static Serum_Frame_Struc* LoadFromMemory(const uint8_t* crom, size_t size,
   if (!result) {
     Serum_free();
     enabled = false;
-    Log("Failed to load cROM from memory: %s", failure.c_str());
-    SetLastErrorMessage("Serum_LoadFromMemory: %s", failure.c_str());
+    Log("Failed to load cROM (%s): %s", api, failure.c_str());
+    SetLastErrorMessage("%s: %s", api, failure.c_str());
     return NULL;
   }
-  Log("Loaded cROM from memory (Serum v%d)", g_serumData.SerumVersion);
+  Log("Loaded cROM through %s (Serum v%d)", api, g_serumData.SerumVersion);
   bool sceneDataUpdatedFromCsv = false;
   double csvUpdateMs = 0.0;
   if (csvPath && csvPath[0] != '\0' && g_serumData.scenesFromColorization) {
@@ -4795,6 +4862,19 @@ static Serum_Frame_Struc* LoadFromMemory(const uint8_t* crom, size_t size,
   return result;
 }
 
+static Serum_Frame_Struc* LoadFromMemory(const uint8_t* crom, size_t size,
+                                         const char* const csvPath,
+                                         uint8_t flags) {
+  if (!crom || size == 0) {
+    Serum_free();
+    enabled = false;
+    SetLastErrorMessage("Serum_LoadFromMemory: no data");
+    return NULL;
+  }
+  MemoryCRomReader reader{crom, size, 0, true};
+  return LoadFromReader(reader, csvPath, flags, "Serum_LoadFromMemory");
+}
+
 SERUM_API Serum_Frame_Struc* Serum_LoadFromMemory(const uint8_t* crom,
                                                   size_t size, uint8_t flags) {
   SERUM_API_GUARD_START("Serum_LoadFromMemory")
@@ -4808,6 +4888,25 @@ SERUM_API Serum_Frame_Struc* Serum_LoadFromMemoryWithScenes(
   SERUM_API_GUARD_START("Serum_LoadFromMemoryWithScenes")
   return LoadFromMemory(crom, size, csvPath, flags);
   SERUM_API_GUARD_END("Serum_LoadFromMemoryWithScenes", nullptr)
+}
+
+SERUM_API Serum_Frame_Struc* Serum_LoadFromCallback(Serum_ReadCallback read,
+                                                    void* userData, size_t size,
+                                                    const char* const csvPath,
+                                                    uint8_t flags) {
+  SERUM_API_GUARD_START("Serum_LoadFromCallback")
+  if (!read || size == 0) {
+    Serum_free();
+    enabled = false;
+    SetLastErrorMessage("Serum_LoadFromCallback: no data");
+    return NULL;
+  }
+  CallbackCRomReader reader;
+  reader.read = read;
+  reader.userData = userData;
+  reader.size = size;
+  return LoadFromReader(reader, csvPath, flags, "Serum_LoadFromCallback");
+  SERUM_API_GUARD_END("Serum_LoadFromCallback", nullptr)
 }
 
 // Start of every load, after Serum_free().

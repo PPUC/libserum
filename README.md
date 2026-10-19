@@ -90,6 +90,11 @@ with cROMc generation off, takes the same flags, and reads or writes no file:
 no `cROMc`, no `*.pup.csv`, no `scaling.txt`. It returns `NULL` on failure, with
 the reason in `Serum_GetLastErrorMessage()`. Release with `Serum_Dispose()`.
 
+`Serum_LoadFromCallback(read, userData, size, csvPath, flags)` loads a `cROM`
+of `size` bytes that a callback delivers in order, so that the caller never
+holds the whole file: an editor can serialize its project straight into the
+load.
+
 ## cRZ Archives
 
 A `cRZ` is a zip archive holding one `cROM`. Besides loading one through
