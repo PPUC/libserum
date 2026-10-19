@@ -150,6 +150,25 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
   return true;
 }
 
+void SceneGenerator::setSceneData(const std::vector<SceneData> &data) {
+  Reset();
+  m_sceneData = data;
+  for (const SceneData &scene : m_sceneData) {
+    // As parseCSV() reads the autostart column, which is stored clamped.
+    const bool useAutoStartAsEndHold =
+        scene.autoStart > 0 && !scene.interruptable &&
+        ((scene.sceneOptions & FLAG_SCENE_FINISH_MODE_MASK) == 0);
+    if (useAutoStartAsEndHold) {
+      m_sceneEndHoldDurationMs[scene.sceneId] =
+          (uint32_t)scene.autoStart * 1000;
+    } else if (scene.autoStart > 0) {
+      m_autoStartTimer = scene.autoStart;
+      m_autoStartSceneId = scene.sceneId;
+    }
+  }
+  m_active = !m_sceneData.empty();
+}
+
 bool SceneGenerator::generateDump(const std::string &dump_filename, int id) {
   std::ofstream out_dump(dump_filename, std::ios::binary);
   if (!out_dump.is_open()) {

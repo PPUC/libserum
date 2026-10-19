@@ -3907,6 +3907,38 @@ static void Test_MemoryLoadMatchesFileLoad(void) {
   Serum_SetMaximumUnknownFramesToSkip(0);
 }
 
+// Scenes set from stored data, as a cROMc load does, start a scene after
+// inactivity and hold a last frame as the pup.csv they came from does.
+static void Test_SceneDataKeepsAutoStartAndEndHold(void) {
+  const std::filesystem::path dir = n256::Dir();
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  const std::string path = (dir / "scene.csv").string();
+  {
+    std::ofstream out(path);
+    out << "5,2,100,1,0,0,1,0,7,0\n6,2,100,0,0,0,1,0,3,0\n";
+  }
+  SceneGenerator parsed;
+  CHECK(parsed.parseCSV(path));
+  CHECK_EQ(parsed.getAutoStartTimer(), 7000u);
+  CHECK_EQ(parsed.getAutoStartSceneId(), 5);
+  SceneGenerator stored;
+  stored.setSceneData(parsed.getSceneData());
+  CHECK(stored.isActive());
+  CHECK_EQ(stored.getAutoStartTimer(), parsed.getAutoStartTimer());
+  CHECK_EQ(stored.getAutoStartSceneId(), parsed.getAutoStartSceneId());
+  for (uint16_t sceneId : {5, 6}) {
+    uint32_t parsedMs = 0, storedMs = 0;
+    CHECK_EQ(stored.getSceneEndHoldDurationMs(sceneId, storedMs),
+             parsed.getSceneEndHoldDurationMs(sceneId, parsedMs));
+    CHECK_EQ(storedMs, parsedMs);
+  }
+  uint32_t holdMs = 0;
+  CHECK(stored.getSceneEndHoldDurationMs(6, holdMs));
+  CHECK_EQ(holdMs, 3000u);
+  std::filesystem::remove_all(dir);
+}
+
 // Serum_LoadFromMemoryWithScenes(): the scenes of a pup.csv, parsed before the
 // lookups are built, give the state and output of Serum_Load() with the same
 // pup.csv beside the cROM; without a path it is Serum_LoadFromMemory().
@@ -4154,6 +4186,7 @@ static const TestCase kTests[] = {
     {"sprite/layer_mode_end_to_end", Test_SpriteInLayerModeEndToEnd},
     {"colorize/monochrome_frame_blocks_reuse", Test_MonochromeFrameBlocksReuse},
     {"memory/matches_file_load", Test_MemoryLoadMatchesFileLoad},
+    {"scenes/stored_data_keeps_timers", Test_SceneDataKeepsAutoStartAndEndHold},
     {"memory/with_scenes", Test_MemoryLoadWithScenes},
     {"memory/writes_no_file", Test_MemoryLoadWritesNoFile},
     {"memory/failures_are_clean", Test_MemoryLoadFailuresAreClean},

@@ -79,11 +79,9 @@ class SceneGenerator {
     initializeTemplate();
     m_active = false;
   }
-  void setSceneData(const std::vector<SceneData> &data) {
-    Reset();
-    m_sceneData = data;
-    m_active = !m_sceneData.empty();
-  }
+  // Scenes as parseCSV() leaves them, the auto-start scene and the end-hold
+  // durations included.
+  void setSceneData(const std::vector<SceneData> &data);
   const std::vector<SceneData> &getSceneData() const { return m_sceneData; }
 
  private:

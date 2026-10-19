@@ -1188,6 +1188,10 @@ Stored in v6:
     `spriteOpaqueSegments`
 - Scene data block uses guarded encoding (`SCD1` magic + bounded count) to
   prevent unbounded allocations on corrupted/misaligned input.
+- Loading the scene data block goes through `SceneGenerator::setSceneData()`,
+  which derives the auto-start scene and the end-hold durations from the
+  stored `autoStart` values as `parseCSV()` does, so a `cROMc` loaded without
+  a `pup.csv` keeps them.
 - Sparse vectors in packed sparse layout.
 - Normalized sentinel vectors plus sidecar flag vectors for transparency and
   dynamic-zone activity.
