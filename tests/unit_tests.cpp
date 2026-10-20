@@ -4152,7 +4152,8 @@ struct Source {
   size_t largestRequest = 0;
 };
 
-static size_t Read(void* userData, uint8_t* buffer, size_t size) {
+static size_t SERUM_CALLBACK Read(void* userData, uint8_t* buffer,
+                                  size_t size) {
   Source& source = *static_cast<Source*>(userData);
   source.largestRequest = std::max(source.largestRequest, size);
   const size_t count =
