@@ -348,6 +348,36 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
   load with both false and behave as before.
 - A frame group count of 0 is read as 1, as `parseCSV()` reads it.
 
+## cROM format version, sprites per frame and sprite IDs
+The cROM header carries no explicit version before header revision 21: the
+`sizeheader` field (`N * 4`) gates the fields read after it, and a reader
+cannot skip header fields it does not know. From revision 21
+(`sizeheader >= 21 * 4`) the header ends with:
+
+- `uint32 formatVersion` after `is256x64`. A cROM without it is version 0. A
+  version above `SERUM_CROM_FORMAT_VERSION` (serum-version.h) is refused with a
+  log line instead of being misread.
+- From version 1 on, `uint32 spritesPerFrame` (1 to `MAX_SPRITES_PER_FRAME`).
+
+Format version 1 stores the `framesprites` block with `spritesPerFrame` slots
+of 16-bit sprite IDs (`SERUM_NO_SPRITE`, 0xffff, for an empty slot) and the
+`framespriteBB` block with `spritesPerFrame * 4` values. Version 0 and the v1
+(Serum 1) format have `LEGACY_SPRITES_PER_FRAME` (32) slots of 8-bit IDs (255
+for empty), widened to 16 bit while loading (`SerumData::WidenFrameSprites()`).
+
+Runtime rules:
+- `framesprites` is `SparseVector<uint16_t>` in memory whatever the source;
+  `spriteCandidateIds` is `uint16_t`. Sprite IDs reach 65534, so a project is
+  no longer limited to 255 sprites. Background IDs were 16 bit already
+  (`MAX_BACKGROUND_IMAGES` is 65535).
+- `SerumData::SpritesPerFrame()` (the slots of the loaded colorization, from
+  `framesprites`' values per element) bounds every loop over a frame's slots.
+  `MAX_SPRITES_PER_FRAME` (128) only sizes arrays and caps the matches of one
+  frame; never loop to it over stored slots, old files have 32.
+- A frame's slots are filled from the first on: the first empty slot ends them.
+- More than 32 sprites per frame can make sprite detection noticeably slower;
+  the editor warns its author about it.
+
 ## Frame identification
 Main function: `Identify_Frame(uint8_t* frame, bool sceneFrameRequested)`.
 
@@ -1184,9 +1214,11 @@ Finished-scene default behavior:
   scene frame is incomplete/unavailable.
 
 ## cROMc persistence
-Current concentrate version: **9**. Version 9 adds `scenesFromColorization`
-and `scalingFromColorization` after the scaling settings of version 8 (see
-"cROM settings block").
+Current concentrate version: **10**. Version 10 stores `framesprites` and
+`spriteCandidateIds` with 16-bit sprite IDs and the slot count of the
+colorization (see "cROM format version, sprites per frame and sprite IDs").
+Version 9 adds `scenesFromColorization` and `scalingFromColorization` after
+the scaling settings of version 8 (see "cROM settings block").
 
 `cROMc` stores the full Serum model and supports both Serum v1 and Serum v2
 content. Real-machine policy may still restrict which source formats are
@@ -1242,6 +1274,12 @@ Stored in v6:
 
 Backward compatibility:
 - v5 files are loadable.
+- Before version 10, `framesprites` (32 slots) and `spriteCandidateIds` are
+  stored with 8-bit IDs. `SerumData::serialize()` reads them as such and
+  widens them to 16 bit in the archive load itself (a version-gated step of the
+  deserialization, no later repair). `NarrowFrameSprites()` writes them that
+  way when `concentrateFileVersion` is set below 10 (tests of the older
+  versions only); it throws for a colorization that does not fit.
 - v5 sparse vectors are deserialized with legacy sparse-vector layout and converted to packed representation after load.
 - For v5 loads, scene lookup vectors and other derived runtime sidecars may be rebuilt at startup.
 - For direct `v6` loads, stored runtime sidecars are expected to be consumed as

@@ -1264,11 +1264,12 @@ static void DebugLogFrameMetadataIfRequested(uint32_t frameId) {
       frameId, mask, shape, hash, active, triggerId, backgroundId, isExtra,
       hasDynamic, hasDynamicExtra, isScene);
 
-  const uint8_t* spriteSlots = g_serumData.framesprites[frameId];
+  const uint16_t* spriteSlots = g_serumData.framesprites[frameId];
   const uint16_t* spriteBB = g_serumData.framespriteBB[frameId];
   uint32_t spriteCount = 0;
-  for (uint32_t i = 0; i < MAX_SPRITES_PER_FRAME; ++i) {
-    if (spriteSlots[i] >= 255) {
+  const uint32_t slots = g_serumData.SpritesPerFrame();
+  for (uint32_t i = 0; i < slots; ++i) {
+    if (spriteSlots[i] == SERUM_NO_SPRITE) {
       break;
     }
     ++spriteCount;
@@ -1279,7 +1280,7 @@ static void DebugLogFrameMetadataIfRequested(uint32_t frameId) {
   }
 
   for (uint32_t i = 0; i < spriteCount; ++i) {
-    const uint8_t spriteId = spriteSlots[i];
+    const uint16_t spriteId = spriteSlots[i];
     const uint8_t usesShape = (spriteId < g_serumData.spriteUsesShape.size())
                                   ? g_serumData.spriteUsesShape[spriteId]
                                   : g_serumData.sprshapemode[spriteId][0];
@@ -1454,7 +1455,7 @@ static void DebugLogSpriteCheckStart(uint32_t frameId, uint32_t candidateCount,
       frameHasShapeCandidates ? "true" : "false");
 }
 
-static void DebugLogSpriteCandidate(uint32_t frameId, uint8_t spriteId,
+static void DebugLogSpriteCandidate(uint32_t frameId, uint16_t spriteId,
                                     uint8_t spriteSlot, bool usesShape,
                                     uint32_t detectCount, short minxBB,
                                     short minyBB, short maxxBB, short maxyBB,
@@ -1469,7 +1470,7 @@ static void DebugLogSpriteCandidate(uint32_t frameId, uint8_t spriteId,
       spriteWidth, spriteHeight);
 }
 
-static void DebugLogSpriteDetectionWord(uint32_t frameId, uint8_t spriteId,
+static void DebugLogSpriteDetectionWord(uint32_t frameId, uint16_t spriteId,
                                         uint32_t detectionIndex,
                                         uint32_t detectionWord, short frax,
                                         short fray, short offsx, short offsy,
@@ -1483,7 +1484,7 @@ static void DebugLogSpriteDetectionWord(uint32_t frameId, uint8_t spriteId,
       frax, fray, offsx, offsy, detw, deth);
 }
 
-static void DebugLogSpriteRejected(uint32_t frameId, uint8_t spriteId,
+static void DebugLogSpriteRejected(uint32_t frameId, uint16_t spriteId,
                                    uint8_t spriteSlot, const char* reason,
                                    uint32_t detectionIndex, short frax,
                                    short fray, short offsx, short offsy,
@@ -1500,7 +1501,7 @@ static void DebugLogSpriteRejected(uint32_t frameId, uint8_t spriteId,
       detailD);
 }
 
-static void DebugLogSpriteAccepted(uint32_t frameId, uint8_t spriteId,
+static void DebugLogSpriteAccepted(uint32_t frameId, uint16_t spriteId,
                                    uint8_t spriteSlot, uint16_t frameX,
                                    uint16_t frameY, uint16_t spriteX,
                                    uint16_t spriteY, uint16_t width,
@@ -3975,6 +3976,30 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
     }
     g_serumData.is256x64 = (is256x64 != 0);
   }
+  // Header revision 21 on: the format version, and from version 1 on the
+  // sprite slots of a frame. A cROM without them is version 0 with
+  // LEGACY_SPRITES_PER_FRAME slots of 8-bit sprite IDs.
+  uint32_t formatVersion = 0;
+  uint32_t spritesPerFrame = LEGACY_SPRITES_PER_FRAME;
+  if (sizeheader >= 21 * sizeof(uint32_t)) {
+    if (!ReadValue(reader, formatVersion)) {
+      enabled = false;
+      return NULL;
+    }
+    if (formatVersion > SERUM_CROM_FORMAT_VERSION) {
+      Log("The cROM has format version %u; this libserum reads up to %u",
+          formatVersion, SERUM_CROM_FORMAT_VERSION);
+      enabled = false;
+      return NULL;
+    }
+    if (formatVersion >= 1 &&
+        (!ReadValue(reader, spritesPerFrame) || spritesPerFrame == 0 ||
+         spritesPerFrame > MAX_SPRITES_PER_FRAME)) {
+      Log("Invalid number of sprites per frame in cROM/v2");
+      enabled = false;
+      return NULL;
+    }
+  }
   if (!ValidateNativeGeometry("cROM/v2")) {
     enabled = false;
     return NULL;
@@ -4073,8 +4098,15 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
       reader, &g_serumData.isextraframe);
   g_serumData.isextrasprite.readFromCRomReader(1, g_serumData.nsprites, reader);
   if (!loadExtraDataRequested) g_serumData.isextrasprite.clearIndex();
-  g_serumData.framesprites.readFromCRomReader(MAX_SPRITES_PER_FRAME,
-                                              g_serumData.nframes, reader);
+  if (formatVersion >= 1) {
+    g_serumData.framesprites.readFromCRomReader(spritesPerFrame,
+                                                g_serumData.nframes, reader);
+  } else {
+    SparseVector<uint8_t> legacy(255);
+    legacy.readFromCRomReader(LEGACY_SPRITES_PER_FRAME, g_serumData.nframes,
+                              reader);
+    g_serumData.WidenFrameSprites(legacy);
+  }
   g_serumData.spriteoriginal.readFromCRomReader(
       MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites, reader);
   g_serumData.spritecolored.readFromCRomReader(
@@ -4099,7 +4131,7 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
   g_serumData.spritedetareas.readFromCRomReader(4 * MAX_SPRITE_DETECT_AREAS,
                                                 g_serumData.nsprites, reader);
   g_serumData.triggerIDs.readFromCRomReader(1, g_serumData.nframes, reader);
-  g_serumData.framespriteBB.readFromCRomReader(MAX_SPRITES_PER_FRAME * 4,
+  g_serumData.framespriteBB.readFromCRomReader(spritesPerFrame * 4,
                                                g_serumData.nframes, reader,
                                                &g_serumData.framesprites);
   g_serumData.isextrabackground.readFromCRomReader(1, g_serumData.nbackgrounds,
@@ -4349,8 +4381,13 @@ static Serum_Frame_Struc* Serum_LoadFilev1Stream(Reader& reader,
   g_serumData.dyna4cols.readFromCRomReader(
       MAX_DYNA_4COLS_PER_FRAME * g_serumData.nocolors, g_serumData.nframes,
       reader);
-  g_serumData.framesprites.readFromCRomReader(MAX_SPRITES_PER_FRAME,
-                                              g_serumData.nframes, reader);
+  // A v1 cROM has LEGACY_SPRITES_PER_FRAME slots of 8-bit sprite IDs.
+  {
+    SparseVector<uint8_t> legacy(255);
+    legacy.readFromCRomReader(LEGACY_SPRITES_PER_FRAME, g_serumData.nframes,
+                              reader);
+    g_serumData.WidenFrameSprites(legacy);
+  }
 
   for (int ti = 0;
        ti < (int)g_serumData.nsprites * MAX_SPRITE_SIZE * MAX_SPRITE_SIZE;
@@ -4428,20 +4465,20 @@ static Serum_Frame_Struc* Serum_LoadFilev1Stream(Reader& reader,
       mySerum.ntriggers++;
   }
   if (sizeheader >= 12 * sizeof(uint32_t))
-    g_serumData.framespriteBB.readFromCRomReader(MAX_SPRITES_PER_FRAME * 4,
+    g_serumData.framespriteBB.readFromCRomReader(LEGACY_SPRITES_PER_FRAME * 4,
                                                  g_serumData.nframes, reader,
                                                  &g_serumData.framesprites);
   else {
     for (uint32_t tj = 0; tj < g_serumData.nframes; tj++) {
-      uint16_t tmp_framespriteBB[4 * MAX_SPRITES_PER_FRAME];
-      for (uint32_t ti = 0; ti < MAX_SPRITES_PER_FRAME; ti++) {
+      uint16_t tmp_framespriteBB[4 * LEGACY_SPRITES_PER_FRAME];
+      for (uint32_t ti = 0; ti < LEGACY_SPRITES_PER_FRAME; ti++) {
         tmp_framespriteBB[ti * 4] = 0;
         tmp_framespriteBB[ti * 4 + 1] = 0;
         tmp_framespriteBB[ti * 4 + 2] = g_serumData.fwidth - 1;
         tmp_framespriteBB[ti * 4 + 3] = g_serumData.fheight - 1;
       }
       g_serumData.framespriteBB.set(tj, tmp_framespriteBB,
-                                    MAX_SPRITES_PER_FRAME * 4);
+                                    LEGACY_SPRITES_PER_FRAME * 4);
     }
   }
   if (sizeheader >= 13 * sizeof(uint32_t)) {
@@ -5551,9 +5588,10 @@ static uint32_t BuildRuntimeFeatureFlags(uint32_t frameId) {
     featureFlags |= SERUM_RUNTIME_FEATURE_DYNAMIC_EXTRA;
   }
 
-  for (uint8_t spriteIndex = 0; spriteIndex < MAX_SPRITES_PER_FRAME;
-       ++spriteIndex) {
-    if (g_serumData.framesprites[frameId][spriteIndex] < 255) {
+  const uint32_t spriteSlots = g_serumData.SpritesPerFrame();
+  const uint16_t* frameSprites = g_serumData.framesprites[frameId];
+  for (uint32_t spriteIndex = 0; spriteIndex < spriteSlots; ++spriteIndex) {
+    if (frameSprites[spriteIndex] != SERUM_NO_SPRITE) {
       featureFlags |= SERUM_RUNTIME_FEATURE_SPRITES;
       break;
     }
@@ -5585,7 +5623,7 @@ static uint32_t BuildRuntimeFeatureFlags(uint32_t frameId) {
   return featureFlags;
 }
 
-void GetSpriteSize(uint8_t nospr, int* pswid, int* pshei,
+void GetSpriteSize(uint16_t nospr, int* pswid, int* pshei,
                    const uint8_t* spriteData, int sswid, int sshei,
                    const uint8_t* spriteOpaque) {
   *pswid = *pshei = 0;
@@ -5604,15 +5642,16 @@ void GetSpriteSize(uint8_t nospr, int* pswid, int* pshei,
 }
 
 bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
-                     uint8_t* pquelsprites, uint8_t* nspr, uint16_t* pfrx,
+                     uint16_t* pquelsprites, uint8_t* nspr, uint16_t* pfrx,
                      uint16_t* pfry, uint16_t* pspx, uint16_t* pspy,
                      uint16_t* pwid, uint16_t* phei) {
-  uint8_t ti = 0;
+  uint32_t ti = 0;
   uint32_t mdword;
   *nspr = 0;
-  while ((ti < MAX_SPRITES_PER_FRAME) &&
-         (g_serumData.framesprites[quelleframe][ti] < 255)) {
-    uint8_t qspr = g_serumData.framesprites[quelleframe][ti];
+  const uint32_t slots = g_serumData.SpritesPerFrame();
+  while ((ti < slots) &&
+         (g_serumData.framesprites[quelleframe][ti] != SERUM_NO_SPRITE)) {
+    uint16_t qspr = g_serumData.framesprites[quelleframe][ti];
     if (!g_serumData.spritedescriptionso.hasData(qspr) ||
         !g_serumData.spritedescriptionso_opaque.hasData(qspr)) {
       ti++;
@@ -5738,7 +5777,7 @@ bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
 }
 
 bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
-                     uint8_t* pquelsprites, uint8_t* nspr, uint16_t* pfrx,
+                     uint16_t* pquelsprites, uint8_t* nspr, uint16_t* pfrx,
                      uint16_t* pfry, uint16_t* pspx, uint16_t* pspy,
                      uint16_t* pwid, uint16_t* phei) {
   *nspr = 0;
@@ -5779,12 +5818,12 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
       g_serumData.frameHasShapeSprite[quelleframe] > 0;
   const uint32_t candidateCount = hasCandidateSidecars
                                       ? (candidateEnd - candidateStart)
-                                      : MAX_SPRITES_PER_FRAME;
+                                      : g_serumData.SpritesPerFrame();
   DebugLogSpriteCheckStart(quelleframe, candidateCount, hasCandidateSidecars,
                            frameHasShapeCandidates);
   for (uint32_t candidateIndex = 0; candidateIndex < candidateCount;
        ++candidateIndex) {
-    uint8_t qspr = 255;
+    uint16_t qspr = SERUM_NO_SPRITE;
     uint8_t spriteSlot = 0;
     if (hasCandidateSidecars) {
       qspr = g_serumData.spriteCandidateIds[candidateStart + candidateIndex];
@@ -5792,12 +5831,13 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
           g_serumData.spriteCandidateSlots[candidateStart + candidateIndex];
     } else {
       qspr = g_serumData.framesprites[quelleframe][candidateIndex];
-      if (qspr >= 255) {
+      if (qspr == SERUM_NO_SPRITE) {
         break;
       }
       spriteSlot = static_cast<uint8_t>(candidateIndex);
     }
-    if (qspr >= g_serumData.nsprites || spriteSlot >= MAX_SPRITES_PER_FRAME) {
+    if (qspr >= g_serumData.nsprites ||
+        spriteSlot >= g_serumData.SpritesPerFrame()) {
       continue;
     }
 
@@ -6030,9 +6070,11 @@ bool CheckExtraFrameAvailable(uint32_t frID) {
   if (g_serumData.backgroundIDs[frID][0] < 0xffff &&
       g_serumData.isextrabackground[g_serumData.backgroundIDs[frID][0]][0] == 0)
     return false;
-  for (uint32_t ti = 0; ti < MAX_SPRITES_PER_FRAME; ti++) {
-    if (g_serumData.framesprites[frID][ti] < 255 &&
-        g_serumData.isextrasprite[g_serumData.framesprites[frID][ti]][0] == 0)
+  const uint32_t slots = g_serumData.SpritesPerFrame();
+  for (uint32_t ti = 0; ti < slots; ti++) {
+    const uint16_t spriteId = g_serumData.framesprites[frID][ti];
+    if (spriteId != SERUM_NO_SPRITE && spriteId < g_serumData.nsprites &&
+        g_serumData.isextrasprite[spriteId][0] == 0)
       return false;
   }
   return true;
@@ -6670,7 +6712,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
   }
 }
 
-void Colorize_Spritev1(uint8_t nosprite, uint16_t frx, uint16_t fry,
+void Colorize_Spritev1(uint16_t nosprite, uint16_t frx, uint16_t fry,
                        uint16_t spx, uint16_t spy, uint16_t wid, uint16_t hei) {
   if (!g_serumData.spritedescriptionso_opaque.hasData(nosprite)) return;
   const uint8_t* spriteOpaque =
@@ -6691,11 +6733,11 @@ void Colorize_Spritev1(uint8_t nosprite, uint16_t frx, uint16_t fry,
 // returned, or from the store where it returned null.
 template <typename Store>
 static inline uint16_t SpriteColourAt(const uint16_t* fetched, Store& store,
-                                      uint8_t sprite, uint32_t index) {
+                                      uint16_t sprite, uint32_t index) {
   return fetched ? fetched[index] : store[sprite][index];
 }
 
-void Colorize_Spritev2(uint8_t* oframe, uint8_t nosprite, uint16_t frx,
+void Colorize_Spritev2(uint8_t* oframe, uint16_t nosprite, uint16_t frx,
                        uint16_t fry, uint16_t spx, uint16_t spy, uint16_t wid,
                        uint16_t hei, uint32_t IDfound) {
   uint16_t *pfr, *prot;
@@ -7200,11 +7242,12 @@ uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
           g_debugCurrentInputCrc, frameID);
     }
 
-    uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
+    uint16_t nosprite[MAX_SPRITES_PER_FRAME];
+    uint8_t nspr;
     uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
         spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
         wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
-    memset(nosprite, 255, MAX_SPRITES_PER_FRAME);
+    std::fill(nosprite, nosprite + MAX_SPRITES_PER_FRAME, SERUM_NO_SPRITE);
 
     bool isspr = Check_Spritesv1(frame, (uint32_t)lastfound, nosprite, &nspr,
                                  frx, fry, spx, spy, wid, hei);
@@ -7824,11 +7867,12 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     bool isBackgroundSceneRequested =
         isBackgroundScene &&
         (sceneFrameRequested || backgroundScenePrimedThisCall);
-    uint8_t nosprite[MAX_SPRITES_PER_FRAME], nspr;
+    uint16_t nosprite[MAX_SPRITES_PER_FRAME];
+    uint8_t nspr;
     uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
         spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
         wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
-    memset(nosprite, 255, MAX_SPRITES_PER_FRAME);
+    std::fill(nosprite, nosprite + MAX_SPRITES_PER_FRAME, SERUM_NO_SPRITE);
 
     // Sprite detection is timed for the profiler like the stages after it.
     const auto spriteCheckStart = g_profileDynamicHotPaths

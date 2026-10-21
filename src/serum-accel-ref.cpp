@@ -260,18 +260,18 @@ bool FindSpriteWord(const SpriteWordSearch& search, SpriteWordVisitor visit,
 // The candidate's sprite, as read from the sprite store by
 // BeginSpriteCandidate().
 static SerumData* candidateData = NULL;
-static uint8_t candidateSprite = 0;
+static uint16_t candidateSprite = 0;
 static const uint8_t* candidateOriginal = NULL;
 static const uint8_t* candidateOpaque = NULL;
 
-void BeginSpriteCandidate(SerumData& data, uint8_t sprite) {
+void BeginSpriteCandidate(SerumData& data, uint16_t sprite) {
   candidateData = &data;
   candidateSprite = sprite;
   candidateOriginal = data.spriteoriginal[sprite];
   candidateOpaque = data.spriteoriginal_opaque[sprite];
 }
 
-bool SpriteAreaMatches(SerumData& data, uint32_t detectIndex, uint8_t sprite,
+bool SpriteAreaMatches(SerumData& data, uint32_t detectIndex, uint16_t sprite,
                        bool shape, const uint8_t* frame, uint32_t frameWidth,
                        int areaX, int areaY, SpriteAreaMismatch* mismatch) {
   const auto& detMeta = data.spriteDetectMeta[detectIndex];
@@ -366,7 +366,7 @@ bool CompositeLineDoubled(const LineDoubleComposite&) { return false; }
 // ---------------------------------------------------------------------------
 
 // The caller reads each colour from its store.
-const uint16_t* SpriteColourArray(SerumData&, SpriteColours, uint8_t) {
+const uint16_t* SpriteColourArray(SerumData&, SpriteColours, uint16_t) {
   return nullptr;
 }
 

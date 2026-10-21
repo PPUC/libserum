@@ -581,6 +581,9 @@ class SparseVector {
     decodedCache.resize(kDecodedCacheCapacity);
   }
 
+  // The number of values per element (0 before the first element was set).
+  size_t valuesPerElement() const { return static_cast<size_t>(elementSize); }
+
   T *operator[](const uint32_t elementId) {
     if (isProfilingEnabled()) {
       ++profileAccessCount;

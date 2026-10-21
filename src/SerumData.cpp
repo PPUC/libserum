@@ -71,7 +71,7 @@ SerumData::SerumData()
       dyna4cols(0),
       dyna4cols_v2(0, false, true),
       dyna4cols_v2_extra(0, false, true),
-      framesprites(255),
+      framesprites(SERUM_NO_SPRITE),
       spritedescriptionso(0),
       spritedescriptionso_opaque(0, false, true, true, 0, 1),
       spritedescriptionsc(0),
@@ -566,6 +566,50 @@ bool SerumData::HasSpriteRuntimeSidecars() const {
   return true;
 }
 
+SparseVector<uint8_t> SerumData::NarrowFrameSprites() const {
+  SparseVector<uint8_t> legacy(255);
+  const uint32_t slots = SpritesPerFrame();
+  if (slots > LEGACY_SPRITES_PER_FRAME) {
+    throw std::runtime_error(
+        "more than 32 sprites per frame need concentrate version 10");
+  }
+  std::vector<uint8_t> narrow(slots);
+  SerumData &self = const_cast<SerumData &>(*this);
+  for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+    const uint16_t *wide = self.framesprites[frameId];
+    for (uint32_t i = 0; i < slots; ++i) {
+      if (wide[i] != SERUM_NO_SPRITE && wide[i] >= 255) {
+        throw std::runtime_error(
+            "sprite IDs from 255 on need concentrate version 10");
+      }
+      narrow[i] =
+          wide[i] == SERUM_NO_SPRITE ? 255 : static_cast<uint8_t>(wide[i]);
+    }
+    legacy.set(frameId, narrow.data(), slots);
+  }
+  return legacy;
+}
+
+void SerumData::WidenFrameSprites(SparseVector<uint8_t> &legacy) {
+  framesprites = SparseVector<uint16_t>(SERUM_NO_SPRITE);
+  const size_t slots = legacy.valuesPerElement() > 0
+                           ? legacy.valuesPerElement()
+                           : static_cast<size_t>(LEGACY_SPRITES_PER_FRAME);
+  std::vector<uint16_t> wide(slots, SERUM_NO_SPRITE);
+  // An empty frame first: the slot count and the empty value of every frame.
+  framesprites.set(0, wide.data(), slots);
+  for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+    if (!legacy.hasData(frameId)) {
+      continue;
+    }
+    const uint8_t *narrow = legacy[frameId];
+    for (size_t i = 0; i < slots; ++i) {
+      wide[i] = narrow[i] == 255 ? SERUM_NO_SPRITE : narrow[i];
+    }
+    framesprites.set(frameId, wide.data(), slots);
+  }
+}
+
 void SerumData::BuildSpriteRuntimeSidecars() {
   auto storeRuntimeSidecarCopy = [this](const void *data, size_t size) {
     if (!data || size == 0 || m_packingSidecarsStorage.empty()) {
@@ -694,18 +738,20 @@ void SerumData::BuildSpriteRuntimeSidecars() {
     }
   }
 
+  const uint32_t slots = SpritesPerFrame();
   spriteCandidateIds.reserve(static_cast<size_t>(nframes) *
-                             MAX_SPRITES_PER_FRAME / 2);
+                             LEGACY_SPRITES_PER_FRAME / 2);
   spriteCandidateSlots.reserve(static_cast<size_t>(nframes) *
-                               MAX_SPRITES_PER_FRAME / 2);
+                               LEGACY_SPRITES_PER_FRAME / 2);
   for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
     spriteCandidateOffsets[frameId] =
         static_cast<uint32_t>(spriteCandidateIds.size());
-    std::unordered_set<uint8_t> dedupe;
-    dedupe.reserve(MAX_SPRITES_PER_FRAME);
-    for (uint32_t i = 0; i < MAX_SPRITES_PER_FRAME; ++i) {
-      const uint8_t spriteId = framesprites[frameId][i];
-      if (spriteId >= 255 || spriteId >= nsprites) {
+    std::unordered_set<uint16_t> dedupe;
+    dedupe.reserve(slots);
+    const uint16_t *frameSprites = framesprites[frameId];
+    for (uint32_t i = 0; i < slots; ++i) {
+      const uint16_t spriteId = frameSprites[i];
+      if (spriteId == SERUM_NO_SPRITE || spriteId >= nsprites) {
         break;
       }
       if (!spriteoriginal.hasData(spriteId) ||

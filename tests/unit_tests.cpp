@@ -2279,13 +2279,20 @@ struct Synth {
   uint32_t nframes = kFrameCount, nsprites = 2, ncompmasks = 3;
   uint16_t nbackgrounds = 1;
   bool is256x64 = true;
-  uint32_t headerWidth = kOW;   // what the header claims the original plane is
+  uint32_t headerWidth = kOW;  // what the header claims the original plane is
+  // The cROM format: 0 is header revision 20 as the editor writes it for
+  // libserum 2.8 (LEGACY_SPRITES_PER_FRAME slots of 8-bit sprite IDs); from 1
+  // on, header revision 21 with the format version and the slots per frame
+  // (16-bit sprite IDs). SetFormat() changes both.
+  uint32_t formatVersion = 0;
+  uint32_t slotsPerFrame = LEGACY_SPRITES_PER_FRAME;
   std::vector<uint8_t> native;  // the ROM frames; hashed, not stored
   std::vector<uint8_t> shapemode, compmaskid, compmasks, isextraframe;
   std::vector<uint16_t> cframes, cframesx;
   std::vector<uint8_t> dynamasks, dynamasksx;
   std::vector<uint16_t> dyna4cols, dyna4colsx;
-  std::vector<uint8_t> isextrasprite, framesprites, spriteoriginal;
+  std::vector<uint8_t> isextrasprite, spriteoriginal;
+  std::vector<uint16_t> framesprites;  // SERUM_NO_SPRITE for an empty slot
   std::vector<uint16_t> spritecolored;
   std::vector<uint8_t> spritemaskx;
   std::vector<uint16_t> spritecoloredx;
@@ -2323,7 +2330,7 @@ struct Synth {
     dyna4cols.assign((size_t)nframes * MAX_DYNA_SETS_PER_FRAME_V2 * kColors, 0);
     dyna4colsx = dyna4cols;
     isextrasprite.assign(nsprites, 1);
-    framesprites.assign((size_t)nframes * MAX_SPRITES_PER_FRAME, 255);
+    framesprites.assign((size_t)nframes * slotsPerFrame, SERUM_NO_SPRITE);
     spriteoriginal.assign((size_t)nsprites * kSprPx, kT);
     spritecolored.assign((size_t)nsprites * kSprPx, 0);
     spritemaskx.assign((size_t)nsprites * kSprPx, kT);
@@ -2336,7 +2343,7 @@ struct Synth {
     detdwordpos.assign((size_t)nsprites * MAX_SPRITE_DETECT_AREAS, 0);
     detareas.assign((size_t)nsprites * 4 * MAX_SPRITE_DETECT_AREAS, 0xffff);
     triggers.assign(nframes, 0xffffffffu);
-    spritebb.assign((size_t)nframes * MAX_SPRITES_PER_FRAME * 4, 0);
+    spritebb.assign((size_t)nframes * slotsPerFrame * 4, 0);
     isextrabg.assign(nbackgrounds, 1);
     bgframes.resize((size_t)nbackgrounds * kOPx);
     bgframesx.resize((size_t)nbackgrounds * kNPx);
@@ -2394,7 +2401,7 @@ struct Synth {
     Native(kSprite)[60 * kNW + 250] = 2;
     compmaskid[kSprite] = 1;
     FillMask(1, 32, 20, 95, 43);
-    framesprites[(size_t)kSprite * MAX_SPRITES_PER_FRAME] = 0;
+    framesprites[(size_t)kSprite * slotsPerFrame] = 0;
     SetBB(kSprite, 32, 20, 95, 43);
     for (uint32_t y = 0; y < kSprH; ++y)
       for (uint32_t x = 0; x < kSprW; ++x) {
@@ -2424,7 +2431,7 @@ struct Synth {
     Native(kShapeSprite)[61 * kNW + 3] = 1;
     compmaskid[kShapeSprite] = 2;
     FillMask(2, 180, 44, 239, 60);
-    framesprites[(size_t)kShapeSprite * MAX_SPRITES_PER_FRAME] = 1;
+    framesprites[(size_t)kShapeSprite * slotsPerFrame] = 1;
     SetBB(kShapeSprite, 180, 44, 239, 60);
     sprshapemode[1] = 1;
     for (uint32_t y = 0; y < kShapeH; ++y)
@@ -2474,9 +2481,52 @@ struct Synth {
       for (uint32_t x = x0; x <= x1; ++x)
         compmasks[(size_t)mask * kNPx + y * kNW + x] = 1;
   }
-  void SetBB(uint32_t f, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
-    uint16_t* bb = &spritebb[(size_t)f * MAX_SPRITES_PER_FRAME * 4];
+  void SetBB(uint32_t f, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1,
+             uint32_t slot = 0) {
+    uint16_t* bb = &spritebb[((size_t)f * slotsPerFrame + slot) * 4];
     bb[0] = x0, bb[1] = y0, bb[2] = x1, bb[3] = y1;
+  }
+  // Sprite `from` again as sprites nsprites..to: more sprites, `to` the last.
+  void CopySprite(uint32_t from, uint32_t to) {
+    const uint32_t count = to + 1;
+    const auto grow = [&](auto& v) {
+      const size_t per = v.size() / nsprites;
+      const size_t start = (size_t)from * per;
+      for (uint32_t id = nsprites; id < count; ++id)
+        v.insert(v.end(), v.begin() + start, v.begin() + start + per);
+    };
+    grow(isextrasprite);
+    grow(spriteoriginal);
+    grow(spritecolored);
+    grow(spritemaskx);
+    grow(spritecoloredx);
+    grow(detdwords);
+    grow(detdwordpos);
+    grow(detareas);
+    grow(dynspr4cols);
+    grow(dynspr4colsx);
+    grow(dynsprmask);
+    grow(dynsprmaskx);
+    grow(sprshapemode);
+    nsprites = count;
+  }
+  // Another format and slot count, the slots a frame has kept.
+  void SetFormat(uint32_t version, uint32_t slots) {
+    std::vector<uint16_t> sprites((size_t)nframes * slots, SERUM_NO_SPRITE);
+    std::vector<uint16_t> boxes((size_t)nframes * slots * 4, 0);
+    const uint32_t kept = std::min(slots, slotsPerFrame);
+    for (uint32_t f = 0; f < nframes; ++f)
+      for (uint32_t i = 0; i < kept; ++i) {
+        sprites[(size_t)f * slots + i] =
+            framesprites[(size_t)f * slotsPerFrame + i];
+        for (uint32_t k = 0; k < 4; ++k)
+          boxes[((size_t)f * slots + i) * 4 + k] =
+              spritebb[((size_t)f * slotsPerFrame + i) * 4 + k];
+      }
+    framesprites.swap(sprites);
+    spritebb.swap(boxes);
+    formatVersion = version;
+    slotsPerFrame = slots;
   }
   static void PlaceSprite0(uint8_t* frame, uint32_t x0, uint32_t y0) {
     for (uint32_t y = 0; y < kSprH; ++y)
@@ -2497,7 +2547,8 @@ struct Synth {
     out.insert(out.end(), p, p + sizeof(T));
   }
 
-  // The cROM exactly as the editor writes it, header revision 20.
+  // The cROM exactly as the editor writes it: header revision 20 for format
+  // version 0, revision 21 from format version 1 on.
   std::vector<uint8_t> Serialize() const {
     std::vector<uint32_t> hashes(nframes);
     const uint32_t hashPx = is256x64 ? kNPx : kOPx;
@@ -2514,7 +2565,7 @@ struct Synth {
     char name[64] = {0};
     snprintf(name, sizeof(name), "%s", kRom);
     out.insert(out.end(), name, name + 64);
-    PutValue<uint32_t>(out, 20 * sizeof(uint32_t));
+    PutValue<uint32_t>(out, (formatVersion >= 1 ? 21 : 20) * sizeof(uint32_t));
     PutValue<uint32_t>(out, headerWidth);
     PutValue<uint32_t>(out, kOH);
     PutValue<uint32_t>(out, kNW);
@@ -2525,6 +2576,10 @@ struct Synth {
     PutValue<uint32_t>(out, nsprites);
     PutValue<uint16_t>(out, nbackgrounds);
     PutValue<int32_t>(out, is256x64 ? 1 : 0);
+    if (formatVersion >= 1) {
+      PutValue<uint32_t>(out, formatVersion);
+      PutValue<uint32_t>(out, slotsPerFrame);
+    }
     Put(out, hashes);
     Put(out, shapemode);
     Put(out, compmaskid);
@@ -2537,7 +2592,16 @@ struct Synth {
     Put(out, dyna4cols);
     Put(out, dyna4colsx);
     Put(out, isextrasprite);
-    Put(out, framesprites);
+    if (formatVersion >= 1) {
+      Put(out, framesprites);
+    } else {
+      std::vector<uint8_t> narrow(framesprites.size());
+      for (size_t i = 0; i < narrow.size(); ++i)
+        narrow[i] = framesprites[i] == SERUM_NO_SPRITE
+                        ? 255
+                        : static_cast<uint8_t>(framesprites[i]);
+      Put(out, narrow);
+    }
     Put(out, spriteoriginal);
     Put(out, spritecolored);
     Put(out, spritemaskx);
@@ -2831,7 +2895,8 @@ static void Test_N256SpriteDetection(void) {
   const n256::Synth s;
   for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
     if (!n256::Load(s, n256::kBothPlanes, viaConcentrate != 0)) continue;
-    uint8_t which[MAX_SPRITES_PER_FRAME], count = 0;
+    uint16_t which[MAX_SPRITES_PER_FRAME];
+    uint8_t count = 0;
     uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
         spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
         wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
@@ -3614,7 +3679,7 @@ static void Test_SpriteInLayerModeEndToEnd(void) {
   for (uint32_t y = by0; y <= by1; ++y)
     for (uint32_t x = bx0; x <= bx1; ++x)
       s.compmasks[(size_t)1 * kOPx + y * kOW + x] = 1;
-  s.framesprites[(size_t)kSprite * MAX_SPRITES_PER_FRAME] = 0;
+  s.framesprites[(size_t)kSprite * s.slotsPerFrame] = 0;
   s.SetBB(kSprite, bx0, by0, bx1, by1);
   for (uint32_t y = 0; y < kSprH; ++y)
     for (uint32_t x = 0; x < kSprW; ++x)
@@ -3771,7 +3836,8 @@ struct Capture {
   uint8_t loadFlags = 0;
   uint32_t width32 = 0, width64 = 0, ntriggers = 0, nocolors = 0;
   bool has32 = false, has64 = false;
-  std::vector<uint8_t> frameIsScene, spriteCandidateIds;
+  std::vector<uint8_t> frameIsScene;
+  std::vector<uint16_t> spriteCandidateIds;
   std::vector<uint32_t> frameToNormalBucket;
   size_t rotationLookupSize = 0, normalBuckets = 0;
   std::vector<uint32_t> results;
@@ -4006,6 +4072,86 @@ static bool HasScene(uint16_t sceneId) {
 }
 
 }  // namespace settings
+
+// cROM format version 1: up to MAX_SPRITES_PER_FRAME slots per frame, the
+// count in the header, and 16-bit sprite IDs. A sprite with an ID beyond the
+// old 8-bit range in a slot beyond the old 32 is found, from the cROM and from
+// the cROMc made from it.
+static void Test_CromFormat1Sprites(void) {
+  n256::Synth s;
+  s.SetFormat(1, MAX_SPRITES_PER_FRAME);
+  s.CopySprite(0, 256);
+  // Slots are filled from the first on (a frame's first empty slot ends
+  // them): the shape sprite, not in this frame, in the slots before.
+  const uint32_t slot = 100;
+  for (uint32_t i = 0; i < slot; ++i)
+    s.framesprites[(size_t)n256::kSprite * s.slotsPerFrame + i] = 1;
+  s.framesprites[(size_t)n256::kSprite * s.slotsPerFrame + slot] = 256;
+  s.SetBB(n256::kSprite, 32, 20, 95, 43, slot);
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, n256::kBothPlanes, viaConcentrate != 0)) continue;
+    CHECK_EQ(g_serumData.SpritesPerFrame(), (uint32_t)MAX_SPRITES_PER_FRAME);
+    CHECK_EQ(g_serumData.nsprites, 257u);
+    uint16_t which[MAX_SPRITES_PER_FRAME];
+    uint8_t count = 0;
+    uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
+        spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
+        wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
+    std::vector<uint8_t> frame = s.Frame(n256::kSprite);
+    CHECK(Check_Spritesv2(frame.data(), n256::kSprite, which, &count, frx, fry,
+                          spx, spy, wid, hei));
+    CHECK_EQ(count, 1);
+    if (count == 1) {
+      CHECK_EQ(which[0], 256);
+      CHECK_EQ(frx[0], n256::kSprX);
+      CHECK_EQ(fry[0], n256::kSprY);
+    }
+    n256::Unload();
+  }
+  // A format version 0 cROM has the old 32 slots.
+  n256::Synth old;
+  if (n256::Load(old, n256::kBothPlanes, false)) {
+    CHECK_EQ(g_serumData.SpritesPerFrame(), (uint32_t)LEGACY_SPRITES_PER_FRAME);
+  }
+  n256::Unload();
+  // A newer format than the library reads is refused, not misread.
+  n256::Synth newer;
+  newer.SetFormat(SERUM_CROM_FORMAT_VERSION + 1, MAX_SPRITES_PER_FRAME);
+  CHECK(n256::LoadUnchecked(newer, n256::kBothPlanes, false, NULL) == NULL);
+  n256::Unload();
+}
+
+// A cROMc before concentrate version 10 has 8-bit sprite IDs and 32 slots per
+// frame; it still loads, and its sprites are found.
+static void Test_ConcentrateVersion9Sprites(void) {
+  const n256::Synth s;
+  if (!n256::Load(s, n256::kBothPlanes, true)) return;
+  CHECK_EQ(g_serumData.concentrateFileVersion, SERUM_CONCENTRATE_VERSION);
+  const std::filesystem::path dir = n256::Dir() / n256::kRom;
+  const std::string cromc =
+      (dir / (std::string(n256::kRom) + ".cROMc")).string();
+  g_serumData.concentrateFileVersion = 9;
+  CHECK(g_serumData.SaveToFile(cromc.c_str()));
+  Serum_Dispose();
+  std::filesystem::remove(dir / (std::string(n256::kRom) + ".cROM"));
+  Serum_SetGenerateCRomC(false);
+  CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
+                   n256::kBothPlanes) != NULL);
+  Serum_SetGenerateCRomC(true);
+  CHECK_EQ(g_serumData.concentrateFileVersion, 9);
+  CHECK_EQ(g_serumData.SpritesPerFrame(), (uint32_t)LEGACY_SPRITES_PER_FRAME);
+  uint16_t which[MAX_SPRITES_PER_FRAME];
+  uint8_t count = 0;
+  uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
+      spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
+      wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
+  std::vector<uint8_t> frame = s.Frame(n256::kSprite);
+  CHECK(Check_Spritesv2(frame.data(), n256::kSprite, which, &count, frx, fry,
+                        spx, spy, wid, hei));
+  CHECK_EQ(count, 1);
+  if (count == 1) CHECK_EQ(which[0], 0);
+  n256::Unload();
+}
 
 // The scenes and scaling settings of a cROM's settings block are the
 // colorization's own: a pup.csv or scaling.txt beside it changes neither, in
@@ -4386,6 +4532,8 @@ static const TestCase kTests[] = {
     {"n256/dynamic_content", Test_N256DynamicContent},
     {"n256/background_over_black", Test_N256BackgroundOverBlack},
     {"n256/sprite_detection", Test_N256SpriteDetection},
+    {"crom/format_1_sprites", Test_CromFormat1Sprites},
+    {"cromc/version_9_sprites", Test_ConcentrateVersion9Sprites},
     {"n256/sprite_drawing", Test_N256SpriteDrawing},
     {"n256/rotation", Test_N256Rotation},
     {"n256/request_both", Test_N256RequestBoth},

@@ -16,7 +16,8 @@ class SerumData;
 
 // To be raised when a declaration or a contract in this header changes.
 // CMakeLists.txt compares it with the version `SERUM_ACCEL_DIR` states.
-#define SERUM_ACCEL_SEAM_VERSION 1
+// 2: sprite IDs are uint16_t (more than 255 sprites).
+#define SERUM_ACCEL_SEAM_VERSION 2
 
 namespace serum_accel {
 
@@ -88,7 +89,7 @@ bool FindSpriteWord(const SpriteWordSearch& search, SpriteWordVisitor visit,
 // areas are compared. Until the next call, SpriteAreaMatches() is asked about
 // areas of `sprite` only, and the caller does not read that sprite's
 // `spriteoriginal` / `spriteoriginal_opaque`.
-void BeginSpriteCandidate(SerumData& data, uint8_t sprite);
+void BeginSpriteCandidate(SerumData& data, uint16_t sprite);
 
 // Why SpriteAreaMatches() returned false, for the sprite debug log: a constant
 // string and four numbers whose meaning goes with it.
@@ -110,7 +111,7 @@ struct SpriteAreaMismatch {
 //
 // `data` is the loaded colorization, unchanged since the last
 // ColorizationUnloaded(). `mismatch` may be null.
-bool SpriteAreaMatches(SerumData& data, uint32_t detectIndex, uint8_t sprite,
+bool SpriteAreaMatches(SerumData& data, uint32_t detectIndex, uint16_t sprite,
                        bool shape, const uint8_t* frame, uint32_t frameWidth,
                        int areaX, int areaY, SpriteAreaMismatch* mismatch);
 
@@ -166,7 +167,7 @@ enum class SpriteColours {
 // The colour array of `sprite` in that store, valid until the store is read
 // again, or null; the caller then reads each colour from the store.
 const uint16_t* SpriteColourArray(SerumData& data, SpriteColours which,
-                                  uint8_t sprite);
+                                  uint16_t sprite);
 
 // ---------------------------------------------------------------------------
 // Notifications

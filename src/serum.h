@@ -211,7 +211,14 @@ const int MAX_SPRITE_SIZE = 128;   // maximum size of the sprites
 const int MAX_SPRITE_WIDTH = 256;  // maximum width of the new sprites
 const int MAX_SPRITE_HEIGHT = 64;  // maximum height of the new sprites
 const int MAX_SPRITES_PER_FRAME =
-    32;  // maximum amount of sprites to look for per frame
+    128;  // maximum amount of sprites to look for per frame; a colorization
+          // carries its own count (SerumData::SpritesPerFrame())
+const int LEGACY_SPRITES_PER_FRAME =
+    32;  // sprites per frame of a cROM before format version 1 and of a cROMc
+         // before concentrate version 10
+const uint16_t SERUM_NO_SPRITE =
+    0xffff;  // an empty sprite slot of a frame (255 in files before format
+             // version 1 and concentrate version 10)
 const int MAX_COLOR_ROTATIONS =
     8;  // maximum amount of color rotations per frame
 const int MAX_COLOR_ROTATION_V2 =
@@ -223,8 +230,9 @@ const int MAX_SPRITE_DETECT_AREAS =
 
 const int PALETTE_SIZE = 64 * 3;  // size of a palette
 const int ROTATION_SIZE =
-    3 * MAX_COLOR_ROTATIONS;            // size of a color rotation block
-const int MAX_BACKGROUND_IMAGES = 255;  // max number of background images
+    3 * MAX_COLOR_ROTATIONS;  // size of a color rotation block
+const int MAX_BACKGROUND_IMAGES =
+    65535;  // max number of background images (16-bit IDs, 0xffff for none)
 
 const uint32_t IDENTIFY_NO_FRAME =
     0xffffffff;  // returned in Serum_Frame_Struc::frameID if no matching frame

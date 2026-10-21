@@ -169,6 +169,24 @@ class SerumData {
   bool scenesFromColorization = false;
   bool scalingFromColorization = false;
 
+  // The frame sprites of a cROMc before concentrate version 10 and of a cROM
+  // before format version 1: 8-bit sprite IDs, 255 for an empty slot.
+  // NarrowFrameSprites() writes them (for tests of the older versions; it
+  // throws for a colorization that does not fit: more than
+  // LEGACY_SPRITES_PER_FRAME slots, a sprite ID from 255 on).
+  SparseVector<uint8_t> NarrowFrameSprites() const;
+  void WidenFrameSprites(SparseVector<uint8_t> &legacy);
+
+  // The sprite slots of a frame in the loaded colorization: those its file
+  // has (LEGACY_SPRITES_PER_FRAME before cROM format version 1), at most
+  // MAX_SPRITES_PER_FRAME.
+  uint32_t SpritesPerFrame() const {
+    const size_t slots = framesprites.valuesPerElement();
+    return slots == 0 ? LEGACY_SPRITES_PER_FRAME
+                      : static_cast<uint32_t>(
+                            std::min<size_t>(slots, MAX_SPRITES_PER_FRAME));
+  }
+
   // Vector data
   SparseVector<uint32_t> hashcodes;
   SparseVector<uint8_t> shapecompmode;
@@ -188,7 +206,11 @@ class SerumData {
   SparseVector<uint8_t> dyna4cols;
   SparseVector<uint16_t> dyna4cols_v2;
   SparseVector<uint16_t> dyna4cols_v2_extra;
-  SparseVector<uint8_t> framesprites;
+  // The sprite IDs of each frame's slots, SERUM_NO_SPRITE for an empty one;
+  // SpritesPerFrame() slots per frame. 8 bit with 255 for an empty slot in a
+  // cROM before format version 1 and a cROMc before concentrate version 10,
+  // widened on load.
+  SparseVector<uint16_t> framesprites;
   SparseVector<uint8_t> spritedescriptionso;
   SparseVector<uint8_t> spritedescriptionso_opaque;
   SparseVector<uint8_t> spritedescriptionsc;
@@ -231,7 +253,7 @@ class SerumData {
   std::vector<uint8_t> frameHasDynamicExtra;
   std::vector<uint8_t> frameIsScene;
   std::vector<uint32_t> spriteCandidateOffsets;
-  std::vector<uint8_t> spriteCandidateIds;
+  std::vector<uint16_t> spriteCandidateIds;
   std::vector<uint8_t> spriteCandidateSlots;
   std::vector<uint8_t> frameHasShapeSprite;
   std::vector<uint16_t> spriteWidth;
@@ -268,18 +290,50 @@ class SerumData {
   friend class cereal::access;
 
   template <class Archive>
+  void SerializeSpriteCandidateIds(Archive &ar) {
+    if (concentrateFileVersion >= 10) {
+      ar(spriteCandidateIds);
+    } else if constexpr (Archive::is_saving::value) {
+      std::vector<uint8_t> legacy(spriteCandidateIds.size());
+      for (size_t i = 0; i < legacy.size(); ++i) {
+        if (spriteCandidateIds[i] >= 255) {
+          throw std::runtime_error(
+              "sprite IDs from 255 on need concentrate version 10");
+        }
+        legacy[i] = static_cast<uint8_t>(spriteCandidateIds[i]);
+      }
+      ar(legacy);
+    } else {
+      std::vector<uint8_t> legacy;
+      ar(legacy);
+      spriteCandidateIds.assign(legacy.begin(), legacy.end());
+    }
+  }
+
+  template <class Archive>
   void serialize(Archive &ar) {
     ar(rname, SerumVersion, fwidth, fheight, fwidth_extra, fheight_extra,
        nframes, nocolors, nccolors, ncompmasks, nmovmasks, nsprites,
        nbackgrounds, is256x64, hashcodes, shapecompmode, compmaskID, movrctID,
        compmasks, movrcts, cpal, isextraframe, cframes, cframes_v2,
        cframes_v2_extra, dynamasks, dynamasks_extra, dyna4cols, dyna4cols_v2,
-       dyna4cols_v2_extra, framesprites, spritedescriptionso,
-       spritedescriptionsc, isextrasprite, spriteoriginal, spritemask_extra,
-       spritecolored, spritecolored_extra, activeframes, colorrotations,
-       colorrotations_v2, colorrotations_v2_extra, spritedetdwords,
-       spritedetdwordpos, spritedetareas, triggerIDs, framespriteBB,
-       isextrabackground, backgroundframes, backgroundframes_v2,
+       dyna4cols_v2_extra);
+    // 16-bit sprite IDs from concentrate version 10 on, 8 bit before.
+    if (concentrateFileVersion >= 10) {
+      ar(framesprites);
+    } else if constexpr (Archive::is_saving::value) {
+      SparseVector<uint8_t> legacy = NarrowFrameSprites();
+      ar(legacy);
+    } else {
+      SparseVector<uint8_t> legacy(255);
+      ar(legacy);
+      WidenFrameSprites(legacy);
+    }
+    ar(spritedescriptionso, spritedescriptionsc, isextrasprite, spriteoriginal,
+       spritemask_extra, spritecolored, spritecolored_extra, activeframes,
+       colorrotations, colorrotations_v2, colorrotations_v2_extra,
+       spritedetdwords, spritedetdwordpos, spritedetareas, triggerIDs,
+       framespriteBB, isextrabackground, backgroundframes, backgroundframes_v2,
        backgroundframes_v2_extra, backgroundIDs, backgroundBB, backgroundmask,
        backgroundmask_extra, dynashadowsdir, dynashadowscol,
        dynashadowsdir_extra, dynashadowscol_extra, dynasprite4cols,
@@ -356,11 +410,12 @@ class SerumData {
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
            sceneTripletEntries, colorRotationEntries, criticalTriggerEntries,
-           spriteCandidateOffsets, spriteCandidateIds, spriteCandidateSlots,
-           frameHasShapeSprite, spriteWidth, spriteHeight, spriteUsesShape,
-           spriteDetectOffsets, spriteDetectMeta, spriteOpaqueRowSegmentStart,
-           spriteOpaqueRowSegmentCount, spriteOpaqueSegments, hasAnyExtraFrame,
-           publicTriggerCount);
+           spriteCandidateOffsets);
+        SerializeSpriteCandidateIds(ar);
+        ar(spriteCandidateSlots, frameHasShapeSprite, spriteWidth, spriteHeight,
+           spriteUsesShape, spriteDetectOffsets, spriteDetectMeta,
+           spriteOpaqueRowSegmentStart, spriteOpaqueRowSegmentCount,
+           spriteOpaqueSegments, hasAnyExtraFrame, publicTriggerCount);
       }
     } else {
       if (concentrateFileVersion >= 6) {
@@ -375,11 +430,12 @@ class SerumData {
            dynamasks_active, dynamasks_extra_active, dynaspritemasks_active,
            dynaspritemasks_extra_active, frameHasDynamic, frameHasDynamicExtra,
            sceneTripletEntries, colorRotationEntries, criticalTriggerEntries,
-           spriteCandidateOffsets, spriteCandidateIds, spriteCandidateSlots,
-           frameHasShapeSprite, spriteWidth, spriteHeight, spriteUsesShape,
-           spriteDetectOffsets, spriteDetectMeta, spriteOpaqueRowSegmentStart,
-           spriteOpaqueRowSegmentCount, spriteOpaqueSegments, hasAnyExtraFrame,
-           publicTriggerCount);
+           spriteCandidateOffsets);
+        SerializeSpriteCandidateIds(ar);
+        ar(spriteCandidateSlots, frameHasShapeSprite, spriteWidth, spriteHeight,
+           spriteUsesShape, spriteDetectOffsets, spriteDetectMeta,
+           spriteOpaqueRowSegmentStart, spriteOpaqueRowSegmentCount,
+           spriteOpaqueSegments, hasAnyExtraFrame, publicTriggerCount);
 
         sceneFramesBySignature.clear();
         sceneFramesBySignature.reserve(sceneSignatureEntries.size());

@@ -1,9 +1,14 @@
 #pragma once
 
-#define SERUM_VERSION_MAJOR 2        // X Digits
-#define SERUM_VERSION_MINOR 8        // Max 2 Digits
-#define SERUM_VERSION_PATCH 2        // Max 2 Digits
-#define SERUM_CONCENTRATE_VERSION 9  // Max 2 Digits
+#define SERUM_VERSION_MAJOR 3         // X Digits
+#define SERUM_VERSION_MINOR 0         // Max 2 Digits
+#define SERUM_VERSION_PATCH 0         // Max 2 Digits
+#define SERUM_CONCENTRATE_VERSION 10  // Max 2 Digits
+// The newest cROM format this library reads (the header's format version,
+// header revision 21 on; 0 for a cROM without it). 1: up to
+// MAX_SPRITES_PER_FRAME sprites per frame, the count in the header, 16-bit
+// sprite IDs.
+#define SERUM_CROM_FORMAT_VERSION 1
 
 #define _SERUM_STR(x) #x
 #define SERUM_STR(x) _SERUM_STR(x)
