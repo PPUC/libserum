@@ -44,6 +44,47 @@ inline uint32_t FromLittleEndian32(uint32_t value) {
          ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
 }
 
+// Speaker lights of a colorization (the lights part of the cROM settings
+// block). An action is what a frame, or the default, does to one channel.
+enum : uint8_t {
+  SERUM_LIGHT_UNCHANGED = 0,  // the channel keeps what it plays
+  SERUM_LIGHT_EFFECT = 1,     // effect: an index into SerumData::lightEffects
+  SERUM_LIGHT_COLOR = 2,      // color: a static color (0xWWRRGGBB)
+  SERUM_LIGHT_OFF = 3,
+};
+
+struct SerumLightAction {
+  uint8_t kind = SERUM_LIGHT_UNCHANGED;
+  uint16_t effect = 0;
+  uint32_t color = 0;
+
+  template <class Archive>
+  void serialize(Archive &ar) {
+    ar(kind, effect, color);
+  }
+};
+
+struct SerumLightFrame {
+  uint32_t frameId = 0;
+  SerumLightAction channels[SERUM_LIGHT_CHANNELS];
+
+  template <class Archive>
+  void serialize(Archive &ar) {
+    ar(frameId);
+    for (SerumLightAction &action : channels) ar(action);
+  }
+};
+
+struct SerumLightEffectData {
+  Serum_Light_Effect effect = {};
+
+  template <class Archive>
+  void serialize(Archive &ar) {
+    ar(effect.mode, effect.options, effect.speed, effect.durationMs,
+       effect.colors[0], effect.colors[1], effect.colors[2], effect.brightness);
+  }
+};
+
 class SerumData {
  public:
   struct SpriteDetectMeta {
@@ -168,6 +209,24 @@ class SerumData {
   // change them.
   bool scenesFromColorization = false;
   bool scalingFromColorization = false;
+
+  // Speaker lights (persisted from concentrate version 11): the effects, the
+  // default of each channel and the frames that change channels, sorted by
+  // frame ID. hasLights is false for a colorization without them.
+  bool hasLights = false;
+  std::vector<SerumLightEffectData> lightEffects;
+  SerumLightAction lightDefaults[SERUM_LIGHT_CHANNELS];
+  std::vector<SerumLightFrame> lightFrames;
+  // The frame's light changes, nullptr when it has none.
+  const SerumLightFrame *LightFrame(uint32_t frameId) const {
+    const auto it = std::lower_bound(
+        lightFrames.begin(), lightFrames.end(), frameId,
+        [](const SerumLightFrame &f, uint32_t id) { return f.frameId < id; });
+    return it != lightFrames.end() && it->frameId == frameId ? &*it : nullptr;
+  }
+  // The effect an action starts; false for SERUM_LIGHT_UNCHANGED.
+  bool ResolveLightAction(const SerumLightAction &action,
+                          Serum_Light_Effect &effect) const;
 
   // The frame sprites of a cROMc before concentrate version 10 and of a cROM
   // before format version 1: 8-bit sprite IDs, 255 for an empty slot.
@@ -592,6 +651,10 @@ class SerumData {
       if (concentrateFileVersion >= 9) {
         ar(scenesFromColorization, scalingFromColorization);
       }
+      if (concentrateFileVersion >= 11) {
+        ar(hasLights, lightEffects, lightFrames);
+        for (SerumLightAction &action : lightDefaults) ar(action);
+      }
     } else {
       if (concentrateFileVersion >= 8) {
         ar(scalingAlgorithm, shadowOffsetMode);
@@ -612,6 +675,15 @@ class SerumData {
       } else {
         scenesFromColorization = false;
         scalingFromColorization = false;
+      }
+      if (concentrateFileVersion >= 11) {
+        ar(hasLights, lightEffects, lightFrames);
+        for (SerumLightAction &action : lightDefaults) ar(action);
+      } else {
+        hasLights = false;
+        lightEffects.clear();
+        lightFrames.clear();
+        for (SerumLightAction &action : lightDefaults) action = {};
       }
     }
   }

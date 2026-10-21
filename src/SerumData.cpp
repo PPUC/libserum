@@ -130,6 +130,26 @@ SerumData::SerumData()
 
 SerumData::~SerumData() {}
 
+bool SerumData::ResolveLightAction(const SerumLightAction &action,
+                                   Serum_Light_Effect &effect) const {
+  effect = {};
+  effect.brightness = 255;
+  switch (action.kind) {
+    case SERUM_LIGHT_EFFECT:
+      if (action.effect >= lightEffects.size()) return false;
+      effect = lightEffects[action.effect].effect;
+      return true;
+    case SERUM_LIGHT_COLOR:
+      // FX_MODE_STATIC with the color.
+      effect.colors[0] = action.color;
+      return true;
+    case SERUM_LIGHT_OFF:
+      return true;
+    default:
+      return false;
+  }
+}
+
 void SerumData::Clear() {
   m_packingSidecarsNormalized = false;
   // Part of the colorization, not of the library: a cROM with a header older
@@ -140,6 +160,10 @@ void SerumData::Clear() {
   shadowOffsetMode = SERUM_SHADOW_OFFSET_NATIVE;
   scenesFromColorization = false;
   scalingFromColorization = false;
+  hasLights = false;
+  lightEffects.clear();
+  lightFrames.clear();
+  for (SerumLightAction &action : lightDefaults) action = {};
   hashcodes.clear();
   shapecompmode.clear();
   compmaskID.clear();

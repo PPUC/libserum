@@ -151,6 +151,26 @@ typedef struct _Serum_Runtime_Metadata {
   uint32_t reserved;
 } Serum_Runtime_Metadata;
 
+// Speaker lights (WS2812FX strips driven by the DMD's firmware): up to
+// SERUM_LIGHT_CHANNELS channels, each running one effect at a time.
+#define SERUM_LIGHT_CHANNELS 4
+
+// An effect for one channel, in WS2812FX terms: mode is an FX_MODE_* value
+// (FX_MODE_STATIC, 0, with colors[0] for a static color), speed the WS2812FX
+// speed (ms per cycle), options its option bits (REVERSE, FADE_*, SIZE_*,
+// GAMMA), colors 0xWWRRGGBB. brightness scales the brightness set on the
+// device (255: as set there). durationMs: how long it plays before the
+// channel returns to its default effect, 0 until the next effect.
+typedef struct _Serum_Light_Effect {
+  uint8_t mode;
+  uint8_t options;
+  uint16_t speed;
+  uint32_t durationMs;
+  uint32_t colors[3];
+  uint8_t brightness;
+  uint8_t reserved[3];
+} Serum_Light_Effect;
+
 typedef struct _Serum_Frame_Struc {
   // data for v1 Serum format
   uint8_t* frame;      // return the colorized frame

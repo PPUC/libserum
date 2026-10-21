@@ -4234,6 +4234,130 @@ static void Test_CromSettingsBlock(void) {
   n256::Unload();
 }
 
+namespace lights {
+
+// The lights part of a settings block: two effects, channel 0 defaults to
+// effect 1; frame kStatic starts effect 0 on channel 0 and a static color on
+// channel 1, frame kDynamic turns channel 1 off and leaves channel 0 alone.
+static std::vector<uint8_t> Block(void) {
+  std::vector<uint8_t> payload;
+  const auto put = [&payload](const void* data, size_t bytes) {
+    const uint8_t* p = (const uint8_t*)data;
+    payload.insert(payload.end(), p, p + bytes);
+  };
+  const auto putU32 = [&put](uint32_t value) { put(&value, 4); };
+  const auto putAction = [&put](uint8_t kind, uint16_t effect, uint32_t color) {
+    const uint8_t head[2] = {kind, 0};
+    put(head, 2);
+    put(&effect, 2);
+    put(&color, 4);
+  };
+  putU32(kCromSettingsLights);
+  putU32(2);
+  for (uint8_t mode : {12, 33}) {
+    const uint8_t head[2] = {mode, 0x80};
+    const uint16_t speed = 1500;
+    const uint32_t duration = mode == 12 ? 2000 : 0;
+    const uint32_t colors[3] = {0x00ff0000, 0x0000ff00, 0xff000000};
+    const uint8_t tail[4] = {128, 0, 0, 0};
+    put(head, 2);
+    put(&speed, 2);
+    put(&duration, 4);
+    put(colors, sizeof(colors));
+    put(tail, 4);
+  }
+  putAction(SERUM_LIGHT_EFFECT, 1, 0);
+  for (int i = 1; i < SERUM_LIGHT_CHANNELS; ++i) putAction(0, 0, 0);
+  putU32(2);
+  putU32(n256::kStatic);
+  putAction(SERUM_LIGHT_EFFECT, 0, 0);
+  putAction(SERUM_LIGHT_COLOR, 0, 0x00123456);
+  putAction(0, 0, 0);
+  putAction(0, 0, 0);
+  putU32(n256::kDynamic);
+  putAction(0, 0, 0);
+  putAction(SERUM_LIGHT_OFF, 0, 0);
+  putAction(0, 0, 0);
+  putAction(0, 0, 0);
+  std::vector<uint8_t> block;
+  const uint32_t magic = kCromSettingsMagic;
+  const uint32_t size = (uint32_t)payload.size();
+  block.insert(block.end(), (const uint8_t*)&magic, (const uint8_t*)&magic + 4);
+  block.insert(block.end(), (const uint8_t*)&size, (const uint8_t*)&size + 4);
+  block.insert(block.end(), payload.begin(), payload.end());
+  return block;
+}
+
+}  // namespace lights
+
+// Speaker lights from the settings block: the defaults, and the effects the
+// frames start, each once while it plays; through a cROMc as well.
+static void Test_CromSettingsLights(void) {
+  n256::Synth s;
+  std::vector<uint8_t> crom = s.Serialize();
+  const std::vector<uint8_t> block = lights::Block();
+  crom.insert(crom.end(), block.begin(), block.end());
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
+    if (viaConcentrate) {
+      // The cROMc alone.
+      Serum_Dispose();
+      std::filesystem::remove(n256::Dir() / n256::kRom /
+                              (std::string(n256::kRom) + ".cROM"));
+      CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
+                       n256::kBothPlanes) != NULL);
+    }
+    Serum_Light_Effect effects[SERUM_LIGHT_CHANNELS] = {};
+    CHECK_EQ(Serum_GetDefaultLightEffects(effects), 0xfu);
+    CHECK_EQ(effects[0].mode, 33);
+    CHECK_EQ(effects[0].speed, 1500);
+    CHECK_EQ(effects[0].options, 0x80);
+    CHECK_EQ(effects[0].brightness, 128);
+    CHECK_EQ(effects[0].colors[2], 0xff000000u);
+    // A channel without a default is off: static black.
+    CHECK_EQ(effects[1].mode, 0);
+    CHECK_EQ(effects[1].colors[0], 0u);
+    CHECK_EQ(effects[1].brightness, 255);
+
+    CHECK_EQ(Serum_GetLightEffects(effects), 0u);
+    n256::Colorize(s.Frame(n256::kStatic));
+    CHECK_EQ(Serum_GetLightEffects(effects), 0x3u);
+    CHECK_EQ(effects[0].mode, 12);
+    CHECK_EQ(effects[0].durationMs, 2000u);
+    CHECK_EQ(effects[1].mode, 0);
+    CHECK_EQ(effects[1].colors[0], 0x00123456u);
+    CHECK_EQ(Serum_GetLightEffects(effects), 0u);
+    // Channel 1 off; channel 0 keeps its effect.
+    n256::Colorize(s.Frame(n256::kDynamic));
+    CHECK_EQ(Serum_GetLightEffects(effects), 0x2u);
+    CHECK_EQ(effects[1].colors[0], 0u);
+    // kStatic again: channel 0 still plays effect 0, only channel 1 changes.
+    n256::Colorize(s.Frame(n256::kStatic));
+    CHECK_EQ(Serum_GetLightEffects(effects), 0x2u);
+    // A frame without lights changes nothing.
+    n256::Colorize(s.Frame(n256::kBackground));
+    CHECK_EQ(Serum_GetLightEffects(effects), 0u);
+    Serum_Dispose();
+  }
+
+  // Without lights: no defaults.
+  CHECK(Serum_LoadFromMemory(s.Serialize().data(), s.Serialize().size(),
+                             n256::kBothPlanes) != NULL);
+  Serum_Light_Effect none[SERUM_LIGHT_CHANNELS] = {};
+  CHECK_EQ(Serum_GetDefaultLightEffects(none), 0u);
+  Serum_Dispose();
+
+  // An effect index past the effects fails the load.
+  std::vector<uint8_t> broken = s.Serialize();
+  std::vector<uint8_t> badBlock = block;
+  // The default of channel 0: kind at payload offset 4 + 4 + 2 * 24.
+  badBlock[8 + 4 + 4 + 2 * 24 + 2] = 7;
+  broken.insert(broken.end(), badBlock.begin(), badBlock.end());
+  CHECK(Serum_LoadFromMemory(broken.data(), broken.size(), n256::kBothPlanes) ==
+        NULL);
+  n256::Unload();
+}
+
 // Serum_LoadFromMemoryWithScenes(): the scenes of a pup.csv, parsed before the
 // lookups are built, give the state and output of Serum_Load() with the same
 // pup.csv beside the cROM; without a path it is Serum_LoadFromMemory().
@@ -4557,6 +4681,7 @@ static const TestCase kTests[] = {
     {"memory/with_scenes", Test_MemoryLoadWithScenes},
     {"memory/callback", Test_CallbackLoadMatchesMemoryLoad},
     {"crom/settings_block", Test_CromSettingsBlock},
+    {"crom/settings_lights", Test_CromSettingsLights},
     {"memory/writes_no_file", Test_MemoryLoadWritesNoFile},
     {"memory/failures_are_clean", Test_MemoryLoadFailuresAreClean},
 };

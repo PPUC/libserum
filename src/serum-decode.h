@@ -195,6 +195,17 @@ SERUM_API void Serum_EnablePupTrigers(void);
  * @return true if metadata was filled, false on invalid arguments
  */
 SERUM_API bool Serum_GetRuntimeMetadata(Serum_Runtime_Metadata* metadata);
+// The speaker light effects the frames colorized since the last call start:
+// bit n of the result set means effects[n] is the new effect of channel n. 0
+// when nothing changed. A host sends them to the lights as they come; the
+// frame rendering does not wait for them.
+SERUM_API uint32_t
+Serum_GetLightEffects(Serum_Light_Effect effects[SERUM_LIGHT_CHANNELS]);
+// The effects the colorization gives each channel when nothing else plays
+// (off for a channel without one); bit n set for every channel the
+// colorization has light settings for, 0 for one without speaker lights.
+SERUM_API uint32_t
+Serum_GetDefaultLightEffects(Serum_Light_Effect effects[SERUM_LIGHT_CHANNELS]);
 
 /** @brief Get the full version of this library
  *

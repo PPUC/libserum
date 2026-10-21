@@ -348,6 +348,38 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
   load with both false and behave as before.
 - A frame group count of 0 is read as 1, as `parseCSV()` reads it.
 
+## Speaker lights
+A colorization can drive the speaker lights of a DMD (WS2812FX strips driven
+by the DMD's firmware, up to `SERUM_LIGHT_CHANNELS` (4) channels). The lights
+part of the cROM settings block (`kCromSettingsLights`, 4, layout in the comment
+above `ApplyCromSettings()`) carries:
+
+- the effects (`Serum_Light_Effect`: WS2812FX mode, options, speed, three
+  0xWWRRGGBB colors, a brightness scale of the brightness set on the device,
+  a duration in ms, 0 until the next effect);
+- a default action per channel;
+- the frames that change channels, by ascending frame ID, an action per
+  channel. An action (`SerumLightAction`) is `SERUM_LIGHT_UNCHANGED`,
+  `SERUM_LIGHT_EFFECT` (an effect index), `SERUM_LIGHT_COLOR` (a static
+  color, FX_MODE_STATIC) or `SERUM_LIGHT_OFF`.
+
+Being part of the settings block, the lights need no cROM format version: an
+older library ignores them. They are stored in the cROMc from concentrate
+version 11 (`hasLights`, `lightEffects`, `lightFrames`, `lightDefaults`). A
+block with an action of an unknown kind, an effect index past the effects or
+frames out of order fails the load.
+
+Runtime (`QueueFrameLights()`, called when a frame is identified, normal or
+scene frame): every channel the frame does not leave unchanged gets its effect
+queued, unless the channel already plays that action and it has not run out
+(its duration), so the frames of an animation that all start the same effect
+do not restart it. `Serum_GetLightEffects()` returns the queued effects as a
+channel bit mask and clears them; `Serum_GetDefaultLightEffects()` the
+defaults (a channel without one is off), 0 for a colorization without lights.
+A host passes them to the lights asynchronously; frame rendering never waits
+for them. The duration is the device's to keep: after it the channel returns
+to its default.
+
 ## cROM format version, sprites per frame and sprite IDs
 The cROM header carries no explicit version before header revision 21: the
 `sizeheader` field (`N * 4`) gates the fields read after it, and a reader
@@ -1214,7 +1246,8 @@ Finished-scene default behavior:
   scene frame is incomplete/unavailable.
 
 ## cROMc persistence
-Current concentrate version: **10**. Version 10 stores `framesprites` and
+Current concentrate version: **11**. Version 11 adds the speaker lights after
+the version 9 flags (see "Speaker lights"). Version 10 stores `framesprites` and
 `spriteCandidateIds` with 16-bit sprite IDs and the slot count of the
 colorization (see "cROM format version, sprites per frame and sprite IDs").
 Version 9 adds `scenesFromColorization` and `scalingFromColorization` after
@@ -1274,6 +1307,8 @@ Stored in v6:
 
 Backward compatibility:
 - v5 files are loadable.
+- Before version 11 there are no speaker lights: such a cROMc loads with
+  `hasLights` false and no light effects.
 - Before version 10, `framesprites` (32 slots) and `spriteCandidateIds` are
   stored with 8-bit IDs. `SerumData::serialize()` reads them as such and
   widens them to 16 bit in the archive load itself (a version-gated step of the

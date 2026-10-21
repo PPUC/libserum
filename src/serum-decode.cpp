@@ -611,6 +611,50 @@ bool first_match_normal = true;
 bool first_match_scene = true;
 uint32_t firstUnknownFrameTimestamp = 0;
 uint32_t lastTriggerID = 0xffffffff;  // last trigger ID found
+
+// Speaker lights: the effects started since the last Serum_GetLightEffects()
+// (bit n of lightPendingMask for channel n), and what each channel plays.
+static uint32_t lightPendingMask = 0;
+static Serum_Light_Effect lightPending[SERUM_LIGHT_CHANNELS];
+struct LightChannelState {
+  bool running = false;
+  SerumLightAction action;
+  uint32_t startMs = 0;
+  uint32_t durationMs = 0;
+};
+static LightChannelState lightChannels[SERUM_LIGHT_CHANNELS];
+
+static void ResetLights() {
+  lightPendingMask = 0;
+  for (LightChannelState& channel : lightChannels) channel = {};
+}
+
+// The light changes of a frame being shown. A channel already playing the
+// same action is left alone (a frame shown again, or the frames of an
+// animation that all start it), unless what it plays has run out.
+static void QueueFrameLights(uint32_t frameId, uint32_t now) {
+  if (!g_serumData.hasLights) return;
+  const SerumLightFrame* frame = g_serumData.LightFrame(frameId);
+  if (frame == nullptr) return;
+  for (uint32_t channel = 0; channel < SERUM_LIGHT_CHANNELS; ++channel) {
+    const SerumLightAction& action = frame->channels[channel];
+    Serum_Light_Effect effect;
+    if (!g_serumData.ResolveLightAction(action, effect)) continue;
+    LightChannelState& state = lightChannels[channel];
+    const bool expired =
+        state.durationMs > 0 && now - state.startMs >= state.durationMs;
+    if (state.running && !expired && state.action.kind == action.kind &&
+        state.action.effect == action.effect &&
+        state.action.color == action.color)
+      continue;
+    state.running = true;
+    state.action = action;
+    state.startMs = now;
+    state.durationMs = effect.durationMs;
+    lightPending[channel] = effect;
+    lightPendingMask |= 1u << channel;
+  }
+}
 uint32_t lasttriggerTimestamp = 0;
 bool isrotation = true;     // are there rotations to send
 bool* framechecked = NULL;  // are these frames checked?
@@ -1833,6 +1877,7 @@ void Serum_free(void) {
   shadowOffsetModeRuntime = SERUM_SHADOW_OFFSET_NATIVE;
   scaledLayerHasCoverage = false;
   cromloaded = false;
+  ResetLights();
   lastfound = 0;
   lastfound_normal = 0;
   lastfound_scene = 0;
@@ -2052,10 +2097,21 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
 //            durationPerFrame and uint8 interruptable, immediateStart, repeat,
 //            frameGroups, random, autoStart, sceneOptions (13 bytes)
 //   scaling: uint8 algorithm, uint8 shadow offset mode
+//   lights:  uint32 effect count, per effect uint8 mode, uint8 options,
+//            uint16 speed, uint32 duration in ms, uint32 colors[3], uint8
+//            brightness, three bytes 0 (24 bytes, Serum_Light_Effect); the
+//            default of each of the SERUM_LIGHT_CHANNELS channels as an
+//            action; uint32 frame count, per frame uint32 frame ID and an
+//            action per channel, by ascending frame ID. An action is uint8
+//            kind (SERUM_LIGHT_*), uint8 0, uint16 effect index, uint32 color
+//            (8 bytes).
 // Bytes after these are ignored, so fields can be appended to the payload.
 static constexpr uint32_t kCromSettingsMagic = 0x31584353;  // "SCX1"
 static constexpr uint32_t kCromSettingsScenes = 1;
 static constexpr uint32_t kCromSettingsScaling = 2;
+static constexpr uint32_t kCromSettingsLights = 4;
+static constexpr uint32_t kCromSettingsLightEffectBytes = 24;
+static constexpr uint32_t kCromSettingsLightActionBytes = 8;
 static constexpr uint32_t kCromSettingsSceneBytes = 13;
 static constexpr uint32_t kCromSettingsMaxScenes = 100000;
 static constexpr uint32_t kCromSettingsMaxBytes = 16u << 20;
@@ -2107,6 +2163,68 @@ static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
             ? SERUM_SHADOW_OFFSET_PROPORTIONAL
             : SERUM_SHADOW_OFFSET_NATIVE;
     g_serumData.scalingFromColorization = true;
+  }
+  if (contents & kCromSettingsLights) {
+    const auto takeAction = [&](SerumLightAction& action) {
+      uint8_t bytes[kCromSettingsLightActionBytes];
+      if (!take(bytes, sizeof(bytes)) || bytes[0] > SERUM_LIGHT_OFF)
+        return false;
+      action.kind = bytes[0];
+      memcpy(&action.effect, bytes + 2, sizeof(action.effect));
+      memcpy(&action.color, bytes + 4, sizeof(action.color));
+      return true;
+    };
+    uint32_t count = 0;
+    if (!take(&count, sizeof(count)) || count > 0x10000 ||
+        (uint64_t)count * kCromSettingsLightEffectBytes >
+            payload.size() - offset)
+      return false;
+    std::vector<SerumLightEffectData> effects(count);
+    for (SerumLightEffectData& data : effects) {
+      Serum_Light_Effect& effect = data.effect;
+      uint8_t reserved[3];
+      if (!take(&effect.mode, 1) || !take(&effect.options, 1) ||
+          !take(&effect.speed, 2) || !take(&effect.durationMs, 4) ||
+          !take(effect.colors, sizeof(effect.colors)) ||
+          !take(&effect.brightness, 1) || !take(reserved, sizeof(reserved)))
+        return false;
+    }
+    SerumLightAction defaults[SERUM_LIGHT_CHANNELS];
+    for (SerumLightAction& action : defaults) {
+      if (!takeAction(action)) return false;
+    }
+    uint32_t frames = 0;
+    const uint64_t frameBytes =
+        4 + SERUM_LIGHT_CHANNELS * kCromSettingsLightActionBytes;
+    if (!take(&frames, sizeof(frames)) ||
+        (uint64_t)frames * frameBytes > payload.size() - offset)
+      return false;
+    std::vector<SerumLightFrame> lightFrames(frames);
+    for (size_t i = 0; i < lightFrames.size(); ++i) {
+      SerumLightFrame& frame = lightFrames[i];
+      if (!take(&frame.frameId, sizeof(frame.frameId)) ||
+          (i > 0 && frame.frameId <= lightFrames[i - 1].frameId))
+        return false;
+      for (SerumLightAction& action : frame.channels) {
+        if (!takeAction(action)) return false;
+      }
+    }
+    const auto validEffect = [&](const SerumLightAction& action) {
+      return action.kind != SERUM_LIGHT_EFFECT || action.effect < count;
+    };
+    for (const SerumLightAction& action : defaults) {
+      if (!validEffect(action)) return false;
+    }
+    for (const SerumLightFrame& frame : lightFrames) {
+      for (const SerumLightAction& action : frame.channels) {
+        if (!validEffect(action)) return false;
+      }
+    }
+    g_serumData.hasLights = true;
+    g_serumData.lightEffects = std::move(effects);
+    std::copy(std::begin(defaults), std::end(defaults),
+              g_serumData.lightDefaults);
+    g_serumData.lightFrames = std::move(lightFrames);
   }
   return true;
 }
@@ -7672,6 +7790,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     }
 
     mySerum.frameID = frameID;
+    QueueFrameLights(frameID, now);
     if (DebugTraceAllInputsEnabled()) {
       Log("Serum debug input result: api=v2 inputCrc=%u result=frame "
           "frameId=%u sceneRequested=%s",
@@ -8736,6 +8855,33 @@ SERUM_API bool Serum_GetRuntimeMetadata(Serum_Runtime_Metadata* metadata) {
   metadata->featureFlags = BuildRuntimeFeatureFlags(mySerum.frameID);
   return true;
   SERUM_API_GUARD_END("Serum_GetRuntimeMetadata", false)
+}
+
+SERUM_API uint32_t
+Serum_GetLightEffects(Serum_Light_Effect effects[SERUM_LIGHT_CHANNELS]) {
+  SERUM_API_GUARD_START("Serum_GetLightEffects")
+  if (effects == nullptr) return 0;
+  const uint32_t mask = lightPendingMask;
+  for (uint32_t channel = 0; channel < SERUM_LIGHT_CHANNELS; ++channel) {
+    if (mask & (1u << channel)) effects[channel] = lightPending[channel];
+  }
+  lightPendingMask = 0;
+  return mask;
+  SERUM_API_GUARD_END("Serum_GetLightEffects", 0)
+}
+
+SERUM_API uint32_t
+Serum_GetDefaultLightEffects(Serum_Light_Effect effects[SERUM_LIGHT_CHANNELS]) {
+  SERUM_API_GUARD_START("Serum_GetDefaultLightEffects")
+  if (effects == nullptr || !g_serumData.hasLights) return 0;
+  for (uint32_t channel = 0; channel < SERUM_LIGHT_CHANNELS; ++channel) {
+    SerumLightAction action = g_serumData.lightDefaults[channel];
+    // A channel without a default is off.
+    if (action.kind == SERUM_LIGHT_UNCHANGED) action.kind = SERUM_LIGHT_OFF;
+    g_serumData.ResolveLightAction(action, effects[channel]);
+  }
+  return (1u << SERUM_LIGHT_CHANNELS) - 1;
+  SERUM_API_GUARD_END("Serum_GetDefaultLightEffects", 0)
 }
 
 SERUM_API bool Serum_Scene_ParseCSV(const char* const csv_filename) {
