@@ -3686,6 +3686,88 @@ static void Test_SpriteInLayerModeEndToEnd(void) {
   }
 }
 
+// A background scene with the game's dynamic text in front of it: a 128x32
+// project upscaled to 64 rows. The text has to scale the same in every scene
+// step, whatever the scene shows behind it -- a movie changes the colours
+// beside the text with every step, and Scale2x rounds a corner or not by
+// comparing exactly those, so the text flickered while the scene played. It is
+// scaled as on black: a solid corner rounds, a corner of a one pixel stroke
+// stays, both judged on the game's ROM frame (the scene steps colorize the
+// scene's marker frame, which the corner rule used to read). Scale2x only; a
+// real machine line doubles.
+static void Test_BackgroundSceneKeepsTextShape(void) {
+  using namespace n256;
+  const char* const csv = "7,1,100,0,1,1,1,0,0,4\n";  // looping, as background
+  Synth s;
+  s.is256x64 = false;
+  s.compmasks.assign((size_t)s.ncompmasks * kOPx, 0);
+  s.compmaskid.assign(s.nframes, 255);
+  s.framesprites.assign(s.framesprites.size(), 255);
+  s.isextraframe.assign(s.nframes, 0);
+  {
+    const std::filesystem::path dir = Dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "scene.csv").string();
+    {
+      std::ofstream out(path);
+      out << csv;
+    }
+    SceneGenerator generator;
+    CHECK(generator.parseCSV(path));
+    generator.setDepth(2);
+    memset(s.Native(kScene), 0, kNPx);
+    CHECK_EQ(generator.generateFrame(7, 0, s.Native(kScene), 1, true), 0xffff);
+  }
+  // The scene keeps its colours: one of its own on every pixel, so no two
+  // pixels beside the text match.
+  //
+  // The game frame, dynamic over the whole frame with the scene behind
+  // everything unlit, starting scene 7: an L of one pixel wide strokes with
+  // its corner at (lx, ly), and a solid block with its top left corner at
+  // (bx, by).
+  const uint32_t lx = 20, ly = 10, bx = 40, by = 10;
+  memset(s.Native(kDynamic), 0, kNPx);
+  for (uint32_t i = 0; i < 6; ++i) {
+    s.Native(kDynamic)[ly * kOW + lx + i] = 3;
+    s.Native(kDynamic)[(ly + i) * kOW + lx] = 3;
+  }
+  for (uint32_t y = by; y < by + 6; ++y)
+    for (uint32_t x = bx; x < bx + 6; ++x) s.Native(kDynamic)[y * kOW + x] = 3;
+  s.bgids[kDynamic] = 0;
+  memset(&s.bgmask[(size_t)kDynamic * kOPx], 1, kOPx);
+  s.triggers[kDynamic] = 7;
+  const uint16_t kText = (uint16_t)(0x0100 + 3);
+
+  if (!Load(s, FLAG_REQUEST_64P_FRAMES, false, csv)) return;
+  CHECK(upscaleExtraFromOriginal);
+  std::vector<uint8_t> game(s.Native(kDynamic), s.Native(kDynamic) + kOPx);
+  game.shrink_to_fit();
+  Serum_Colorize(game.data());
+  CHECK(g_serumData.sceneGenerator->isActive());
+  // The outer quadrant of a corner: the text colour where it is kept.
+  const auto quadrant = [](uint32_t x, uint32_t y) {
+    return mySerum.frame64[(size_t)(y * 2) * (kOW * 2) + x * 2];
+  };
+  int steps = 0;
+  for (int i = 0; i < 4; ++i) {
+    sceneNextFrameAtMs = 0;
+    const uint32_t r = Serum_Rotate();
+    if (!(r & (FLAG_RETURNED_V2_ROTATED32 | FLAG_RETURNED_V2_ROTATED64)))
+      continue;
+    ++steps;
+    // The scene shows behind the text.
+    CHECK_EQ(mySerum.frame64[(size_t)(ly * 2 - 2) * (kOW * 2) + lx * 2],
+             C32(kScene, (ly - 1) * kOW + lx));
+    // The stroke's corner stands, the block's corner is rounded.
+    CHECK_EQ(quadrant(lx, ly), kText);
+    CHECK(quadrant(bx, by) != kText);
+    CHECK_EQ(quadrant(bx + 1, by + 1), kText);
+  }
+  CHECK(steps > 0);
+  Unload();
+}
+
 // A monochrome frame paints both planes itself. On a project with an authored
 // 64-row plane it writes that plane directly, and the plane is then not the
 // upscale of the last colorized picture any more: the frame that ends the
@@ -4409,6 +4491,8 @@ static const TestCase kTests[] = {
     {"memory/with_scenes", Test_MemoryLoadWithScenes},
     {"memory/callback", Test_CallbackLoadMatchesMemoryLoad},
     {"crom/settings_block", Test_CromSettingsBlock},
+    {"upscale/background_scene_keeps_text_shape",
+     Test_BackgroundSceneKeepsTextShape},
     {"memory/writes_no_file", Test_MemoryLoadWritesNoFile},
     {"memory/failures_are_clean", Test_MemoryLoadFailuresAreClean},
 };

@@ -1110,6 +1110,21 @@ libframeutil can only recognize an unlit neighbour when the palette paints it
 black, so a colorization with a coloured background — `afm_113b`'s
 `BALL`/`CREDITS` caption on dark blue — silently lost the protection.
 
+The game's content in front of a background scene is scaled as on black.
+`Colorize_Framev2()` with `applySceneBackground` marks the pixels where the
+scene shows (`upscaleSceneMask`) and fills `upscaleRomReference` with the
+game frame's shades, unlit where the scene shows; until the colorize call ends
+(sprites included) `UpscaleRomFrame()` hands that to the corner rule and the
+separator filter, and the upscale selects for every pixel of the game's
+content on a copy of the picture with the scene's pixels black
+(`upscaleSceneFreeFrame`), per pixel, while the scene's own pixels keep
+selecting on their colours. Before, the content took its neighbours' colours
+from the scene -- a movie changes them every step, and with them which corners
+Scale2x rounds -- and the corner rule read the scene's marker frame in scene
+steps, so text in front of a background movie flickered
+(`upscale/background_scene_keeps_text_shape`). Not for an `is256x64` project,
+whose ROM frame is not laid out as the plane is.
+
 Because libserum applies the rule itself, it asks libframeutil to select with
 plain **`Scale2x`** (`selectionAlgorithm` in `UpscaleOriginalPlaneIntoExtra()`).
 libframeutil's own `Scale2xPreserve` decides first and returns the centre
