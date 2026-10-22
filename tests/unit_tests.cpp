@@ -1486,6 +1486,79 @@ static void Test_HdStaticFrameIsNotReused(void) {
   TearDownFrame();
 }
 
+// An original-only dynamic set colours the 32p plane only: on a frame with HD
+// artwork the 64p plane shows that artwork in its zone, while the other sets
+// are still scaled over it. On a frame without HD artwork it is scaled like
+// any other set, as there is nothing else to show.
+static void Test_OriginalOnlySetShowsTheExtraPlane(void) {
+  SetUpColorization();
+  upscaleExtraFromOriginal = true;
+  isextrarequested = true;
+  const size_t px = (size_t)kW * kCH;
+  const uint32_t kPlain = kFrameId, kHd = kFrameId + 1;
+
+  // Set 1 in rows 4-7, set 2 in rows 20-23, columns 4-11; both lit.
+  std::vector<uint8_t> active(px, 0), sets(px, 0), rom(px, 0);
+  for (uint32_t y = 0; y < kCH; ++y) {
+    for (uint32_t x = 4; x < 12; ++x) {
+      const size_t i = (size_t)y * kW + x;
+      if (y >= 4 && y < 8) sets[i] = 1;
+      if (y >= 20 && y < 24) sets[i] = 2;
+      active[i] = sets[i] != 0;
+      rom[i] = active[i] ? 15 : 0;
+    }
+  }
+  std::vector<uint16_t> colours((size_t)MAX_DYNA_SETS_PER_FRAME_V2 * 16, 0);
+  for (int shade = 0; shade < 16; ++shade) {
+    colours[1 * 16 + shade] = 0x1111;
+    colours[2 * 16 + shade] = 0x2222;
+  }
+  const std::vector<uint16_t> statics(px, 0);
+  const std::vector<uint8_t> noMask(px, 0);
+  const uint16_t noBackground[1] = {0xffff};
+  for (uint32_t id : {kPlain, kHd}) {
+    g_serumData.cframes_v2.set(id, statics.data(), px);
+    g_serumData.backgroundmask.set(id, noMask.data(), px);
+    g_serumData.backgroundIDs.set(id, noBackground, 1);
+    g_serumData.frameHasDynamic[id] = 1;
+    g_serumData.dynamasks.set(id, sets.data(), px);
+    g_serumData.dynamasks_active.set(id, active.data(), px);
+    g_serumData.dyna4cols_v2.set(id, colours.data(), colours.size());
+  }
+  std::vector<uint8_t> hasExtra(g_serumData.nframes, 0);
+  hasExtra[kHd] = 1;
+  FillIndexed<uint8_t>(g_serumData.isextraframe, hasExtra, 1,
+                       g_serumData.nframes);
+  const std::vector<uint16_t> artwork(px * 4, 0x0aaa);
+  g_serumData.cframes_v2_extra.set(kHd, artwork.data(), px * 4,
+                                   &g_serumData.isextraframe);
+  romFrameForUpscale = rom.data();
+
+  // The middle of each zone on both planes.
+  const auto sd = [](uint32_t y) {
+    return mySerum.frame32[(size_t)y * kW + 8];
+  };
+  const auto hd = [](uint32_t y) {
+    return mySerum.frame64[(size_t)(2 * y + 1) * (kW * 2) + 16];
+  };
+
+  Colorize_Framev2(rom.data(), kHd);
+  CHECK_EQ(hd(5), 0x1111);
+  CHECK_EQ(hd(21), 0x2222);
+
+  g_serumData.originalOnlySets = {{kPlain, 1u << 1}, {kHd, 1u << 1}};
+  Colorize_Framev2(rom.data(), kHd);
+  CHECK_EQ(sd(5), 0x1111);
+  CHECK_EQ(hd(5), 0x0aaa);
+  CHECK_EQ(hd(21), 0x2222);
+  CHECK_EQ(hd(12), 0x0aaa);
+
+  Colorize_Framev2(rom.data(), kPlain);
+  CHECK_EQ(hd(5), 0x1111);
+  CHECK_EQ(hd(21), 0x2222);
+  TearDownFrame();
+}
+
 // A colorization turns many slightly different ROM frames into one stable
 // picture, often through different frame ids. Announcing each of them as a new
 // frame makes the host re-render and re-send a picture it already has, and
@@ -4440,6 +4513,64 @@ static void Test_CromSettingsLights(void) {
   n256::Unload();
 }
 
+// The original-only dynamic sets from the settings block, directly and through
+// a cROMc; a mask of 0 or frames out of order fail the load.
+static void Test_CromSettingsOriginalOnlySets(void) {
+  n256::Synth s;
+  const auto block = [](std::vector<std::pair<uint32_t, uint32_t>> frames) {
+    std::vector<uint8_t> payload;
+    const auto putU32 = [&payload](uint32_t value) {
+      payload.insert(payload.end(), (const uint8_t*)&value,
+                     (const uint8_t*)&value + 4);
+    };
+    putU32(kCromSettingsOriginalOnlySets);
+    putU32((uint32_t)frames.size());
+    for (const auto& frame : frames) {
+      putU32(frame.first);
+      putU32(frame.second);
+    }
+    std::vector<uint8_t> result;
+    const uint32_t magic = kCromSettingsMagic;
+    const uint32_t size = (uint32_t)payload.size();
+    result.insert(result.end(), (const uint8_t*)&magic,
+                  (const uint8_t*)&magic + 4);
+    result.insert(result.end(), (const uint8_t*)&size,
+                  (const uint8_t*)&size + 4);
+    result.insert(result.end(), payload.begin(), payload.end());
+    return result;
+  };
+  std::vector<uint8_t> crom = s.Serialize();
+  const std::vector<uint8_t> good =
+      block({{n256::kStatic, 0x6u}, {n256::kDynamic, 0x80000000u}});
+  crom.insert(crom.end(), good.begin(), good.end());
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
+    if (viaConcentrate) {
+      Serum_Dispose();
+      std::filesystem::remove(n256::Dir() / n256::kRom /
+                              (std::string(n256::kRom) + ".cROM"));
+      CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
+                       n256::kBothPlanes) != NULL);
+    }
+    CHECK_EQ(g_serumData.OriginalOnlySets(n256::kStatic), 0x6u);
+    CHECK_EQ(g_serumData.OriginalOnlySets(n256::kDynamic), 0x80000000u);
+    CHECK_EQ(g_serumData.OriginalOnlySets(n256::kBackground), 0u);
+    Serum_Dispose();
+  }
+  CHECK(Serum_LoadFromMemory(s.Serialize().data(), s.Serialize().size(),
+                             n256::kBothPlanes) != NULL);
+  CHECK(g_serumData.originalOnlySets.empty());
+  Serum_Dispose();
+  for (const auto& bad : {block({{n256::kStatic, 0u}}),
+                          block({{n256::kDynamic, 1u}, {n256::kStatic, 1u}})}) {
+    std::vector<uint8_t> broken = s.Serialize();
+    broken.insert(broken.end(), bad.begin(), bad.end());
+    CHECK(Serum_LoadFromMemory(broken.data(), broken.size(),
+                               n256::kBothPlanes) == NULL);
+  }
+  n256::Unload();
+}
+
 // Serum_LoadFromMemoryWithScenes(): the scenes of a pup.csv, parsed before the
 // lookups are built, give the state and output of Serum_Load() with the same
 // pup.csv beside the cROM; without a path it is Serum_LoadFromMemory().
@@ -4698,6 +4829,8 @@ static const TestCase kTests[] = {
      Test_UnchangedPictureKeepsItsExtraPlane},
     {"colorize/hd_sprite_art_blocks_reuse", Test_HdSpriteArtBlocksReuse},
     {"colorize/hd_static_frame_is_not_reused", Test_HdStaticFrameIsNotReused},
+    {"colorize/original_only_set_shows_the_extra_plane",
+     Test_OriginalOnlySetShowsTheExtraPlane},
     {"colorize/finished_frame_already_on_display",
      Test_FinishedFrameAlreadyOnDisplay},
     {"colorize/background_mask", Test_BackgroundShowsThroughItsMask},
@@ -4764,6 +4897,7 @@ static const TestCase kTests[] = {
     {"memory/callback", Test_CallbackLoadMatchesMemoryLoad},
     {"crom/settings_block", Test_CromSettingsBlock},
     {"crom/settings_lights", Test_CromSettingsLights},
+    {"crom/settings_original_only_sets", Test_CromSettingsOriginalOnlySets},
     {"upscale/background_scene_keeps_text_shape",
      Test_BackgroundSceneKeepsTextShape},
     {"memory/writes_no_file", Test_MemoryLoadWritesNoFile},

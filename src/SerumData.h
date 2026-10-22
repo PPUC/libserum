@@ -75,6 +75,21 @@ struct SerumLightFrame {
   }
 };
 
+// The dynamic colour sets of a frame that colour only the original plane (bit n
+// for set n): in layer mode, on a frame with content of its own on the extra
+// plane, their zones are not part of the scaled layer, so the frame's extra
+// plane shows there instead. For pixel art recoloured through a dynamic zone
+// whose extra plane is an imported picture.
+struct SerumOriginalOnlySets {
+  uint32_t frameId = 0;
+  uint32_t sets = 0;
+
+  template <class Archive>
+  void serialize(Archive &ar) {
+    ar(frameId, sets);
+  }
+};
+
 struct SerumLightEffectData {
   Serum_Light_Effect effect = {};
 
@@ -223,6 +238,20 @@ class SerumData {
         lightFrames.begin(), lightFrames.end(), frameId,
         [](const SerumLightFrame &f, uint32_t id) { return f.frameId < id; });
     return it != lightFrames.end() && it->frameId == frameId ? &*it : nullptr;
+  }
+  // Dynamic sets that colour only the original plane (persisted from
+  // concentrate version 12), sorted by frame ID; frames without any are left
+  // out.
+  std::vector<SerumOriginalOnlySets> originalOnlySets;
+  // The frame's original-only sets as a bit mask; 0 when it has none.
+  uint32_t OriginalOnlySets(uint32_t frameId) const {
+    const auto it = std::lower_bound(
+        originalOnlySets.begin(), originalOnlySets.end(), frameId,
+        [](const SerumOriginalOnlySets &f, uint32_t id) {
+          return f.frameId < id;
+        });
+    return it != originalOnlySets.end() && it->frameId == frameId ? it->sets
+                                                                  : 0;
   }
   // The effect an action starts; false for SERUM_LIGHT_UNCHANGED.
   bool ResolveLightAction(const SerumLightAction &action,
@@ -655,6 +684,9 @@ class SerumData {
         ar(hasLights, lightEffects, lightFrames);
         for (SerumLightAction &action : lightDefaults) ar(action);
       }
+      if (concentrateFileVersion >= 12) {
+        ar(originalOnlySets);
+      }
     } else {
       if (concentrateFileVersion >= 8) {
         ar(scalingAlgorithm, shadowOffsetMode);
@@ -684,6 +716,11 @@ class SerumData {
         lightEffects.clear();
         lightFrames.clear();
         for (SerumLightAction &action : lightDefaults) action = {};
+      }
+      if (concentrateFileVersion >= 12) {
+        ar(originalOnlySets);
+      } else {
+        originalOnlySets.clear();
       }
     }
   }

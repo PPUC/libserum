@@ -164,6 +164,7 @@ void SerumData::Clear() {
   lightEffects.clear();
   lightFrames.clear();
   for (SerumLightAction &action : lightDefaults) action = {};
+  originalOnlySets.clear();
   hashcodes.clear();
   shapecompmode.clear();
   compmaskID.clear();

@@ -2128,11 +2128,15 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
 //            action per channel, by ascending frame ID. An action is uint8
 //            kind (SERUM_LIGHT_*), uint8 0, uint16 effect index, uint32 color
 //            (8 bytes).
+//   original-only dynamic sets: uint32 frame count, per frame uint32 frame ID
+//            and uint32 set mask (bit n for dynamic set n, not 0), by
+//            ascending frame ID (see SerumOriginalOnlySets).
 // Bytes after these are ignored, so fields can be appended to the payload.
 static constexpr uint32_t kCromSettingsMagic = 0x31584353;  // "SCX1"
 static constexpr uint32_t kCromSettingsScenes = 1;
 static constexpr uint32_t kCromSettingsScaling = 2;
 static constexpr uint32_t kCromSettingsLights = 4;
+static constexpr uint32_t kCromSettingsOriginalOnlySets = 8;
 static constexpr uint32_t kCromSettingsLightEffectBytes = 24;
 static constexpr uint32_t kCromSettingsLightActionBytes = 8;
 static constexpr uint32_t kCromSettingsSceneBytes = 13;
@@ -2248,6 +2252,20 @@ static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
     std::copy(std::begin(defaults), std::end(defaults),
               g_serumData.lightDefaults);
     g_serumData.lightFrames = std::move(lightFrames);
+  }
+  if (contents & kCromSettingsOriginalOnlySets) {
+    uint32_t frames = 0;
+    if (!take(&frames, sizeof(frames)) ||
+        (uint64_t)frames * 8 > payload.size() - offset)
+      return false;
+    std::vector<SerumOriginalOnlySets> sets(frames);
+    for (size_t i = 0; i < sets.size(); ++i) {
+      if (!take(&sets[i].frameId, sizeof(sets[i].frameId)) ||
+          !take(&sets[i].sets, sizeof(sets[i].sets)) || sets[i].sets == 0 ||
+          (i > 0 && sets[i].frameId <= sets[i - 1].frameId))
+        return false;
+    }
+    g_serumData.originalOnlySets = std::move(sets);
   }
   return true;
 }
@@ -6351,6 +6369,15 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
   // have an HD version: sprites are their own layer now.
   const bool isextra = layerMode ? HasHdStaticContent(IDfound)
                                  : CheckExtraFrameAvailable(IDfound);
+  // Dynamic sets that colour only the original plane (SerumOriginalOnlySets).
+  // Their zones stay out of the scaled layer, so the frame's own extra plane
+  // shows there; without extra content of its own the layer is the whole
+  // picture and they are scaled like every other set.
+  const uint32_t originalOnlySets =
+      (layerMode && isextra) ? g_serumData.OriginalOnlySets(IDfound) : 0;
+  const auto inScaledLayer = [originalOnlySets](uint8_t set) {
+    return set >= 32 || ((originalOnlySets >> set) & 1) == 0;
+  };
   mySerum.flags &= 0b11111100;
   uint16_t* pfr;
   uint16_t* prot;
@@ -6563,8 +6590,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                                 /*defer=*/deferSdShadows);
                 isdynapix[tk] = 1;
                 pfr[tk] = dynamicColor;
-                MarkScaledLayer(tk);
-                if (layerMode && sdDynaLayerMap) {
+                const bool scaled = inScaledLayer(dynacouche);
+                if (scaled) MarkScaledLayer(tk);
+                if (layerMode && sdDynaLayerMap && scaled) {
                   // Remember which dyna layer this lit pixel belongs to, so
                   // the extra plane can generate its shadow after upscaling.
                   sdDynaLayerMap[tk] = (uint8_t)(dynacouche + 1);
@@ -6576,7 +6604,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             } else if (isdynapix[tk] == 0) {
               pfr[tk] = frameDynaColors[dynacouche * g_serumData.nocolors +
                                         frame[tk]];
-              MarkScaledLayer(tk);
+              if (inScaledLayer(dynacouche)) MarkScaledLayer(tk);
             }
             if (!dynamicBlackSuppressed)
               prot[tk * 2] = prot[tk * 2 + 1] = 0xffff;
@@ -6605,6 +6633,10 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
     const uint8_t* sdDynaActive = (layerMode && sdHasDynamic)
                                       ? g_serumData.dynamasks_active[IDfound]
                                       : nullptr;
+    // A zone of an original-only set is not underlay: nothing paints over it.
+    const uint8_t* sdDyna = (sdDynaActive && originalOnlySets != 0)
+                                ? g_serumData.dynamasks[IDfound]
+                                : nullptr;
     // In layer mode the HD dynamic data is ignored outright: all dynamic
     // content comes from the SD pass and is composited on top. Forcing this
     // false makes every dynamic pixel take the static path here, which is
@@ -6683,9 +6715,11 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         // composite rounds the glyph by Scale2x on the COLOUR key. The two
         // footprints disagree, and every disagreement leaves a black pixel
         // inside the glyph.
+        const size_t srcPixel =
+            (size_t)(tj >> 1) * g_serumData.fwidth + (ti >> 1);
         const bool srcIsDynamicZone =
-            sdDynaActive &&
-            sdDynaActive[(tj >> 1) * g_serumData.fwidth + (ti >> 1)] != 0;
+            sdDynaActive && sdDynaActive[srcPixel] != 0 &&
+            (!sdDyna || inScaledLayer(sdDyna[srcPixel]));
         // Same rule as the original-resolution pass. In layer mode
         // frameHasDynamicExtra is false and the scaled layer carries it.
         const bool unlitDynamicKeepsColour =

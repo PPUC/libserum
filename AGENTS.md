@@ -8,6 +8,12 @@ This document explains how `libserum` works end-to-end, with emphasis on runtime
 `.clang-format`. Any code changes must be formatted accordingly before they are
 considered done.
 
+**Version rule:** `master` carries 2.9.x, an unstable development line. Raise
+`SERUM_VERSION_PATCH` (`src/serum-version.h`) in every commit. Within 2.9.x the
+cROMc format does not have to stay readable by the next version, as authors
+generate a new cROMc; still raise `SERUM_CONCENTRATE_VERSION` when it changes.
+The next stable release will be 3.0.0; `2.8.x` is the stable branch.
+
 **Local notes rule:** If `AGENTS.local.md` exists in the repository root, read
 it before working. It is untracked on purpose and carries detail about this
 checkout that must not be committed, so its absence is normal and nothing in
@@ -337,7 +343,11 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
 
 - A cROM without the block ends before it; an older library stops reading
   before it. Bytes after the known payload fields are ignored, so fields can
-  be appended. A block that is cut short or malformed fails the load.
+  be appended. The original-only dynamic sets (`kCromSettingsOriginalOnlySets`,
+  8; see "Original-only dynamic sets") are a part as well: frames by ascending
+  ID with a non-zero set mask each; a mask of 0 or frames out of order fail the
+  load. They are stored in the cROMc from concentrate version 12. A block
+  that is cut short or malformed fails the load.
 - Scenes from the block set `scenesFromColorization`, scaling settings set
   `scalingFromColorization` (also when the block holds zero scenes). Either
   makes the matching sidecar (`<rom>.pup.csv`, `scaling.txt`) ignored, in the
@@ -839,11 +849,33 @@ them, so honouring them produced blocky dynamic zones next to sharp statics. In
 layer mode `frameHasDynamicExtra` is forced false, which also makes the extra
 plane render the correct *underlay* beneath dynamic content.
 
+### Original-only dynamic sets
+
+A dynamic set can be marked to colour the original plane only
+(`SerumOriginalOnlySets`, `g_serumData.OriginalOnlySets(frameId)`, bit n for
+set n; from the settings block, see "cROM settings block"). It is for pixel art
+that the author colours through a dynamic zone so it can be recoloured easily,
+on a frame whose extra plane is an imported picture: the upscaled zone would
+cover that picture. On a frame with HD statics (`HasHdStaticContent()`) in
+layer mode, `Colorize_Framev2()`:
+
+- still colours the zone on the original plane, its shadow included;
+- does not mark its pixels in `scaledLayerCoverage` or `sdDynaLayerMap`, so the
+  composite leaves them to the extra plane and no extra-plane shadow is
+  generated for them;
+- treats them as static in the extra-plane pass (`srcIsDynamicZone` false), so
+  the frame's `cframes_v2_extra`, or its HD background where the ROM is unlit
+  under the background mask, shows there.
+
+On a frame without HD statics the scaled layer is the whole picture, and such a
+set is scaled like any other. Sets of the other frames, sprites and
+`is256x64` projects are not affected.
+
 ### The coverage mask
 
 `scaledLayerCoverage` (one byte per original-resolution pixel) records what the
-scaled layer owns. Dynamic zones always; statics only when there are no HD
-statics; a sprite's dynamic pixels always, its other pixels only when it has no
+scaled layer owns. Dynamic zones always, except those of an original-only set
+(below); statics only when there are no HD statics; a sprite's dynamic pixels always, its other pixels only when it has no
 HD art. Pixels suppressed by `FLAG_SCENE_REPLACE_DYNAMIC_BLACK` are left unowned
 so the HD background shows through.
 
@@ -1261,7 +1293,9 @@ Finished-scene default behavior:
   scene frame is incomplete/unavailable.
 
 ## cROMc persistence
-Current concentrate version: **11**. Version 11 adds the speaker lights after
+Current concentrate version: **12**. Version 12 adds the original-only dynamic
+sets after the lights (see "Original-only dynamic sets"). Version 11 adds the
+speaker lights after
 the version 9 flags (see "Speaker lights"). Version 10 stores `framesprites` and
 `spriteCandidateIds` with 16-bit sprite IDs and the slot count of the
 colorization (see "cROM format version, sprites per frame and sprite IDs").
