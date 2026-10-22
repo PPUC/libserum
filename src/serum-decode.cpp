@@ -3843,7 +3843,14 @@ static std::string BuildConcentratePathFromSourcePath(const char* filename) {
   return concentratePath;
 }
 
+static bool SaveConcentrateTo(const std::string& concentratePath);
+
 bool Serum_SaveConcentrate(const char* filename) {
+  return SaveConcentrateTo(BuildConcentratePathFromSourcePath(filename));
+}
+
+// Serum_SaveConcentrate() to the path itself.
+static bool SaveConcentrateTo(const std::string& concentratePath) {
   if (!cromloaded || is_real_machine()) return false;
   // A save always produces the current concentrate format, no matter which
   // version the in-memory model was loaded from. This has to happen before
@@ -3854,9 +3861,6 @@ bool Serum_SaveConcentrate(const char* filename) {
     g_serumData.sceneGenerator->setDepth(g_serumData.nocolors == 16 ? 4 : 2);
   }
   BuildFrameLookupVectors();
-
-  const std::string concentratePath =
-      BuildConcentratePathFromSourcePath(filename);
 
   return g_serumData.SaveToFile(concentratePath.c_str());
 }
@@ -5255,6 +5259,39 @@ SERUM_API Serum_Frame_Struc* Serum_LoadFromSource(
       },
       csvPath, flags, "Serum_LoadFromSource");
   SERUM_API_GUARD_END("Serum_LoadFromSource", nullptr)
+}
+
+SERUM_API bool Serum_ConcentrateFromSource(
+    const Serum_Colorization_Source* source, const char* const cromcPath) {
+  SERUM_API_GUARD_START("Serum_ConcentrateFromSource")
+  if (!source || !source->fill || !cromcPath || cromcPath[0] == '\0') {
+    SetLastErrorMessage("Serum_ConcentrateFromSource: no source or path");
+    return false;
+  }
+  // As Serum_Load() does for a raw cROM before it writes the cROMc: both
+  // planes, the packing of a machine, the cROMc written right after reading.
+  uint8_t runtimeFlags = 0;
+  uint8_t loadFlags = runtimeFlags;
+  Serum_free();
+  BeginColorizationLoad();
+  RequestBothPlanesByDefault(false, loadFlags, runtimeFlags);
+  loadFlags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
+  bool saved = false;
+  try {
+    saved = LoadV2FromSource(*source, loadFlags, runtimeFlags) != NULL &&
+            SaveConcentrateTo(cromcPath);
+  } catch (const std::exception& e) {
+    SetLastErrorMessage("Serum_ConcentrateFromSource: %s", e.what());
+    saved = false;
+  }
+  Serum_free();
+  enabled = false;
+  if (!saved && g_lastErrorMessage[0] == '\0') {
+    SetLastErrorMessage(
+        "Serum_ConcentrateFromSource: the cROMc was not written");
+  }
+  return saved;
+  SERUM_API_GUARD_END("Serum_ConcentrateFromSource", false)
 }
 
 SERUM_API Serum_Frame_Struc* Serum_LoadFromCallback(Serum_ReadCallback read,

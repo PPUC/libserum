@@ -4764,6 +4764,35 @@ static void Test_SourceBuildsTheCromsColorization(void) {
   crom.insert(crom.end(), block.begin(), block.end());
   source::ExpectSameAsCrom(crom, "with a settings block");
 
+  // The cROMc of an export: Serum_ConcentrateFromSource() writes what
+  // Serum_Load() generates beside the cROM, byte for byte.
+  {
+    const std::filesystem::path dir = n256::Dir() / "export";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir / n256::kRom);
+    WriteTestFile(dir / n256::kRom / (std::string(n256::kRom) + ".cROM"), crom);
+    Serum_SetGenerateCRomC(true);
+    CHECK(Serum_Load(dir.string().c_str(), n256::kRom, 0) != NULL);
+    Serum_Dispose();
+    std::ifstream generated(
+        dir / n256::kRom / (std::string(n256::kRom) + ".cROMc"),
+        std::ios::binary);
+    const std::vector<uint8_t> fromLoad(
+        (std::istreambuf_iterator<char>(generated)), {});
+    source::CromSource exported;
+    exported.crom = crom;
+    CHECK(exported.Parse());
+    const std::filesystem::path target = dir / "exported.cROMc";
+    CHECK(
+        Serum_ConcentrateFromSource(&exported.source, target.string().c_str()));
+    std::ifstream written(target, std::ios::binary);
+    const std::vector<uint8_t> fromSource(
+        (std::istreambuf_iterator<char>(written)), {});
+    CHECK(!fromLoad.empty());
+    CHECK(fromLoad == fromSource);
+    CHECK(!Serum_ConcentrateFromSource(&exported.source, ""));
+  }
+
   // A source without fill() is refused.
   Serum_Colorization_Source empty{};
   CHECK(Serum_LoadFromSource(&empty, NULL, n256::kBothPlanes) == NULL);

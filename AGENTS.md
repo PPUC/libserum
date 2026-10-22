@@ -353,10 +353,15 @@ and stores it exactly as the cROM reader stores what it reads:
 - `LoadThrough()` is the frame of all memory loads (free, plane requests, fast
   packing, a pup.csv, `FinishColorizationLoad()`); `LoadFromReader()` and
   `Serum_LoadFromSource()` differ only in what they read.
-- `Serum_SaveConcentrate()` writes the cROMc of the built colorization.
+- `Serum_ConcentrateFromSource()` writes the cROMc of a source to a path: built
+  as `Serum_Load()` builds a raw cROM before it writes the cROMc (both planes,
+  the packing of a machine, written right after reading; `SaveConcentrateTo()`),
+  so it is the cROMc `Serum_Load()` generates for a cROM of the same data. No
+  sidecars: scenes and scaling come from the settings payload.
 - Test `source/builds_the_croms_colorization`: a source serving a cROM's blocks
   gives the same cROMc as loading the cROM, for format 0 and 1, with a settings
-  block, and for a real cRZ given in `SERUM_TEST_CRZ` (checked on `afm_113b` and
+  block; `Serum_ConcentrateFromSource()` gives the cROMc `Serum_Load()`
+  generates; and for a real cRZ given in `SERUM_TEST_CRZ` (checked on `afm_113b` and
   `trn_174h`).
 
 This is the first step towards libserum 3.0, which will load cROMc only: an

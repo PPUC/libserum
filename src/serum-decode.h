@@ -112,6 +112,18 @@ SERUM_API Serum_Frame_Struc* Serum_LoadFromSource(
     const Serum_Colorization_Source* source, const char* const csvPath,
     uint8_t flags);
 
+/** @brief Write the cROMc of a colorization an authoring tool hands over
+ *
+ * Builds the colorization from the source as Serum_LoadFromSource() does, but
+ * with the packing of Serum_Load(), and writes its cROMc to cromcPath: the
+ * cROMc Serum_Load() writes for a cROM of the same data. Nothing stays loaded.
+ * Scenes and scaling settings come from the source's settings payload only.
+ *
+ * @return false with Serum_GetLastErrorMessage() when it fails.
+ */
+SERUM_API bool Serum_ConcentrateFromSource(
+    const Serum_Colorization_Source* source, const char* const cromcPath);
+
 SERUM_API Serum_Frame_Struc* Serum_LoadFromCallback(Serum_ReadCallback read,
                                                     void* userData, size_t size,
                                                     const char* const csvPath,
