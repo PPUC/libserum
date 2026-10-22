@@ -2825,6 +2825,186 @@ static const uint8_t kBothPlanes =
 
 }  // namespace n256
 
+namespace source {
+
+// A Serum_Colorization_Source that serves the blocks of a cROM held in memory
+// (header revision 20 or later), as an authoring tool would serve its own
+// data: what Serum_LoadFromSource() builds from it has to be what
+// Serum_LoadFromMemory() loads from the cROM.
+struct CromSource {
+  struct Block {
+    size_t offset = 0;
+    size_t elementBytes = 0;
+    // Format version 0: 8-bit sprite IDs, handed out widened.
+    bool narrowSprites = false;
+  };
+
+  std::vector<uint8_t> crom;
+  Serum_Colorization_Source source{};
+  Block blocks[SERUM_BLOCK_COUNT];
+  std::vector<uint8_t> settings;
+
+  template <typename T>
+  T At(size_t offset) const {
+    T value;
+    memcpy(&value, crom.data() + offset, sizeof(T));
+    return value;
+  }
+
+  bool Parse() {
+    size_t pos = 0;
+    memcpy(source.romName, crom.data(), 64);
+    pos += 64;
+    const uint32_t sizeheader = At<uint32_t>(pos);
+    pos += 4;
+    if (sizeheader < 20 * sizeof(uint32_t)) return false;
+    source.width = At<uint32_t>(pos);
+    source.height = At<uint32_t>(pos + 4);
+    source.widthExtra = At<uint32_t>(pos + 8);
+    source.heightExtra = At<uint32_t>(pos + 12);
+    source.frames = At<uint32_t>(pos + 16);
+    source.colors = At<uint32_t>(pos + 20);
+    source.comparisonMasks = At<uint32_t>(pos + 24);
+    source.sprites = At<uint32_t>(pos + 28);
+    source.backgrounds = At<uint16_t>(pos + 32);
+    pos += 34;
+    source.is256x64 = At<int32_t>(pos) != 0;
+    pos += 4;
+    uint32_t formatVersion = 0;
+    source.spritesPerFrame = LEGACY_SPRITES_PER_FRAME;
+    if (sizeheader >= 21 * sizeof(uint32_t)) {
+      formatVersion = At<uint32_t>(pos);
+      pos += 4;
+      if (formatVersion >= 1) {
+        source.spritesPerFrame = At<uint32_t>(pos);
+        pos += 4;
+      }
+    }
+    const size_t plane = (size_t)source.width * source.height;
+    const size_t extra = (size_t)source.widthExtra * source.heightExtra;
+    const size_t native = source.is256x64 ? extra : plane;
+    const size_t sprite = (size_t)MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
+    const size_t c = source.colors;
+    const size_t s = source.spritesPerFrame;
+    const uint32_t F = source.frames, M = source.comparisonMasks,
+                   S = source.sprites, B = source.backgrounds;
+    struct Entry {
+      Serum_Block block;
+      size_t bytes;
+      uint32_t count;
+    };
+    const Entry entries[] = {
+        {SERUM_BLOCK_FRAME_HASH, 4, F},
+        {SERUM_BLOCK_FRAME_SHAPE_MODE, 1, F},
+        {SERUM_BLOCK_FRAME_MASK_ID, 1, F},
+        {SERUM_BLOCK_COMPARISON_MASK, native, M},
+        {SERUM_BLOCK_FRAME_HAS_EXTRA, 1, F},
+        {SERUM_BLOCK_FRAME_COLORS, 2 * plane, F},
+        {SERUM_BLOCK_FRAME_COLORS_EXTRA, 2 * extra, F},
+        {SERUM_BLOCK_FRAME_DYNAMIC_MASK, plane, F},
+        {SERUM_BLOCK_FRAME_DYNAMIC_MASK_EXTRA, extra, F},
+        {SERUM_BLOCK_FRAME_DYNAMIC_COLORS, 2 * 32 * c, F},
+        {SERUM_BLOCK_FRAME_DYNAMIC_COLORS_EXTRA, 2 * 32 * c, F},
+        {SERUM_BLOCK_SPRITE_HAS_EXTRA, 1, S},
+        {SERUM_BLOCK_FRAME_SPRITES, formatVersion >= 1 ? 2 * s : s, F},
+        {SERUM_BLOCK_SPRITE_ORIGINAL, sprite, S},
+        {SERUM_BLOCK_SPRITE_COLORS, 2 * sprite, S},
+        {SERUM_BLOCK_SPRITE_MASK_EXTRA, sprite, S},
+        {SERUM_BLOCK_SPRITE_COLORS_EXTRA, 2 * sprite, S},
+        {SERUM_BLOCK_FRAME_ACTIVE, 1, F},
+        {SERUM_BLOCK_FRAME_ROTATIONS, 2 * 64 * 4, F},
+        {SERUM_BLOCK_FRAME_ROTATIONS_EXTRA, 2 * 64 * 4, F},
+        {SERUM_BLOCK_SPRITE_DETECTION_DWORDS, 4 * 4, S},
+        {SERUM_BLOCK_SPRITE_DETECTION_POSITIONS, 2 * 4, S},
+        {SERUM_BLOCK_SPRITE_DETECTION_AREAS, 2 * 4 * 4, S},
+        {SERUM_BLOCK_FRAME_TRIGGER, 4, F},
+        {SERUM_BLOCK_FRAME_SPRITE_BOUNDS, 2 * s * 4, F},
+        {SERUM_BLOCK_BACKGROUND_HAS_EXTRA, 1, B},
+        {SERUM_BLOCK_BACKGROUND_COLORS, 2 * plane, B},
+        {SERUM_BLOCK_BACKGROUND_COLORS_EXTRA, 2 * extra, B},
+        {SERUM_BLOCK_FRAME_BACKGROUND_ID, 2, F},
+        {SERUM_BLOCK_FRAME_BACKGROUND_MASK, plane, F},
+        {SERUM_BLOCK_FRAME_BACKGROUND_MASK_EXTRA, extra, F},
+        {SERUM_BLOCK_FRAME_SHADOW_DIRECTIONS, 32, F},
+        {SERUM_BLOCK_FRAME_SHADOW_COLORS, 2 * 32, F},
+        {SERUM_BLOCK_FRAME_SHADOW_DIRECTIONS_EXTRA, 32, F},
+        {SERUM_BLOCK_FRAME_SHADOW_COLORS_EXTRA, 2 * 32, F},
+        {SERUM_BLOCK_SPRITE_DYNAMIC_COLORS, 2 * 9 * c, S},
+        {SERUM_BLOCK_SPRITE_DYNAMIC_COLORS_EXTRA, 2 * 9 * c, S},
+        {SERUM_BLOCK_SPRITE_DYNAMIC_MASK, sprite, S},
+        {SERUM_BLOCK_SPRITE_DYNAMIC_MASK_EXTRA, sprite, S},
+        {SERUM_BLOCK_SPRITE_SHAPE_MODE, 1, S},
+    };
+    for (const Entry& entry : entries) {
+      Block& block = blocks[entry.block];
+      block.offset = pos;
+      block.elementBytes = entry.bytes;
+      block.narrowSprites =
+          entry.block == SERUM_BLOCK_FRAME_SPRITES && formatVersion == 0;
+      pos += entry.bytes * entry.count;
+      if (pos > crom.size()) return false;
+    }
+    if (crom.size() - pos >= 8 && At<uint32_t>(pos) == kCromSettingsMagic) {
+      const uint32_t size = At<uint32_t>(pos + 4);
+      settings.assign(crom.begin() + pos + 8, crom.begin() + pos + 8 + size);
+    }
+    source.settings = settings.empty() ? nullptr : settings.data();
+    source.settingsSize = settings.size();
+    source.userData = this;
+    source.fill = &Fill;
+    return true;
+  }
+
+  static void SERUM_CALLBACK Fill(void* userData, Serum_Block block,
+                                  uint32_t index, void* out, size_t size) {
+    const CromSource& self = *static_cast<CromSource*>(userData);
+    const Block& b = self.blocks[block];
+    const uint8_t* element =
+        self.crom.data() + b.offset + index * b.elementBytes;
+    if (b.narrowSprites) {
+      uint16_t* wide = static_cast<uint16_t*>(out);
+      for (size_t i = 0; i < size / 2; ++i)
+        wide[i] = element[i] == 255 ? SERUM_NO_SPRITE : element[i];
+      return;
+    }
+    CHECK_EQ(size, b.elementBytes);
+    memcpy(out, element, size);
+  }
+};
+
+// The cROMc a loaded colorization writes, as bytes.
+static std::vector<uint8_t> Concentrate(const char* name) {
+  const std::filesystem::path dir = n256::Dir();
+  std::filesystem::create_directories(dir);
+  const std::filesystem::path crom = dir / (std::string(name) + ".cROM");
+  CHECK(Serum_SaveConcentrate(crom.string().c_str()));
+  std::ifstream in(dir / (std::string(name) + ".cROMc"), std::ios::binary);
+  return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
+}
+
+// Builds the cROM's colorization through a source and through the cROM, and
+// compares the cROMc both write.
+static void ExpectSameAsCrom(const std::vector<uint8_t>& crom,
+                             const char* what) {
+  CromSource source;
+  source.crom = crom;
+  CHECK(source.Parse());
+  CHECK(Serum_LoadFromMemory(crom.data(), crom.size(), n256::kBothPlanes) !=
+        NULL);
+  const std::vector<uint8_t> fromCrom = Concentrate("from_crom");
+  Serum_Dispose();
+  CHECK(Serum_LoadFromSource(&source.source, NULL, n256::kBothPlanes) != NULL);
+  const std::vector<uint8_t> fromSource = Concentrate("from_source");
+  Serum_Dispose();
+  if (fromCrom.empty() || fromCrom != fromSource) {
+    Fail(__FILE__, __LINE__,
+         "%s: the cROMc from the source differs (%zu, %zu bytes)", what,
+         fromCrom.size(), fromSource.size());
+  }
+}
+
+}  // namespace source
+
 // The flag survives both load paths and leaves one plane: 256x64. There is no
 // 128x32 plane, not even an allocated one. It must not outlive the
 // colorization it came with -- a cROM with an older header, or a v1 one, never
@@ -4571,6 +4751,38 @@ static void Test_CromSettingsOriginalOnlySets(void) {
   n256::Unload();
 }
 
+// Serum_LoadFromSource() builds the colorization a cROM of the same data
+// loads: the same cROMc, for 8- and 16-bit sprite IDs and with a settings
+// block.
+static void Test_SourceBuildsTheCromsColorization(void) {
+  n256::Synth s;
+  source::ExpectSameAsCrom(s.Serialize(), "format 0");
+  s.SetFormat(1, 40);
+  std::vector<uint8_t> crom = s.Serialize();
+  source::ExpectSameAsCrom(crom, "format 1, 40 slots");
+  const std::vector<uint8_t> block = lights::Block();
+  crom.insert(crom.end(), block.begin(), block.end());
+  source::ExpectSameAsCrom(crom, "with a settings block");
+
+  // A source without fill() is refused.
+  Serum_Colorization_Source empty{};
+  CHECK(Serum_LoadFromSource(&empty, NULL, n256::kBothPlanes) == NULL);
+  CHECK(Serum_LoadFromSource(NULL, NULL, n256::kBothPlanes) == NULL);
+
+  // Optional: a real colorization, SERUM_TEST_CRZ as for crz/real_archive.
+  const char* real = std::getenv("SERUM_TEST_CRZ");
+  if (real && real[0]) {
+    uint8_t* data = NULL;
+    size_t size = 0;
+    CHECK(Serum_CRZ_Read(real, &data, &size));
+    if (data) {
+      source::ExpectSameAsCrom(std::vector<uint8_t>(data, data + size), real);
+      Serum_CRZ_Free(data);
+    }
+  }
+  n256::Unload();
+}
+
 // Serum_LoadFromMemoryWithScenes(): the scenes of a pup.csv, parsed before the
 // lookups are built, give the state and output of Serum_Load() with the same
 // pup.csv beside the cROM; without a path it is Serum_LoadFromMemory().
@@ -4898,6 +5110,8 @@ static const TestCase kTests[] = {
     {"crom/settings_block", Test_CromSettingsBlock},
     {"crom/settings_lights", Test_CromSettingsLights},
     {"crom/settings_original_only_sets", Test_CromSettingsOriginalOnlySets},
+    {"source/builds_the_croms_colorization",
+     Test_SourceBuildsTheCromsColorization},
     {"upscale/background_scene_keeps_text_shape",
      Test_BackgroundSceneKeepsTextShape},
     {"memory/writes_no_file", Test_MemoryLoadWritesNoFile},

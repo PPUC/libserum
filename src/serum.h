@@ -16,6 +16,87 @@ typedef size_t(SERUM_CALLBACK* Serum_ReadCallback)(void* userData,
                                                    uint8_t* buffer,
                                                    size_t size);
 
+// Serum_LoadFromSource(): the blocks of a colorization, in the order a v2
+// cROM stores them. Each element of a block is one record of its kind (a
+// frame, comparison mask, sprite or background); the comment gives the type
+// and count of the values of one element. W x H is the original plane,
+// WE x HE the extra plane, N the frame of the ROM (W x H, or WE x HE for a
+// 256x64 project), C the colors, S the sprites per frame, SP the pixels of a
+// sprite (MAX_SPRITE_WIDTH x MAX_SPRITE_HEIGHT).
+typedef enum {
+  SERUM_BLOCK_FRAME_HASH,                   // frame: uint32
+  SERUM_BLOCK_FRAME_SHAPE_MODE,             // frame: uint8
+  SERUM_BLOCK_FRAME_MASK_ID,                // frame: uint8
+  SERUM_BLOCK_COMPARISON_MASK,              // mask: uint8 x N
+  SERUM_BLOCK_FRAME_HAS_EXTRA,              // frame: uint8
+  SERUM_BLOCK_FRAME_COLORS,                 // frame: uint16 x W x H
+  SERUM_BLOCK_FRAME_COLORS_EXTRA,           // frame: uint16 x WE x HE
+  SERUM_BLOCK_FRAME_DYNAMIC_MASK,           // frame: uint8 x W x H
+  SERUM_BLOCK_FRAME_DYNAMIC_MASK_EXTRA,     // frame: uint8 x WE x HE
+  SERUM_BLOCK_FRAME_DYNAMIC_COLORS,         // frame: uint16 x 32 x C
+  SERUM_BLOCK_FRAME_DYNAMIC_COLORS_EXTRA,   // frame: uint16 x 32 x C
+  SERUM_BLOCK_SPRITE_HAS_EXTRA,             // sprite: uint8
+  SERUM_BLOCK_FRAME_SPRITES,                // frame: uint16 x S (0xffff: none)
+  SERUM_BLOCK_SPRITE_ORIGINAL,              // sprite: uint8 x SP
+  SERUM_BLOCK_SPRITE_COLORS,                // sprite: uint16 x SP
+  SERUM_BLOCK_SPRITE_MASK_EXTRA,            // sprite: uint8 x SP
+  SERUM_BLOCK_SPRITE_COLORS_EXTRA,          // sprite: uint16 x SP
+  SERUM_BLOCK_FRAME_ACTIVE,                 // frame: uint8
+  SERUM_BLOCK_FRAME_ROTATIONS,              // frame: uint16 x 64 x 4
+  SERUM_BLOCK_FRAME_ROTATIONS_EXTRA,        // frame: uint16 x 64 x 4
+  SERUM_BLOCK_SPRITE_DETECTION_DWORDS,      // sprite: uint32 x 4
+  SERUM_BLOCK_SPRITE_DETECTION_POSITIONS,   // sprite: uint16 x 4
+  SERUM_BLOCK_SPRITE_DETECTION_AREAS,       // sprite: uint16 x 4 x 4
+  SERUM_BLOCK_FRAME_TRIGGER,                // frame: uint32
+  SERUM_BLOCK_FRAME_SPRITE_BOUNDS,          // frame: uint16 x S x 4
+  SERUM_BLOCK_BACKGROUND_HAS_EXTRA,         // background: uint8
+  SERUM_BLOCK_BACKGROUND_COLORS,            // background: uint16 x W x H
+  SERUM_BLOCK_BACKGROUND_COLORS_EXTRA,      // background: uint16 x WE x HE
+  SERUM_BLOCK_FRAME_BACKGROUND_ID,          // frame: uint16 (0xffff: none)
+  SERUM_BLOCK_FRAME_BACKGROUND_MASK,        // frame: uint8 x W x H
+  SERUM_BLOCK_FRAME_BACKGROUND_MASK_EXTRA,  // frame: uint8 x WE x HE
+  SERUM_BLOCK_FRAME_SHADOW_DIRECTIONS,      // frame: uint8 x 32
+  SERUM_BLOCK_FRAME_SHADOW_COLORS,          // frame: uint16 x 32
+  SERUM_BLOCK_FRAME_SHADOW_DIRECTIONS_EXTRA,  // frame: uint8 x 32
+  SERUM_BLOCK_FRAME_SHADOW_COLORS_EXTRA,      // frame: uint16 x 32
+  SERUM_BLOCK_SPRITE_DYNAMIC_COLORS,          // sprite: uint16 x 9 x C
+  SERUM_BLOCK_SPRITE_DYNAMIC_COLORS_EXTRA,    // sprite: uint16 x 9 x C
+  SERUM_BLOCK_SPRITE_DYNAMIC_MASK,            // sprite: uint8 x SP
+  SERUM_BLOCK_SPRITE_DYNAMIC_MASK_EXTRA,      // sprite: uint8 x SP
+  SERUM_BLOCK_SPRITE_SHAPE_MODE,              // sprite: uint8
+  SERUM_BLOCK_COUNT
+} Serum_Block;
+
+// Serum_LoadFromSource(): writes element `index` of `block` into `out`
+// (`size` bytes, see Serum_Block).
+typedef void(SERUM_CALLBACK* Serum_FillCallback)(void* userData,
+                                                 Serum_Block block,
+                                                 uint32_t index, void* out,
+                                                 size_t size);
+
+// A colorization handed over by an authoring tool instead of a cROM: what a
+// cROM's header says, the blocks through fill(), and the payload of the cROM
+// settings block (scenes, scaling, lights, original-only dynamic sets; see
+// AGENTS.md "cROM settings block"), without its magic and size.
+typedef struct {
+  char romName[64];
+  uint32_t width;
+  uint32_t height;
+  uint32_t widthExtra;
+  uint32_t heightExtra;
+  uint32_t frames;
+  uint32_t colors;
+  uint32_t comparisonMasks;
+  uint32_t sprites;
+  uint16_t backgrounds;
+  uint8_t is256x64;
+  uint32_t spritesPerFrame;
+  Serum_FillCallback fill;
+  void* userData;
+  const uint8_t* settings;
+  size_t settingsSize;
+} Serum_Colorization_Source;
+
 typedef void(SERUM_CALLBACK* Serum_LogCallback)(const char* format,
                                                 va_list args,
                                                 const void* userData);

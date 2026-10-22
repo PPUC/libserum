@@ -94,6 +94,24 @@ SERUM_API Serum_Frame_Struc* Serum_LoadFromMemoryWithScenes(
  *
  * @return As Serum_LoadFromMemory().
  */
+/** @brief Load a colorization an authoring tool hands over
+ *
+ * As Serum_LoadFromMemoryWithScenes(), for a colorization that comes from the
+ * tool's own data instead of a cROM: libserum asks for every element of every
+ * block through source->fill(), in cROM order, and builds the same
+ * colorization a cROM of that data loads. Serum_SaveConcentrate() then writes
+ * its cROMc.
+ *
+ * @param source: the header values, fill() and the settings payload
+ * @param csvPath: the pup.csv to read the scenes from, or NULL
+ * @param flags: as for Serum_Load()
+ *
+ * @return As Serum_LoadFromMemory().
+ */
+SERUM_API Serum_Frame_Struc* Serum_LoadFromSource(
+    const Serum_Colorization_Source* source, const char* const csvPath,
+    uint8_t flags);
+
 SERUM_API Serum_Frame_Struc* Serum_LoadFromCallback(Serum_ReadCallback read,
                                                     void* userData, size_t size,
                                                     const char* const csvPath,

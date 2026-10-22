@@ -827,29 +827,36 @@ class SparseVector {
     }
   }
 
+  // A block of numElements elements, stored one by one with storeElement():
+  // what readFromCRomReader() reads from a cROM, and what the builder of an
+  // authoring tool hands in instead (serum-builder.h). Both store the same.
+  void beginElements(size_t elementSize, uint32_t numElements) {
+    if (useIndex) {
+      index.assign(numElements, std::vector<T>(elementSize));
+    }
+  }
+
+  template <typename U = T>
+  void storeElement(uint32_t elementId, const T *values, size_t elementSize,
+                    SparseVector<U> *parent = nullptr) {
+    if (useIndex) {
+      index[elementId].assign(values, values + elementSize);
+    } else {
+      set(elementId, values, elementSize, parent);
+    }
+  }
+
   template <typename Reader, typename U = T>
   void readFromCRomReader(size_t elementSize, uint32_t numElements,
                           Reader &reader, SparseVector<U> *parent = nullptr) {
-    if (useIndex) {
-      index.resize(numElements);
-      for (uint32_t i = 0; i < numElements; ++i) {
-        index[i].resize(elementSize);
-        if (!reader.readExact(index[i].data(), elementSize * sizeof(T))) {
-          fprintf(stderr, "File read error\n");
-          exit(1);
-        }
+    beginElements(elementSize, numElements);
+    std::vector<T> tmp(elementSize);
+    for (uint32_t i = 0; i < numElements; ++i) {
+      if (!reader.readExact(tmp.data(), elementSize * sizeof(T))) {
+        fprintf(stderr, "File read error\n");
+        exit(1);
       }
-    } else {
-      std::vector<T> tmp(elementSize);
-
-      for (uint32_t i = 0; i < numElements; ++i) {
-        if (!reader.readExact(tmp.data(), elementSize * sizeof(T))) {
-          fprintf(stderr, "File read error\n");
-          exit(1);
-        }
-
-        set(i, tmp.data(), elementSize, parent);
-      }
+      storeElement(i, tmp.data(), elementSize, parent);
     }
   }
 

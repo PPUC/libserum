@@ -4091,6 +4091,343 @@ Serum_Frame_Struc* Serum_LoadConcentrate(const char* filename,
   return result;
 }
 
+// After the header: which planes are rendered and the buffers for them.
+// False (with everything freed) when an allocation fails.
+static bool PrepareV2Planes(const uint8_t loadFlags, const uint8_t runtimeFlags,
+                            bool& loadExtraDataRequested) {
+  // Only now: which planes are rendered, whether libserum upscales, and which
+  // request needs the extra-plane data all depend on whether the ROM frame is
+  // 256x64.
+  ConfigureRequestedOutputMode(runtimeFlags);
+  loadExtraDataRequested = IsExtra32Requested(loadFlags) ||
+                           IsExtra64Requested(loadFlags) ||
+                           NativePlaneRequested(loadFlags);
+
+  if (!AllocateFrameWorkBuffers()) {
+    Serum_free();
+    enabled = false;
+    return false;
+  }
+
+  if (Allocate32OutputPlane(runtimeFlags)) {
+    mySerum.width32 = (g_serumData.fheight == 32) ? g_serumData.fwidth
+                                                  : g_serumData.fwidth_extra;
+    mySerum.frame32 =
+        (uint16_t*)malloc(32 * mySerum.width32 * sizeof(uint16_t));
+    mySerum.rotations32 = (uint16_t*)malloc(
+        MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * sizeof(uint16_t));
+    mySerum.rotationsinframe32 =
+        (uint16_t*)malloc(2 * 32 * mySerum.width32 * sizeof(uint16_t));
+    if (runtimeFlags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS)
+      mySerum.modifiedelements32 = (uint8_t*)malloc(32 * mySerum.width32);
+    if (!mySerum.frame32 || !mySerum.rotations32 ||
+        !mySerum.rotationsinframe32 ||
+        (runtimeFlags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS &&
+         !mySerum.modifiedelements32)) {
+      Serum_free();
+      enabled = false;
+      return false;
+    }
+  }
+  if (Allocate64OutputPlane(runtimeFlags)) {
+    mySerum.width64 = (g_serumData.fheight == 64) ? g_serumData.fwidth
+                                                  : g_serumData.fwidth_extra;
+    if (mySerum.width64 == 0 && upscaleExtraFromOriginal) {
+      // No authored extra plane at all; the 64p output is produced purely by
+      // upscaling the original plane.
+      mySerum.width64 = g_serumData.fwidth * 2;
+    }
+    allocatedPlaneWidth64 = mySerum.width64;
+    mySerum.frame64 =
+        (uint16_t*)malloc(64 * mySerum.width64 * sizeof(uint16_t));
+    mySerum.rotations64 = (uint16_t*)malloc(
+        MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * sizeof(uint16_t));
+    mySerum.rotationsinframe64 =
+        (uint16_t*)malloc(2 * 64 * mySerum.width64 * sizeof(uint16_t));
+    if (runtimeFlags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS)
+      mySerum.modifiedelements64 = (uint8_t*)malloc(64 * mySerum.width64);
+    if (!mySerum.frame64 || !mySerum.rotations64 ||
+        !mySerum.rotationsinframe64 ||
+        (runtimeFlags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS &&
+         !mySerum.modifiedelements64)) {
+      Serum_free();
+      enabled = false;
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// Block inputs of ReadV2Blocks(). Both store every element with
+// SparseVector::storeElement(), so a colorization built from a source is the
+// one a cROM of the same data loads.
+template <typename Reader>
+struct CromBlockInput {
+  Reader& reader;
+
+  template <typename T, typename U = T>
+  void block(Serum_Block, SparseVector<T>& vector, size_t elementSize,
+             uint32_t count, SparseVector<U>* parent = nullptr) {
+    vector.readFromCRomReader(elementSize, count, reader, parent);
+  }
+};
+
+struct SourceBlockInput {
+  const Serum_Colorization_Source& source;
+
+  template <typename T, typename U = T>
+  void block(Serum_Block block, SparseVector<T>& vector, size_t elementSize,
+             uint32_t count, SparseVector<U>* parent = nullptr) {
+    vector.beginElements(elementSize, count);
+    std::vector<T> element(elementSize);
+    for (uint32_t i = 0; i < count; ++i) {
+      std::fill(element.begin(), element.end(), T{});
+      source.fill(source.userData, block, i, element.data(),
+                  elementSize * sizeof(T));
+      vector.storeElement(i, element.data(), elementSize, parent);
+    }
+  }
+};
+
+// The blocks of a v2 colorization, in cROM order, from a cROM (CromBlockInput)
+// or an authoring tool's source (SourceBlockInput). formatVersion 0 has 8-bit
+// sprite IDs in LEGACY_SPRITES_PER_FRAME slots; sizeheader says which of the
+// later blocks there are.
+template <typename Input>
+static void ReadV2Blocks(Input& input, uint32_t formatVersion,
+                         uint32_t spritesPerFrame, uint32_t sizeheader,
+                         bool loadExtraDataRequested) {
+  input.block(SERUM_BLOCK_FRAME_HASH, g_serumData.hashcodes, 1,
+              g_serumData.nframes);
+  input.block(SERUM_BLOCK_FRAME_SHAPE_MODE, g_serumData.shapecompmode, 1,
+              g_serumData.nframes);
+  input.block(SERUM_BLOCK_FRAME_MASK_ID, g_serumData.compmaskID, 1,
+              g_serumData.nframes);
+  input.block(SERUM_BLOCK_COMPARISON_MASK, g_serumData.compmasks,
+              NativeFramePixels(), g_serumData.ncompmasks);
+  input.block(SERUM_BLOCK_FRAME_HAS_EXTRA, g_serumData.isextraframe, 1,
+              g_serumData.nframes);
+  if (loadExtraDataRequested) {
+    for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
+      if (g_serumData.isextraframe[ti][0] > 0) {
+        mySerum.flags |= FLAG_RETURNED_EXTRA_AVAILABLE;
+        break;
+      }
+    }
+  } else
+    g_serumData.isextraframe.clearIndex();
+  input.block(SERUM_BLOCK_FRAME_COLORS, g_serumData.cframes_v2,
+              g_serumData.fwidth * g_serumData.fheight, g_serumData.nframes);
+  input.block(SERUM_BLOCK_FRAME_COLORS_EXTRA, g_serumData.cframes_v2_extra,
+              g_serumData.fwidth_extra * g_serumData.fheight_extra,
+              g_serumData.nframes, &g_serumData.isextraframe);
+  input.block(SERUM_BLOCK_FRAME_DYNAMIC_MASK, g_serumData.dynamasks,
+              g_serumData.fwidth * g_serumData.fheight, g_serumData.nframes);
+  input.block(SERUM_BLOCK_FRAME_DYNAMIC_MASK_EXTRA, g_serumData.dynamasks_extra,
+              g_serumData.fwidth_extra * g_serumData.fheight_extra,
+              g_serumData.nframes, &g_serumData.isextraframe);
+  input.block(SERUM_BLOCK_FRAME_DYNAMIC_COLORS, g_serumData.dyna4cols_v2,
+              MAX_DYNA_SETS_PER_FRAME_V2 * g_serumData.nocolors,
+              g_serumData.nframes);
+  input.block(SERUM_BLOCK_FRAME_DYNAMIC_COLORS_EXTRA,
+              g_serumData.dyna4cols_v2_extra,
+              MAX_DYNA_SETS_PER_FRAME_V2 * g_serumData.nocolors,
+              g_serumData.nframes, &g_serumData.isextraframe);
+  input.block(SERUM_BLOCK_SPRITE_HAS_EXTRA, g_serumData.isextrasprite, 1,
+              g_serumData.nsprites);
+  if (!loadExtraDataRequested) g_serumData.isextrasprite.clearIndex();
+  if (formatVersion >= 1) {
+    input.block(SERUM_BLOCK_FRAME_SPRITES, g_serumData.framesprites,
+                spritesPerFrame, g_serumData.nframes);
+  } else {
+    SparseVector<uint8_t> legacy(255);
+    input.block(SERUM_BLOCK_FRAME_SPRITES, legacy, LEGACY_SPRITES_PER_FRAME,
+                g_serumData.nframes);
+    g_serumData.WidenFrameSprites(legacy);
+  }
+  input.block(SERUM_BLOCK_SPRITE_ORIGINAL, g_serumData.spriteoriginal,
+              MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites);
+  input.block(SERUM_BLOCK_SPRITE_COLORS, g_serumData.spritecolored,
+              MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites);
+  input.block(SERUM_BLOCK_SPRITE_MASK_EXTRA, g_serumData.spritemask_extra,
+              MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites,
+              &g_serumData.isextrasprite);
+  input.block(SERUM_BLOCK_SPRITE_COLORS_EXTRA, g_serumData.spritecolored_extra,
+              MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites,
+              &g_serumData.isextrasprite);
+  input.block(SERUM_BLOCK_FRAME_ACTIVE, g_serumData.activeframes, 1,
+              g_serumData.nframes);
+  input.block(SERUM_BLOCK_FRAME_ROTATIONS, g_serumData.colorrotations_v2,
+              MAX_LENGTH_COLOR_ROTATION * MAX_COLOR_ROTATION_V2,
+              g_serumData.nframes);
+  input.block(SERUM_BLOCK_FRAME_ROTATIONS_EXTRA,
+              g_serumData.colorrotations_v2_extra,
+              MAX_LENGTH_COLOR_ROTATION * MAX_COLOR_ROTATION_V2,
+              g_serumData.nframes, &g_serumData.isextraframe);
+  input.block(SERUM_BLOCK_SPRITE_DETECTION_DWORDS, g_serumData.spritedetdwords,
+              MAX_SPRITE_DETECT_AREAS, g_serumData.nsprites);
+  input.block(SERUM_BLOCK_SPRITE_DETECTION_POSITIONS,
+              g_serumData.spritedetdwordpos, MAX_SPRITE_DETECT_AREAS,
+              g_serumData.nsprites);
+  input.block(SERUM_BLOCK_SPRITE_DETECTION_AREAS, g_serumData.spritedetareas,
+              4 * MAX_SPRITE_DETECT_AREAS, g_serumData.nsprites);
+  input.block(SERUM_BLOCK_FRAME_TRIGGER, g_serumData.triggerIDs, 1,
+              g_serumData.nframes);
+  input.block(SERUM_BLOCK_FRAME_SPRITE_BOUNDS, g_serumData.framespriteBB,
+              spritesPerFrame * 4, g_serumData.nframes,
+              &g_serumData.framesprites);
+  input.block(SERUM_BLOCK_BACKGROUND_HAS_EXTRA, g_serumData.isextrabackground,
+              1, g_serumData.nbackgrounds);
+  if (!loadExtraDataRequested) g_serumData.isextrabackground.clearIndex();
+  input.block(SERUM_BLOCK_BACKGROUND_COLORS, g_serumData.backgroundframes_v2,
+              g_serumData.fwidth * g_serumData.fheight,
+              g_serumData.nbackgrounds);
+  input.block(SERUM_BLOCK_BACKGROUND_COLORS_EXTRA,
+              g_serumData.backgroundframes_v2_extra,
+              g_serumData.fwidth_extra * g_serumData.fheight_extra,
+              g_serumData.nbackgrounds, &g_serumData.isextrabackground);
+  input.block(SERUM_BLOCK_FRAME_BACKGROUND_ID, g_serumData.backgroundIDs, 1,
+              g_serumData.nframes);
+  input.block(SERUM_BLOCK_FRAME_BACKGROUND_MASK, g_serumData.backgroundmask,
+              g_serumData.fwidth * g_serumData.fheight, g_serumData.nframes,
+              &g_serumData.backgroundIDs);
+  input.block(SERUM_BLOCK_FRAME_BACKGROUND_MASK_EXTRA,
+              g_serumData.backgroundmask_extra,
+              g_serumData.fwidth_extra * g_serumData.fheight_extra,
+              g_serumData.nframes, &g_serumData.backgroundIDs);
+
+  if (sizeheader >= 15 * sizeof(uint32_t)) {
+    input.block(SERUM_BLOCK_FRAME_SHADOW_DIRECTIONS, g_serumData.dynashadowsdir,
+                MAX_DYNA_SETS_PER_FRAME_V2, g_serumData.nframes);
+    input.block(SERUM_BLOCK_FRAME_SHADOW_COLORS, g_serumData.dynashadowscol,
+                MAX_DYNA_SETS_PER_FRAME_V2, g_serumData.nframes);
+    input.block(SERUM_BLOCK_FRAME_SHADOW_DIRECTIONS_EXTRA,
+                g_serumData.dynashadowsdir_extra, MAX_DYNA_SETS_PER_FRAME_V2,
+                g_serumData.nframes, &g_serumData.isextraframe);
+    input.block(SERUM_BLOCK_FRAME_SHADOW_COLORS_EXTRA,
+                g_serumData.dynashadowscol_extra, MAX_DYNA_SETS_PER_FRAME_V2,
+                g_serumData.nframes, &g_serumData.isextraframe);
+  } else {
+    g_serumData.dynashadowsdir.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
+    g_serumData.dynashadowscol.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
+    g_serumData.dynashadowsdir_extra.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
+    g_serumData.dynashadowscol_extra.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
+  }
+
+  if (sizeheader >= 18 * sizeof(uint32_t)) {
+    input.block(SERUM_BLOCK_SPRITE_DYNAMIC_COLORS, g_serumData.dynasprite4cols,
+                MAX_DYNA_SETS_PER_SPRITE * g_serumData.nocolors,
+                g_serumData.nsprites);
+    input.block(SERUM_BLOCK_SPRITE_DYNAMIC_COLORS_EXTRA,
+                g_serumData.dynasprite4cols_extra,
+                MAX_DYNA_SETS_PER_SPRITE * g_serumData.nocolors,
+                g_serumData.nsprites, &g_serumData.isextraframe);
+    input.block(SERUM_BLOCK_SPRITE_DYNAMIC_MASK, g_serumData.dynaspritemasks,
+                MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites);
+    input.block(SERUM_BLOCK_SPRITE_DYNAMIC_MASK_EXTRA,
+                g_serumData.dynaspritemasks_extra,
+                MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites,
+                &g_serumData.isextraframe);
+  } else {
+    g_serumData.dynasprite4cols.reserve(MAX_DYNA_SETS_PER_SPRITE *
+                                        g_serumData.nocolors);
+    g_serumData.dynasprite4cols_extra.reserve(MAX_DYNA_SETS_PER_SPRITE *
+                                              g_serumData.nocolors);
+    g_serumData.dynaspritemasks.reserve(MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT);
+    g_serumData.dynaspritemasks_extra.reserve(MAX_SPRITE_WIDTH *
+                                              MAX_SPRITE_HEIGHT);
+  }
+
+  if (sizeheader >= 19 * sizeof(uint32_t)) {
+    input.block(SERUM_BLOCK_SPRITE_SHAPE_MODE, g_serumData.sprshapemode, 1,
+                g_serumData.nsprites);
+    for (uint32_t i = 0; i < g_serumData.nsprites; i++) {
+      if (g_serumData.sprshapemode[i][0] > 0) {
+        for (uint32_t j = 0; j < MAX_SPRITE_DETECT_AREAS; j++) {
+          uint32_t detdwords = g_serumData.spritedetdwords[i][j];
+          if ((detdwords & 0xFF000000) > 0)
+            detdwords = (detdwords & 0x00FFFFFF) | 0x01000000;
+          if ((detdwords & 0x00FF0000) > 0)
+            detdwords = (detdwords & 0xFF00FFFF) | 0x00010000;
+          if ((detdwords & 0x0000FF00) > 0)
+            detdwords = (detdwords & 0xFFFF00FF) | 0x00000100;
+          if ((detdwords & 0x000000FF) > 0)
+            detdwords = (detdwords & 0xFFFFFF00) | 0x00000001;
+          g_serumData.spritedetdwords[i][j] = detdwords;
+        }
+        for (uint32_t j = 0; j < MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT; j++) {
+          if (g_serumData.spriteoriginal[i][j] > 0 &&
+              g_serumData.spriteoriginal[i][j] != 255)
+            g_serumData.spriteoriginal[i][j] = 1;
+        }
+      }
+    }
+  } else {
+    g_serumData.sprshapemode.reserve(g_serumData.nsprites);
+  }
+}
+
+// After the blocks and the settings: what every v2 load derives from them.
+static Serum_Frame_Struc* FinishV2Load() {
+  g_serumData.BuildPackingSidecarsAndNormalize();
+
+  mySerum.ntriggers = 0;
+  uint32_t framespos = g_serumData.nframes / 2;
+  uint32_t framesspace = g_serumData.nframes - framespos;
+  uint32_t framescount = (framesspace + 9) / 10;
+
+  if (framescount > 0) {
+    std::vector<uint32_t> candidates;
+    candidates.reserve(framesspace);
+    for (uint32_t ti = framespos; ti < g_serumData.nframes; ++ti) {
+      if (g_serumData.triggerIDs[ti][0] == 0xffffffff) {
+        candidates.push_back(ti);
+      }
+    }
+
+    if (!candidates.empty()) {
+      std::mt19937 rng(0xC0DE1234);
+      std::shuffle(candidates.begin(), candidates.end(), rng);
+      std::uniform_int_distribution<uint32_t> triggerDist(65433u, 0xfffffffeu);
+
+      uint32_t toAssign = std::min<uint32_t>(framescount, candidates.size());
+      for (uint32_t i = 0; i < toAssign; ++i) {
+        uint32_t triggerValue = triggerDist(rng);
+        g_serumData.triggerIDs.set(candidates[i], &triggerValue, 1);
+      }
+
+      for (uint32_t offset = 0; (framespos + offset) < g_serumData.nframes;
+           ++offset) {
+        uint32_t idx = framespos + offset;
+        if (g_serumData.triggerIDs[idx][0] == 0xffffffff) {
+          uint32_t triggerValue = triggerDist(rng);
+          g_serumData.triggerIDs.set(idx, &triggerValue, 1);
+          break;
+        }
+      }
+    }
+  }
+  for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
+    if (g_serumData.triggerIDs[ti][0] < PUP_TRIGGER_MAX_THRESHOLD)
+      mySerum.ntriggers++;
+  }
+  framechecked = (bool*)malloc(sizeof(bool) * g_serumData.nframes);
+  if (!framechecked) {
+    Serum_free();
+    enabled = false;
+    return NULL;
+  }
+
+  mySerum.SerumVersion = g_serumData.SerumVersion = SERUM_V2;
+
+  Full_Reset_ColorRotations();
+  cromloaded = true;
+
+  enabled = true;
+  return &mySerum;
+}
+
 template <typename Reader>
 static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
                                                  const uint8_t loadFlags,
@@ -4172,283 +4509,21 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
     enabled = false;
     return NULL;
   }
-  // Only now: which planes are rendered, whether libserum upscales, and which
-  // request needs the extra-plane data all depend on whether the ROM frame is
-  // 256x64.
-  ConfigureRequestedOutputMode(runtimeFlags);
-  const bool loadExtraDataRequested = IsExtra32Requested(loadFlags) ||
-                                      IsExtra64Requested(loadFlags) ||
-                                      NativePlaneRequested(loadFlags);
-
-  if (!AllocateFrameWorkBuffers()) {
-    Serum_free();
+  bool loadExtraDataRequested = false;
+  if (!PrepareV2Planes(loadFlags, runtimeFlags, loadExtraDataRequested)) {
     enabled = false;
     return NULL;
   }
-
-  if (Allocate32OutputPlane(runtimeFlags)) {
-    mySerum.width32 = (g_serumData.fheight == 32) ? g_serumData.fwidth
-                                                  : g_serumData.fwidth_extra;
-    mySerum.frame32 =
-        (uint16_t*)malloc(32 * mySerum.width32 * sizeof(uint16_t));
-    mySerum.rotations32 = (uint16_t*)malloc(
-        MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * sizeof(uint16_t));
-    mySerum.rotationsinframe32 =
-        (uint16_t*)malloc(2 * 32 * mySerum.width32 * sizeof(uint16_t));
-    if (runtimeFlags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS)
-      mySerum.modifiedelements32 = (uint8_t*)malloc(32 * mySerum.width32);
-    if (!mySerum.frame32 || !mySerum.rotations32 ||
-        !mySerum.rotationsinframe32 ||
-        (runtimeFlags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS &&
-         !mySerum.modifiedelements32)) {
-      Serum_free();
-      enabled = false;
-      return NULL;
-    }
-  }
-  if (Allocate64OutputPlane(runtimeFlags)) {
-    mySerum.width64 = (g_serumData.fheight == 64) ? g_serumData.fwidth
-                                                  : g_serumData.fwidth_extra;
-    if (mySerum.width64 == 0 && upscaleExtraFromOriginal) {
-      // No authored extra plane at all; the 64p output is produced purely by
-      // upscaling the original plane.
-      mySerum.width64 = g_serumData.fwidth * 2;
-    }
-    allocatedPlaneWidth64 = mySerum.width64;
-    mySerum.frame64 =
-        (uint16_t*)malloc(64 * mySerum.width64 * sizeof(uint16_t));
-    mySerum.rotations64 = (uint16_t*)malloc(
-        MAX_COLOR_ROTATION_V2 * MAX_LENGTH_COLOR_ROTATION * sizeof(uint16_t));
-    mySerum.rotationsinframe64 =
-        (uint16_t*)malloc(2 * 64 * mySerum.width64 * sizeof(uint16_t));
-    if (runtimeFlags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS)
-      mySerum.modifiedelements64 = (uint8_t*)malloc(64 * mySerum.width64);
-    if (!mySerum.frame64 || !mySerum.rotations64 ||
-        !mySerum.rotationsinframe64 ||
-        (runtimeFlags & FLAG_REQUEST_FILL_MODIFIED_ELEMENTS &&
-         !mySerum.modifiedelements64)) {
-      Serum_free();
-      enabled = false;
-      return NULL;
-    }
-  }
-
-  g_serumData.hashcodes.readFromCRomReader(1, g_serumData.nframes, reader);
-  g_serumData.shapecompmode.readFromCRomReader(1, g_serumData.nframes, reader);
-  g_serumData.compmaskID.readFromCRomReader(1, g_serumData.nframes, reader);
-  g_serumData.compmasks.readFromCRomReader(NativeFramePixels(),
-                                           g_serumData.ncompmasks, reader);
-  g_serumData.isextraframe.readFromCRomReader(1, g_serumData.nframes, reader);
-  if (loadExtraDataRequested) {
-    for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
-      if (g_serumData.isextraframe[ti][0] > 0) {
-        mySerum.flags |= FLAG_RETURNED_EXTRA_AVAILABLE;
-        break;
-      }
-    }
-  } else
-    g_serumData.isextraframe.clearIndex();
-  g_serumData.cframes_v2.readFromCRomReader(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.nframes, reader);
-  g_serumData.cframes_v2_extra.readFromCRomReader(
-      g_serumData.fwidth_extra * g_serumData.fheight_extra, g_serumData.nframes,
-      reader, &g_serumData.isextraframe);
-  g_serumData.dynamasks.readFromCRomReader(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.nframes, reader);
-  g_serumData.dynamasks_extra.readFromCRomReader(
-      g_serumData.fwidth_extra * g_serumData.fheight_extra, g_serumData.nframes,
-      reader, &g_serumData.isextraframe);
-  g_serumData.dyna4cols_v2.readFromCRomReader(
-      MAX_DYNA_SETS_PER_FRAME_V2 * g_serumData.nocolors, g_serumData.nframes,
-      reader);
-  g_serumData.dyna4cols_v2_extra.readFromCRomReader(
-      MAX_DYNA_SETS_PER_FRAME_V2 * g_serumData.nocolors, g_serumData.nframes,
-      reader, &g_serumData.isextraframe);
-  g_serumData.isextrasprite.readFromCRomReader(1, g_serumData.nsprites, reader);
-  if (!loadExtraDataRequested) g_serumData.isextrasprite.clearIndex();
-  if (formatVersion >= 1) {
-    g_serumData.framesprites.readFromCRomReader(spritesPerFrame,
-                                                g_serumData.nframes, reader);
-  } else {
-    SparseVector<uint8_t> legacy(255);
-    legacy.readFromCRomReader(LEGACY_SPRITES_PER_FRAME, g_serumData.nframes,
-                              reader);
-    g_serumData.WidenFrameSprites(legacy);
-  }
-  g_serumData.spriteoriginal.readFromCRomReader(
-      MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites, reader);
-  g_serumData.spritecolored.readFromCRomReader(
-      MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites, reader);
-  g_serumData.spritemask_extra.readFromCRomReader(
-      MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites, reader,
-      &g_serumData.isextrasprite);
-  g_serumData.spritecolored_extra.readFromCRomReader(
-      MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites, reader,
-      &g_serumData.isextrasprite);
-  g_serumData.activeframes.readFromCRomReader(1, g_serumData.nframes, reader);
-  g_serumData.colorrotations_v2.readFromCRomReader(
-      MAX_LENGTH_COLOR_ROTATION * MAX_COLOR_ROTATION_V2, g_serumData.nframes,
-      reader);
-  g_serumData.colorrotations_v2_extra.readFromCRomReader(
-      MAX_LENGTH_COLOR_ROTATION * MAX_COLOR_ROTATION_V2, g_serumData.nframes,
-      reader, &g_serumData.isextraframe);
-  g_serumData.spritedetdwords.readFromCRomReader(MAX_SPRITE_DETECT_AREAS,
-                                                 g_serumData.nsprites, reader);
-  g_serumData.spritedetdwordpos.readFromCRomReader(
-      MAX_SPRITE_DETECT_AREAS, g_serumData.nsprites, reader);
-  g_serumData.spritedetareas.readFromCRomReader(4 * MAX_SPRITE_DETECT_AREAS,
-                                                g_serumData.nsprites, reader);
-  g_serumData.triggerIDs.readFromCRomReader(1, g_serumData.nframes, reader);
-  g_serumData.framespriteBB.readFromCRomReader(spritesPerFrame * 4,
-                                               g_serumData.nframes, reader,
-                                               &g_serumData.framesprites);
-  g_serumData.isextrabackground.readFromCRomReader(1, g_serumData.nbackgrounds,
-                                                   reader);
-  if (!loadExtraDataRequested) g_serumData.isextrabackground.clearIndex();
-  g_serumData.backgroundframes_v2.readFromCRomReader(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.nbackgrounds,
-      reader);
-  g_serumData.backgroundframes_v2_extra.readFromCRomReader(
-      g_serumData.fwidth_extra * g_serumData.fheight_extra,
-      g_serumData.nbackgrounds, reader, &g_serumData.isextrabackground);
-  g_serumData.backgroundIDs.readFromCRomReader(1, g_serumData.nframes, reader);
-  g_serumData.backgroundmask.readFromCRomReader(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.nframes, reader,
-      &g_serumData.backgroundIDs);
-  g_serumData.backgroundmask_extra.readFromCRomReader(
-      g_serumData.fwidth_extra * g_serumData.fheight_extra, g_serumData.nframes,
-      reader, &g_serumData.backgroundIDs);
-
-  if (sizeheader >= 15 * sizeof(uint32_t)) {
-    g_serumData.dynashadowsdir.readFromCRomReader(MAX_DYNA_SETS_PER_FRAME_V2,
-                                                  g_serumData.nframes, reader);
-    g_serumData.dynashadowscol.readFromCRomReader(MAX_DYNA_SETS_PER_FRAME_V2,
-                                                  g_serumData.nframes, reader);
-    g_serumData.dynashadowsdir_extra.readFromCRomReader(
-        MAX_DYNA_SETS_PER_FRAME_V2, g_serumData.nframes, reader,
-        &g_serumData.isextraframe);
-    g_serumData.dynashadowscol_extra.readFromCRomReader(
-        MAX_DYNA_SETS_PER_FRAME_V2, g_serumData.nframes, reader,
-        &g_serumData.isextraframe);
-  } else {
-    g_serumData.dynashadowsdir.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
-    g_serumData.dynashadowscol.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
-    g_serumData.dynashadowsdir_extra.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
-    g_serumData.dynashadowscol_extra.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
-  }
-
-  if (sizeheader >= 18 * sizeof(uint32_t)) {
-    g_serumData.dynasprite4cols.readFromCRomReader(
-        MAX_DYNA_SETS_PER_SPRITE * g_serumData.nocolors, g_serumData.nsprites,
-        reader);
-    g_serumData.dynasprite4cols_extra.readFromCRomReader(
-        MAX_DYNA_SETS_PER_SPRITE * g_serumData.nocolors, g_serumData.nsprites,
-        reader, &g_serumData.isextraframe);
-    g_serumData.dynaspritemasks.readFromCRomReader(
-        MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites, reader);
-    g_serumData.dynaspritemasks_extra.readFromCRomReader(
-        MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT, g_serumData.nsprites, reader,
-        &g_serumData.isextraframe);
-  } else {
-    g_serumData.dynasprite4cols.reserve(MAX_DYNA_SETS_PER_SPRITE *
-                                        g_serumData.nocolors);
-    g_serumData.dynasprite4cols_extra.reserve(MAX_DYNA_SETS_PER_SPRITE *
-                                              g_serumData.nocolors);
-    g_serumData.dynaspritemasks.reserve(MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT);
-    g_serumData.dynaspritemasks_extra.reserve(MAX_SPRITE_WIDTH *
-                                              MAX_SPRITE_HEIGHT);
-  }
-
-  if (sizeheader >= 19 * sizeof(uint32_t)) {
-    g_serumData.sprshapemode.readFromCRomReader(1, g_serumData.nsprites,
-                                                reader);
-    for (uint32_t i = 0; i < g_serumData.nsprites; i++) {
-      if (g_serumData.sprshapemode[i][0] > 0) {
-        for (uint32_t j = 0; j < MAX_SPRITE_DETECT_AREAS; j++) {
-          uint32_t detdwords = g_serumData.spritedetdwords[i][j];
-          if ((detdwords & 0xFF000000) > 0)
-            detdwords = (detdwords & 0x00FFFFFF) | 0x01000000;
-          if ((detdwords & 0x00FF0000) > 0)
-            detdwords = (detdwords & 0xFF00FFFF) | 0x00010000;
-          if ((detdwords & 0x0000FF00) > 0)
-            detdwords = (detdwords & 0xFFFF00FF) | 0x00000100;
-          if ((detdwords & 0x000000FF) > 0)
-            detdwords = (detdwords & 0xFFFFFF00) | 0x00000001;
-          g_serumData.spritedetdwords[i][j] = detdwords;
-        }
-        for (uint32_t j = 0; j < MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT; j++) {
-          if (g_serumData.spriteoriginal[i][j] > 0 &&
-              g_serumData.spriteoriginal[i][j] != 255)
-            g_serumData.spriteoriginal[i][j] = 1;
-        }
-      }
-    }
-  } else {
-    g_serumData.sprshapemode.reserve(g_serumData.nsprites);
-  }
-
+  CromBlockInput<Reader> input{reader};
+  ReadV2Blocks(input, formatVersion, spritesPerFrame, sizeheader,
+               loadExtraDataRequested);
   if (!ReadCromSettings(reader)) {
     Log("Invalid settings block in cROM/v2");
     enabled = false;
     return NULL;
   }
 
-  g_serumData.BuildPackingSidecarsAndNormalize();
-
-  mySerum.ntriggers = 0;
-  uint32_t framespos = g_serumData.nframes / 2;
-  uint32_t framesspace = g_serumData.nframes - framespos;
-  uint32_t framescount = (framesspace + 9) / 10;
-
-  if (framescount > 0) {
-    std::vector<uint32_t> candidates;
-    candidates.reserve(framesspace);
-    for (uint32_t ti = framespos; ti < g_serumData.nframes; ++ti) {
-      if (g_serumData.triggerIDs[ti][0] == 0xffffffff) {
-        candidates.push_back(ti);
-      }
-    }
-
-    if (!candidates.empty()) {
-      std::mt19937 rng(0xC0DE1234);
-      std::shuffle(candidates.begin(), candidates.end(), rng);
-      std::uniform_int_distribution<uint32_t> triggerDist(65433u, 0xfffffffeu);
-
-      uint32_t toAssign = std::min<uint32_t>(framescount, candidates.size());
-      for (uint32_t i = 0; i < toAssign; ++i) {
-        uint32_t triggerValue = triggerDist(rng);
-        g_serumData.triggerIDs.set(candidates[i], &triggerValue, 1);
-      }
-
-      for (uint32_t offset = 0; (framespos + offset) < g_serumData.nframes;
-           ++offset) {
-        uint32_t idx = framespos + offset;
-        if (g_serumData.triggerIDs[idx][0] == 0xffffffff) {
-          uint32_t triggerValue = triggerDist(rng);
-          g_serumData.triggerIDs.set(idx, &triggerValue, 1);
-          break;
-        }
-      }
-    }
-  }
-  for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
-    if (g_serumData.triggerIDs[ti][0] < PUP_TRIGGER_MAX_THRESHOLD)
-      mySerum.ntriggers++;
-  }
-  framechecked = (bool*)malloc(sizeof(bool) * g_serumData.nframes);
-  if (!framechecked) {
-    Serum_free();
-    enabled = false;
-    return NULL;
-  }
-
-  mySerum.SerumVersion = g_serumData.SerumVersion = SERUM_V2;
-
-  Full_Reset_ColorRotations();
-  cromloaded = true;
-
-  enabled = true;
-  return &mySerum;
+  return FinishV2Load();
 }
 
 template <typename Reader>
@@ -4996,10 +5071,9 @@ struct FastPackingScope {
 // given, is parsed between reading the cROM and FinishColorizationLoad(), as
 // Serum_Load() parses a pup.csv beside a raw cROM. No cROMc is written from
 // these loads, so they pack with LZ4's fast mode.
-template <typename Reader>
-static Serum_Frame_Struc* LoadFromReader(Reader& reader,
-                                         const char* const csvPath,
-                                         uint8_t flags, const char* api) {
+template <typename Load>
+static Serum_Frame_Struc* LoadThrough(Load&& load, const char* const csvPath,
+                                      uint8_t flags, const char* api) {
   const bool forceLoadFlags = (flags & FLAG_REQUEST_FORCE) != 0;
   uint8_t runtimeFlags = flags;
   uint8_t loadFlags = runtimeFlags;
@@ -5023,7 +5097,7 @@ static Serum_Frame_Struc* LoadFromReader(Reader& reader,
                                  ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
   try {
-    result = Serum_LoadFilev1Stream(reader, loadFlags, runtimeFlags);
+    result = load(loadFlags, runtimeFlags);
   } catch (const std::exception& e) {
     result = NULL;
     failure = e.what();
@@ -5038,7 +5112,8 @@ static Serum_Frame_Struc* LoadFromReader(Reader& reader,
     SetLastErrorMessage("%s: %s", api, failure.c_str());
     return NULL;
   }
-  Log("Loaded cROM through %s (Serum v%d)", api, g_serumData.SerumVersion);
+  Log("Loaded the colorization through %s (Serum v%d)", api,
+      g_serumData.SerumVersion);
   bool sceneDataUpdatedFromCsv = false;
   double csvUpdateMs = 0.0;
   if (csvPath && csvPath[0] != '\0' && g_serumData.scenesFromColorization) {
@@ -5067,6 +5142,75 @@ static Serum_Frame_Struc* LoadFromReader(Reader& reader,
   return result;
 }
 
+template <typename Reader>
+static Serum_Frame_Struc* LoadFromReader(Reader& reader,
+                                         const char* const csvPath,
+                                         uint8_t flags, const char* api) {
+  return LoadThrough(
+      [&reader](uint8_t loadFlags, uint8_t runtimeFlags) {
+        return Serum_LoadFilev1Stream(reader, loadFlags, runtimeFlags);
+      },
+      csvPath, flags, api);
+}
+
+// A v2 colorization from an authoring tool's source: the header values as a
+// cROM of header revision 21 and format version 1 has them, every block, and
+// the settings payload.
+static Serum_Frame_Struc* LoadV2FromSource(
+    const Serum_Colorization_Source& source, const uint8_t loadFlags,
+    const uint8_t runtimeFlags) {
+  memcpy(g_serumData.rname, source.romName, sizeof(g_serumData.rname));
+  g_serumData.rname[sizeof(g_serumData.rname) - 1] = '\0';
+  g_serumData.fwidth = source.width;
+  g_serumData.fheight = source.height;
+  g_serumData.fwidth_extra = source.widthExtra;
+  g_serumData.fheight_extra = source.heightExtra;
+  isoriginalrequested = false;
+  isextrarequested = false;
+  isoriginalfallbackrequested = false;
+  mySerum.width32 = 0;
+  mySerum.width64 = 0;
+  mySerum.flags = runtimeFlags;
+  g_serumData.nframes = source.frames;
+  g_serumData.nocolors = source.colors;
+  mySerum.nocolors = g_serumData.nocolors;
+  if (g_serumData.nframes == 0 || g_serumData.nocolors == 0 ||
+      !ValidateLoadedGeometry(true, "source")) {
+    enabled = false;
+    return NULL;
+  }
+  g_serumData.ncompmasks = source.comparisonMasks;
+  g_serumData.nsprites = source.sprites;
+  g_serumData.nbackgrounds = source.backgrounds;
+  g_serumData.is256x64 = source.is256x64 != 0;
+  if (source.spritesPerFrame == 0 ||
+      source.spritesPerFrame > MAX_SPRITES_PER_FRAME) {
+    Log("Invalid number of sprites per frame in the source");
+    enabled = false;
+    return NULL;
+  }
+  if (!ValidateNativeGeometry("source")) {
+    enabled = false;
+    return NULL;
+  }
+  bool loadExtraDataRequested = false;
+  if (!PrepareV2Planes(loadFlags, runtimeFlags, loadExtraDataRequested)) {
+    enabled = false;
+    return NULL;
+  }
+  SourceBlockInput input{source};
+  ReadV2Blocks(input, SERUM_CROM_FORMAT_VERSION, source.spritesPerFrame,
+               21 * sizeof(uint32_t), loadExtraDataRequested);
+  if (source.settings && source.settingsSize > 0 &&
+      !ApplyCromSettings(std::vector<uint8_t>(
+          source.settings, source.settings + source.settingsSize))) {
+    Log("Invalid settings in the source");
+    enabled = false;
+    return NULL;
+  }
+  return FinishV2Load();
+}
+
 static Serum_Frame_Struc* LoadFromMemory(const uint8_t* crom, size_t size,
                                          const char* const csvPath,
                                          uint8_t flags) {
@@ -5093,6 +5237,24 @@ SERUM_API Serum_Frame_Struc* Serum_LoadFromMemoryWithScenes(
   SERUM_API_GUARD_START("Serum_LoadFromMemoryWithScenes")
   return LoadFromMemory(crom, size, csvPath, flags);
   SERUM_API_GUARD_END("Serum_LoadFromMemoryWithScenes", nullptr)
+}
+
+SERUM_API Serum_Frame_Struc* Serum_LoadFromSource(
+    const Serum_Colorization_Source* source, const char* const csvPath,
+    uint8_t flags) {
+  SERUM_API_GUARD_START("Serum_LoadFromSource")
+  if (!source || !source->fill) {
+    Serum_free();
+    enabled = false;
+    SetLastErrorMessage("Serum_LoadFromSource: no source");
+    return NULL;
+  }
+  return LoadThrough(
+      [source](uint8_t loadFlags, uint8_t runtimeFlags) {
+        return LoadV2FromSource(*source, loadFlags, runtimeFlags);
+      },
+      csvPath, flags, "Serum_LoadFromSource");
+  SERUM_API_GUARD_END("Serum_LoadFromSource", nullptr)
 }
 
 SERUM_API Serum_Frame_Struc* Serum_LoadFromCallback(Serum_ReadCallback read,

@@ -12,7 +12,9 @@ considered done.
 `SERUM_VERSION_PATCH` (`src/serum-version.h`) in every commit. Within 2.9.x the
 cROMc format does not have to stay readable by the next version, as authors
 generate a new cROMc; still raise `SERUM_CONCENTRATE_VERSION` when it changes.
-The next stable release will be 3.0.0; `2.8.x` is the stable branch.
+The next stable release will be 3.0.0; `2.8.x` is the stable branch. The
+experimental branch `format-v3` works towards 3.0.0 (the builder API, cROMc
+only, no Serum V1) and carries 2.99.x, raised in every commit as well.
 
 **Local notes rule:** If `AGENTS.local.md` exists in the repository root, read
 it before working. It is untracked on purpose and carries detail about this
@@ -331,6 +333,34 @@ What differs from `Serum_Load()`:
 - `NULL` or empty input releases the loaded colorization and fails.
 
 The buffer is not kept after the call. Dispose with `Serum_Dispose()`.
+
+## Building a colorization from an authoring tool
+`Serum_LoadFromSource()` (`serum-decode.h`) loads a colorization that an
+authoring tool hands over instead of a cROM: a `Serum_Colorization_Source`
+(`serum.h`) with what a cROM header holds, a `fill()` callback and the payload
+of the settings block. libserum asks for every element of every block
+(`Serum_Block`, in cROM order, one call per frame, mask, sprite or background)
+and stores it exactly as the cROM reader stores what it reads:
+
+- `LoadFilev2Stream()` is split into `PrepareV2Planes()` (planes and buffers),
+  `ReadV2Blocks()` (the blocks, from a `CromBlockInput` or a
+  `SourceBlockInput`), the settings (`ReadCromSettings()` or
+  `ApplyCromSettings()`) and `FinishV2Load()` (packing sidecars, triggers,
+  finish). Both inputs store through `SparseVector::beginElements()` and
+  `storeElement()`, which `readFromCRomReader()` uses too.
+- A source is a cROM of header revision 21 and format version 1: 16-bit sprite
+  IDs in `spritesPerFrame` slots, every block present.
+- `LoadThrough()` is the frame of all memory loads (free, plane requests, fast
+  packing, a pup.csv, `FinishColorizationLoad()`); `LoadFromReader()` and
+  `Serum_LoadFromSource()` differ only in what they read.
+- `Serum_SaveConcentrate()` writes the cROMc of the built colorization.
+- Test `source/builds_the_croms_colorization`: a source serving a cROM's blocks
+  gives the same cROMc as loading the cROM, for format 0 and 1, with a settings
+  block, and for a real cRZ given in `SERUM_TEST_CRZ` (checked on `afm_113b` and
+  `trn_174h`).
+
+This is the first step towards libserum 3.0, which will load cROMc only: an
+editor then builds the cROMc through the source and no cROM reader is needed.
 
 ## cROM settings block
 A v2 cROM may end with an optional block after its last data block
