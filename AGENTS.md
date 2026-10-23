@@ -8,13 +8,12 @@ This document explains how `libserum` works end-to-end, with emphasis on runtime
 `.clang-format`. Any code changes must be formatted accordingly before they are
 considered done.
 
-**Version rule:** `master` carries 2.9.x, an unstable development line. Raise
-`SERUM_VERSION_PATCH` (`src/serum-version.h`) in every commit. Within 2.9.x the
-cROMc format does not have to stay readable by the next version, as authors
-generate a new cROMc; still raise `SERUM_CONCENTRATE_VERSION` when it changes.
-The next stable release will be 3.0.0; `2.8.x` is the stable branch. The
-experimental branch `format-v3` works towards 3.0.0 (the builder API, cROMc
-only, no Serum V1) and carries 2.99.x, raised in every commit as well.
+**Version rule:** `master` carries 2.99.x, the unstable development line towards
+3.0.0 (the builder API, cROMc only, no Serum V1). Raise `SERUM_VERSION_PATCH`
+(`src/serum-version.h`) in every commit. Within this line the cROMc format does
+not have to stay readable by the next version, as authors generate a new cROMc;
+still raise `SERUM_CONCENTRATE_VERSION` when it changes. The next stable release
+will be 3.0.0; `2.8.x` is the stable branch.
 
 **Local notes rule:** If `AGENTS.local.md` exists in the repository root, read
 it before working. It is untracked on purpose and carries detail about this
