@@ -4136,6 +4136,34 @@ static void Test_LoadForgetsTheRunningScene(void) {
   }
 }
 
+// The extra plane's dynamic masks and colours of a 128x32 project are never
+// read (its 64-row plane is rendered in layer mode), so a load drops them; the
+// 256x64 plane of an is256x64 project keeps them. Its extra shadow tables stay:
+// layer mode falls back to them.
+static void Test_UnusedExtraDynamicDataIsDropped(void) {
+  using namespace n256;
+  for (int native = 0; native < 2; ++native) {
+    Synth s;
+    s.is256x64 = native != 0;
+    if (!native) {
+      s.compmasks.assign((size_t)s.ncompmasks * kOPx, 0);
+      s.compmaskid.assign(s.nframes, 255);
+    }
+    for (uint32_t i = 0; i < 40; ++i)
+      s.dynamasksx[(size_t)kStatic * kNPx + i] = 1;
+    if (!Load(s, FLAG_REQUEST_64P_FRAMES, false)) continue;
+    if (native) {
+      CHECK_EQ(g_serumData.frameHasDynamicExtra[kStatic], 1);
+      CHECK(g_serumData.dynamasks_extra.hasData(kStatic));
+    } else {
+      CHECK_EQ(g_serumData.frameHasDynamicExtra[kStatic], 0);
+      CHECK(!g_serumData.dynamasks_extra.hasData(kStatic));
+      CHECK(!g_serumData.dyna4cols_v2_extra.hasData(kStatic));
+    }
+    Unload();
+  }
+}
+
 // A monochrome frame paints both planes itself. On a project with an authored
 // 64-row plane it writes that plane directly, and the plane is then not the
 // upscale of the last colorized picture any more: the frame that ends the
@@ -5194,6 +5222,8 @@ static const TestCase kTests[] = {
     {"upscale/background_scene_keeps_text_shape",
      Test_BackgroundSceneKeepsTextShape},
     {"scene/load_forgets_the_running_scene", Test_LoadForgetsTheRunningScene},
+    {"load/unused_extra_dynamic_data_is_dropped",
+     Test_UnusedExtraDynamicDataIsDropped},
     {"memory/writes_no_file", Test_MemoryLoadWritesNoFile},
     {"memory/failures_are_clean", Test_MemoryLoadFailuresAreClean},
 };

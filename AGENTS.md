@@ -890,6 +890,14 @@ them, so honouring them produced blocky dynamic zones next to sharp statics. In
 layer mode `frameHasDynamicExtra` is forced false, which also makes the extra
 plane render the correct *underlay* beneath dynamic content.
 
+A 128x32 project (not `is256x64`) renders its extra plane in layer mode only,
+so `BuildPackingSidecarsAndNormalize()` drops `dynamasks_extra`,
+`dynamasks_extra_active` and `dyna4cols_v2_extra` for it and leaves
+`frameHasDynamicExtra` at 0: they are neither kept in memory nor written into a
+cROMc made from source data. The extra shadow tables (`dynashadowsdir_extra`,
+`dynashadowscol_extra`) stay, as layer mode falls back to them. An `is256x64`
+project keeps everything.
+
 ### Original-only dynamic sets
 
 A dynamic set can be marked to colour the original plane only

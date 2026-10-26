@@ -469,7 +469,20 @@ void SerumData::BuildPackingSidecarsAndNormalize() {
     frameHasDynamic[frameId] = anyActive ? 1 : 0;
   }
 
-  if (extraFramePixels > 0) {
+  // A 128x32 project renders its 64-row plane in layer mode only: the SD
+  // dynamic zones, upscaled (Colorize_Framev2). It never reads the extra
+  // plane's dynamic masks and colours -- the extra shadow tables it does read,
+  // as a fallback -- so they are dropped here instead of being kept in memory
+  // and in a cROMc. An is256x64 project renders that plane natively and keeps
+  // them.
+  const bool extraDynamicUnused = fheight == 32 && !is256x64;
+  if (extraDynamicUnused) {
+    dynamasks_extra.clear();
+    dynamasks_extra_active.clear();
+    dyna4cols_v2_extra.clear();
+  }
+
+  if (extraFramePixels > 0 && !extraDynamicUnused) {
     normalized.resize(extraFramePixels);
     flags.resize(extraFramePixels);
     frameHasDynamicExtra.assign(nframes, 0);
