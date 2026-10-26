@@ -3659,17 +3659,14 @@ static void GenerateExtraPlaneShadows(uint32_t IDfound) {
   if (!hdDynaLayerMap || !mySerum.frame64) return;
   const uint8_t* shadowDir = g_serumData.dynashadowsdir[IDfound];
   const uint16_t* shadowCol = g_serumData.dynashadowscol[IDfound];
-  const uint8_t* shadowDirFb = g_serumData.dynashadowsdir_extra[IDfound];
-  const uint16_t* shadowColFb = g_serumData.dynashadowscol_extra[IDfound];
-  if (!shadowDir && !shadowDirFb) return;
+  if (!shadowDir) return;
   // A frame can carry the arrays with every direction cleared, which is most
   // of them. Checking the handful of layer entries costs nothing next to
   // walking the whole extra plane to discover the same thing.
   {
     bool anyDir = false;
     for (int l = 0; l < MAX_DYNA_SETS_PER_FRAME_V2 && !anyDir; ++l) {
-      if (shadowDir && shadowDir[l]) anyDir = true;
-      if (shadowDirFb && shadowDirFb[l]) anyDir = true;
+      if (shadowDir[l]) anyDir = true;
     }
     if (!anyDir) return;
   }
@@ -3701,12 +3698,8 @@ static void GenerateExtraPlaneShadows(uint32_t IDfound) {
       // shadows at original resolution, where CheckDynaShadow() has no such
       // bound, and none on the extra plane.
       if (layer >= MAX_DYNA_SETS_PER_FRAME_V2) continue;
-      uint8_t dirs = shadowDir ? shadowDir[layer] : 0;
-      uint16_t colour = shadowCol ? shadowCol[layer] : 0;
-      if (dirs == 0 && shadowDirFb) {
-        dirs = shadowDirFb[layer];
-        if (shadowColFb) colour = shadowColFb[layer];
-      }
+      const uint8_t dirs = shadowDir[layer];
+      const uint16_t colour = shadowCol ? shadowCol[layer] : 0;
       if (dirs == 0) continue;
 
       for (uint8_t bit = 0; bit < 8; ++bit) {
@@ -5481,36 +5474,6 @@ static void FinishColorizationLoad(
   // already.
   runtimeScalingAlgorithm = g_serumData.scalingAlgorithm;
   shadowOffsetModeRuntime = g_serumData.shadowOffsetMode;
-  if (upscaleExtraFromOriginal && g_serumData.SerumVersion == SERUM_V2) {
-    // Report where this colorization actually keeps its dynamic-shadow
-    // configuration. Dynamic content is rendered at SD now, so a
-    // colorization that only has shadows in the extra tables relies on the
-    // per-layer fallback in CheckDynaShadow().
-    uint32_t sdOnly = 0, hdOnly = 0, both = 0;
-    for (uint32_t f = 0; f < g_serumData.nframes; ++f) {
-      if (f < g_serumData.frameHasDynamic.size() &&
-          g_serumData.frameHasDynamic[f] == 0)
-        continue;
-      const uint8_t* sd = g_serumData.dynashadowsdir[f];
-      const uint8_t* hd = g_serumData.dynashadowsdir_extra[f];
-      bool anySd = false, anyHd = false;
-      for (uint32_t l = 0; l < MAX_DYNA_SETS_PER_FRAME_V2; ++l) {
-        if (sd && sd[l]) anySd = true;
-        if (hd && hd[l]) anyHd = true;
-      }
-      if (anySd && anyHd)
-        ++both;
-      else if (anySd)
-        ++sdOnly;
-      else if (anyHd)
-        ++hdOnly;
-    }
-    if (sdOnly || hdOnly || both) {
-      Log("Dynamic shadows: frames with SD tables only=%u, extra tables "
-          "only=%u (using fallback), both=%u",
-          sdOnly, hdOnly, both);
-    }
-  }
   Log("Dynamic shadow offset: %s (%u extra-plane pixel%s)",
       shadowOffsetModeRuntime == SERUM_SHADOW_OFFSET_PROPORTIONAL
           ? "proportional"
@@ -6493,17 +6456,6 @@ static inline bool ColorInRotationOnPlane(bool planeRotates, uint32_t IDfound,
   return ColorInRotation(IDfound, col, norot, posinrot, isextra);
 }
 
-// shadowDir/ColorFallback: consulted per layer when the primary tables say
-// this layer casts no shadow.
-//
-// Unlike the dynamic *masks*, these tables carry no spatial information --
-// they are an 8-direction bitmask and a colour per dyna layer, equally
-// meaningful at either resolution. Colorizations authored in the HD editor
-// can end up with their shadow configuration only in the extra tables, so
-// rendering dynamic content at SD would silently drop every shadow. Falling
-// back keeps the author's configuration without reintroducing any HD spatial
-// data.
-//
 // defer: record the shadow instead of painting it, leaving the pixel to be
 // rendered as background so the upscale reads a shadow-free picture. See
 // sdShadowColour. isdynapix is left alone in that case -- the pixel is not
@@ -6521,15 +6473,9 @@ void CheckDynaShadow(uint16_t* pfr, uint16_t* prot,
                      const uint8_t* shadowDirByLayer,
                      const uint16_t* shadowColorByLayer, uint8_t dynacouche,
                      uint8_t* isdynapix, uint16_t fx, uint16_t fy, uint32_t fw,
-                     uint32_t fh, const uint8_t* shadowDirFallback = nullptr,
-                     const uint16_t* shadowColorFallback = nullptr,
-                     bool defer = false) {
-  uint8_t dsdir = shadowDirByLayer ? shadowDirByLayer[dynacouche] : 0;
-  uint16_t tcol = shadowColorByLayer ? shadowColorByLayer[dynacouche] : 0;
-  if (dsdir == 0 && shadowDirFallback) {
-    dsdir = shadowDirFallback[dynacouche];
-    if (shadowColorFallback) tcol = shadowColorFallback[dynacouche];
-  }
+                     uint32_t fh, bool defer = false) {
+  const uint8_t dsdir = shadowDirByLayer ? shadowDirByLayer[dynacouche] : 0;
+  const uint16_t tcol = shadowColorByLayer ? shadowColorByLayer[dynacouche] : 0;
   if (dsdir == 0) return;
 
   static const int8_t kNeighborDx[8] = {-1, 0, 1, 1, 1, 0, -1, -1};
@@ -6646,16 +6592,6 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         frameHasDynamic ? g_serumData.dynashadowsdir[IDfound] : nullptr;
     const uint16_t* frameShadowColor =
         frameHasDynamic ? g_serumData.dynashadowscol[IDfound] : nullptr;
-    // See CheckDynaShadow(): shadow tables are per-layer parameters, not
-    // spatial data, so the HD-authored ones are valid here too.
-    const uint8_t* shadowDirFallback =
-        (layerMode && frameHasDynamic)
-            ? g_serumData.dynashadowsdir_extra[IDfound]
-            : nullptr;
-    const uint16_t* shadowColorFallback =
-        (layerMode && frameHasDynamic)
-            ? g_serumData.dynashadowscol_extra[IDfound]
-            : nullptr;
     // create the original res frame
     if (g_serumData.fheight == 32) {
       pfr = mySerum.frame32;
@@ -6801,7 +6737,6 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                 CheckDynaShadow(pfr, prot, frameShadowDir, frameShadowColor,
                                 dynacouche, isdynapix, ti, tj,
                                 g_serumData.fwidth, g_serumData.fheight,
-                                shadowDirFallback, shadowColorFallback,
                                 /*defer=*/deferSdShadows);
                 isdynapix[tk] = 1;
                 pfr[tk] = dynamicColor;

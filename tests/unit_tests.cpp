@@ -506,8 +506,8 @@ static void Test_DeferredShadowLeavesThePlaneAlone(void) {
   mySerum.frame32[(size_t)6 * kW + 5] = 0xABCD;  // what the shadow will cover
 
   CheckDynaShadow(mySerum.frame32, mySerum.rotationsinframe32, dir.data(),
-                  col.data(), 0, isdynapix.data(), 5, 5, kW, kH, nullptr,
-                  nullptr, /*defer=*/true);
+                  col.data(), 0, isdynapix.data(), 5, 5, kW, kH,
+                  /*defer=*/true);
 
   const size_t below = (size_t)6 * kW + 5;
   CHECK_EQ(mySerum.frame32[below], 0xABCD);  // untouched, so it can be scaled
@@ -4136,10 +4136,10 @@ static void Test_LoadForgetsTheRunningScene(void) {
   }
 }
 
-// The extra plane's dynamic masks and colours of a 128x32 project are never
-// read (its 64-row plane is rendered in layer mode), so a load drops them; the
-// 256x64 plane of an is256x64 project keeps them. Its extra shadow tables stay:
-// layer mode falls back to them.
+// The extra plane's dynamic masks, colours and shadow tables of a 128x32
+// project are never read (its 64-row plane is rendered in layer mode, from the
+// SD zones and shadows), so a load drops them; the 256x64 plane of an
+// is256x64 project keeps them.
 static void Test_UnusedExtraDynamicDataIsDropped(void) {
   using namespace n256;
   for (int native = 0; native < 2; ++native) {
@@ -4151,14 +4151,18 @@ static void Test_UnusedExtraDynamicDataIsDropped(void) {
     }
     for (uint32_t i = 0; i < 40; ++i)
       s.dynamasksx[(size_t)kStatic * kNPx + i] = 1;
+    s.shdirx[(size_t)kStatic * MAX_DYNA_SETS_PER_FRAME_V2 + 1] = 0x04;
     if (!Load(s, FLAG_REQUEST_64P_FRAMES, false)) continue;
     if (native) {
       CHECK_EQ(g_serumData.frameHasDynamicExtra[kStatic], 1);
       CHECK(g_serumData.dynamasks_extra.hasData(kStatic));
+      CHECK(g_serumData.dynashadowsdir_extra.hasData(kStatic));
     } else {
       CHECK_EQ(g_serumData.frameHasDynamicExtra[kStatic], 0);
       CHECK(!g_serumData.dynamasks_extra.hasData(kStatic));
       CHECK(!g_serumData.dyna4cols_v2_extra.hasData(kStatic));
+      CHECK(!g_serumData.dynashadowsdir_extra.hasData(kStatic));
+      CHECK(!g_serumData.dynashadowscol_extra.hasData(kStatic));
     }
     Unload();
   }

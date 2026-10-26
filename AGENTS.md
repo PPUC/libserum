@@ -891,12 +891,16 @@ layer mode `frameHasDynamicExtra` is forced false, which also makes the extra
 plane render the correct *underlay* beneath dynamic content.
 
 A 128x32 project (not `is256x64`) renders its extra plane in layer mode only,
-so `BuildPackingSidecarsAndNormalize()` drops `dynamasks_extra`,
-`dynamasks_extra_active` and `dyna4cols_v2_extra` for it and leaves
-`frameHasDynamicExtra` at 0: they are neither kept in memory nor written into a
-cROMc made from source data. The extra shadow tables (`dynashadowsdir_extra`,
-`dynashadowscol_extra`) stay, as layer mode falls back to them. An `is256x64`
-project keeps everything.
+from the SD dynamic zones and the SD shadow tables, so
+`BuildPackingSidecarsAndNormalize()` drops `dynamasks_extra`,
+`dynamasks_extra_active`, `dyna4cols_v2_extra`, `dynashadowsdir_extra` and
+`dynashadowscol_extra` for it and leaves `frameHasDynamicExtra` at 0: they are
+neither kept in memory nor written into a cROMc made from source data. Layer
+mode used to fall back to the extra shadow tables for a set without an SD
+shadow direction; that fallback is gone (a shadow on the extra plane alone
+cannot be authored in the editor any more, and the real projects had it on
+six frames of one unreleased colorization). An `is256x64` project keeps
+everything.
 
 ### Original-only dynamic sets
 
@@ -1123,7 +1127,8 @@ independently of the glyph's, and a one-pixel shadow becomes two pixels, which o
 a tight glyph such as `8` closes the gap between its loops.
 
 The composite carries each lit pixel's dyna layer into `hdDynaLayerMap`, which is
-what lets the pass know which per-layer direction bitmask and colour apply.
+what lets the pass know which per-layer direction bitmask and colour apply: those
+of the SD shadow tables (`dynashadowsdir`, `dynashadowscol`).
 
 The original-resolution shadows must not be in the picture the upscale reads, or
 they would be drawn twice at two thicknesses. Marking them unowned was the wrong
