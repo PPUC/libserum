@@ -1914,6 +1914,22 @@ void Serum_free(void) {
   lastframe_full_crc_scene = 0;
   first_match_normal = true;
   first_match_scene = true;
+  // No scene runs and no trigger was reported in a colorization loaded next:
+  // a background scene left running would take the first frame that fires
+  // its trigger for its continuation (IDENTIFY_SAME_FRAME), and the trigger
+  // would not be reported again within its repeat timeout.
+  sceneFrameCount = 0;
+  sceneCurrentFrame = 0;
+  sceneDurationPerFrame = 0;
+  sceneInterruptable = false;
+  sceneStartImmediately = false;
+  sceneRepeatCount = 0;
+  sceneOptionFlags = 0;
+  sceneIsLastBackgroundFrame = false;
+  lastFrameId = 0;
+  lastTriggerID = 0xffffffff;
+  lasttriggerTimestamp = 0;
+  firstUnknownFrameTimestamp = 0;
   sceneEndHoldUntilMs = 0;
   sceneEndHoldDurationMs = 0;
   sceneNextFrameAtMs = 0;

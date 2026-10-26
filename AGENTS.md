@@ -204,7 +204,14 @@ Requested-output mode:
   `FLAG_REQUEST_FALLBACK` gets the `256x64` plane. See "Output contract" under
   "The ROM frame, and `is256x64` projects".
 
-1. Reset all runtime state via `Serum_free()`.
+1. Reset all runtime state via `Serum_free()`. That includes the scene
+   playback state and the last trigger: a colorization loaded after another
+   starts with no scene running and no trigger reported. A background scene
+   left running from the previous load would otherwise take the first frame
+   that fires its trigger for its continuation and answer
+   `IDENTIFY_SAME_FRAME`, so a host that had just loaded showed nothing until
+   the next scene step, and the trigger would not be reported again within
+   `PUP_TRIGGER_REPEAT_TIMEOUT`.
 2. On real-machine runtime (`is_real_machine()==true`):
    - do not scan or apply `*.pup.csv`
    - ignore `skip-cromc.txt`

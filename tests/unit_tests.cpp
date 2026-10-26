@@ -2738,9 +2738,6 @@ static bool Load(const Synth& s, uint8_t flags, bool viaConcentrate,
   CHECK(loaded != NULL);
   CHECK_EQ(std::filesystem::exists(dir / kRom / (std::string(kRom) + ".cROMc")),
            viaConcentrate);
-  // The trigger last reported outlives a colorization and is not repeated
-  // within its timeout; every load here starts as if none had been.
-  lastTriggerID = 0xffffffff;
   return loaded != NULL;
 }
 
@@ -4086,6 +4083,59 @@ static void Test_BackgroundSceneKeepsTextShape(void) {
   Unload();
 }
 
+// A colorization loaded after another starts with no scene running and no
+// trigger reported. A background scene the last one was playing used to stay
+// "running": the first frame of the new load that fires the same trigger was
+// then taken for its continuation and answered with IDENTIFY_SAME_FRAME, so a
+// host that had just loaded showed nothing until the next scene step.
+static void Test_LoadForgetsTheRunningScene(void) {
+  using namespace n256;
+  const char* const csv = "7,1,100,0,1,1,1,0,0,4\n";  // looping, as background
+  Synth s;
+  s.is256x64 = false;
+  s.compmasks.assign((size_t)s.ncompmasks * kOPx, 0);
+  s.compmaskid.assign(s.nframes, 255);
+  s.framesprites.assign(s.framesprites.size(), 255);
+  s.isextraframe.assign(s.nframes, 0);
+  {
+    const std::filesystem::path dir = Dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "scene.csv").string();
+    {
+      std::ofstream out(path);
+      out << csv;
+    }
+    SceneGenerator generator;
+    CHECK(generator.parseCSV(path));
+    generator.setDepth(2);
+    memset(s.Native(kScene), 0, kNPx);
+    CHECK_EQ(generator.generateFrame(7, 0, s.Native(kScene), 1, true), 0xffff);
+  }
+  // The game frame: a block, with the scene behind everything unlit.
+  memset(s.Native(kDynamic), 0, kNPx);
+  for (uint32_t y = 10; y < 16; ++y)
+    for (uint32_t x = 40; x < 46; ++x) s.Native(kDynamic)[y * kOW + x] = 3;
+  s.bgids[kDynamic] = 0;
+  memset(&s.bgmask[(size_t)kDynamic * kOPx], 1, kOPx);
+  s.triggers[kDynamic] = 7;
+
+  for (int load = 0; load < 2; ++load) {
+    if (!LoadUnchecked(s, FLAG_REQUEST_64P_FRAMES, false, csv)) {
+      CHECK(false);
+      return;
+    }
+    std::vector<uint8_t> game(s.Native(kDynamic), s.Native(kDynamic) + kOPx);
+    game.shrink_to_fit();
+    const uint32_t r = Serum_Colorize(game.data());
+    CHECK(r != IDENTIFY_NO_FRAME);
+    CHECK(r != IDENTIFY_SAME_FRAME);
+    CHECK_EQ(lastTriggerID, 7u);
+    CHECK(sceneFrameCount > 0);
+    Unload();
+  }
+}
+
 // A monochrome frame paints both planes itself. On a project with an authored
 // 64-row plane it writes that plane directly, and the plane is then not the
 // upscale of the last colorized picture any more: the frame that ends the
@@ -5143,6 +5193,7 @@ static const TestCase kTests[] = {
      Test_SourceBuildsTheCromsColorization},
     {"upscale/background_scene_keeps_text_shape",
      Test_BackgroundSceneKeepsTextShape},
+    {"scene/load_forgets_the_running_scene", Test_LoadForgetsTheRunningScene},
     {"memory/writes_no_file", Test_MemoryLoadWritesNoFile},
     {"memory/failures_are_clean", Test_MemoryLoadFailuresAreClean},
 };
