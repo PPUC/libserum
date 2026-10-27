@@ -394,7 +394,9 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
   frames out of order fail the load. They set `sceneFramesFromColorization`
   (also for an empty list) and are stored in the cROMc from concentrate
   version 13. The DOF events (`kCromSettingsDofEvents`, 32; see "DOF events")
-  are the last part. A block that is cut short or malformed fails the load.
+  follow, then the frame triggers (`kCromSettingsFrameTriggers`, 64; see
+  "Frame triggers (v2)"): per frame a PUP, scene and monochrome trigger; one
+  out of its range, frames out of order or beyond the frames fail the load. A block that is cut short or malformed fails the load.
 - Scenes from the block set `scenesFromColorization`, scaling settings set
   `scalingFromColorization` (also when the block holds zero scenes). Either
   makes the matching sidecar (`<rom>.pup.csv`, `scaling.txt`) ignored, in the
@@ -604,6 +606,37 @@ Save-time invariant:
   `g_serumData.nocolors` before `BuildFrameLookupVectors()`. Otherwise large
   v2 scene sets authored for 4-level scene markers can serialize empty derived
   scene lookup data even though the source `.pup.csv` parses successfully.
+
+## Frame triggers (v2)
+A v2 frame has three triggers, each `0xffffffff` for none, so one frame can do
+all three:
+
+- the PUP trigger (`pupTriggerIDs`, below `PUP_TRIGGER_MAX_THRESHOLD`): reported
+  to the host in `triggerID`, not again within `PUP_TRIGGER_REPEAT_TIMEOUT`
+  unless another PUP trigger (or none) came in between (`lastPupTriggerID`);
+- the scene trigger (`triggerIDs`, below `MONOCHROME_PALETTE_TRIGGER_ID`): the
+  scene of that ID starts, with `lastTriggerID` and `lasttriggerTimestamp` for
+  continuation and repeats as before; never reported;
+- the monochrome trigger (`monochromeTriggerIDs`): `MONOCHROME_TRIGGER_ID` or
+  `MONOCHROME_PALETTE_TRIGGER_ID`.
+
+They come apart from the editor in the frame triggers of the cROM settings
+block (`kCromSettingsFrameTriggers`, 64; `frameTriggersFromColorization`),
+which replace the frame block's one trigger per frame. Otherwise (every cROM of
+the Win32 editor, a cROMc before concentrate version 15) that one trigger is
+split by range in `SplitFrameTriggers()`: below 50000 it is the PUP trigger and
+stays the scene trigger (a scene of a pup.csv may have such an ID, and played
+before), 65431 and up goes to the monochrome trigger, anything else stays the
+scene trigger. A cROM therefore behaves as it did with one field. The cROMc
+stores all three from concentrate version 15.
+
+While the display is monochrome (`monochromeMode`, `monochromePaletteMode`) a
+frame fires its PUP and scene triggers only if it turns the display monochrome
+itself; a frame without its own monochrome trigger (a black frame kept in
+monochrome) fires none, as before. A scene that starts at once (immediate or
+background) is rendered within the same call, which resets `triggerID`; the
+frame's PUP trigger is put back, so a host gets it along with the scene. A
+Serum v1 colorization keeps its one trigger per frame in `triggerIDs`.
 
 ## Colorization flow (v2)
 Entry point: `Serum_ColorizeWithMetadatav2(frame, sceneFrameRequested=false)`.
@@ -1393,7 +1426,10 @@ Finished-scene default behavior:
   scene frame is incomplete/unavailable.
 
 ## cROMc persistence
-Current concentrate version: **14**. Version 14 adds the DOF events after the
+Current concentrate version: **15**. Version 15 adds the PUP and the
+monochrome trigger of each frame (`pupTriggerIDs`, `monochromeTriggerIDs`)
+after the DOF events (see "Frame triggers (v2)"); an older v2 cROMc has its
+triggers split on load. Version 14 adds the DOF events after the
 scene frames (see "DOF events"). Version 13 adds
 `sceneFramesFromColorization` and the scene frames of the settings block after
 the original-only dynamic sets (see "cROM settings block"). Version 12 adds the original-only dynamic

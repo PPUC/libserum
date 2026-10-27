@@ -90,6 +90,8 @@ SerumData::SerumData()
       spritedetdwordpos(0),
       spritedetareas(0),
       triggerIDs(0xffffffff),
+      pupTriggerIDs(0xffffffff),
+      monochromeTriggerIDs(0xffffffff),
       framespriteBB(0, false, true),
       isextrabackground(0, true),
       backgroundframes(0, false, true),
@@ -203,6 +205,9 @@ void SerumData::Clear() {
   spritedetdwords.clear();
   spritedetdwordpos.clear();
   triggerIDs.clear();
+  pupTriggerIDs.clear();
+  monochromeTriggerIDs.clear();
+  frameTriggersFromColorization = false;
   framespriteBB.clear();
   isextrabackground.clear();
   backgroundframes.clear();
@@ -258,7 +263,9 @@ void SerumData::BuildCriticalTriggerLookup() {
       continue;
     }
 
-    const uint32_t triggerId = triggerIDs[frameId][0];
+    const uint32_t triggerId = SerumVersion == SERUM_V2
+                                   ? monochromeTriggerIDs[frameId][0]
+                                   : triggerIDs[frameId][0];
     if (triggerId != kMonochromeTriggerId &&
         triggerId != kMonochromePaletteTriggerId) {
       continue;
@@ -286,9 +293,25 @@ void SerumData::RefreshPreparedLoadMetadata() {
     }
   }
 
+  SparseVector<uint32_t> &pupTriggers =
+      SerumVersion == SERUM_V2 ? pupTriggerIDs : triggerIDs;
   for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
-    if (triggerIDs[frameId][0] < kPupTriggerMaxThreshold) {
+    if (pupTriggers[frameId][0] < kPupTriggerMaxThreshold) {
       ++publicTriggerCount;
+    }
+  }
+}
+
+void SerumData::SplitFrameTriggers() {
+  const uint32_t none = 0xffffffff;
+  for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
+    uint32_t triggerId = triggerIDs[frameId][0];
+    if (triggerId == none) continue;
+    if (triggerId >= kMonochromePaletteTriggerId) {
+      monochromeTriggerIDs.set(frameId, &triggerId, 1);
+      triggerIDs.set(frameId, &none, 1);
+    } else if (triggerId < kPupTriggerMaxThreshold) {
+      pupTriggerIDs.set(frameId, &triggerId, 1);
     }
   }
 }

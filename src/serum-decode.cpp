@@ -575,7 +575,9 @@ static bool IsCriticalMonochromeTriggerFrame(uint32_t frameId) {
   if (frameId >= g_serumData.nframes) {
     return false;
   }
-  const uint32_t triggerId = g_serumData.triggerIDs[frameId][0];
+  const uint32_t triggerId = g_serumData.SerumVersion == SERUM_V2
+                                 ? g_serumData.monochromeTriggerIDs[frameId][0]
+                                 : g_serumData.triggerIDs[frameId][0];
   return triggerId == MONOCHROME_TRIGGER_ID ||
          triggerId == MONOCHROME_PALETTE_TRIGGER_ID;
 }
@@ -708,6 +710,9 @@ static void QueueFrameLights(uint32_t frameId, uint32_t now) {
   }
 }
 uint32_t lasttriggerTimestamp = 0;
+// The PUP trigger reported last (v2), with its own repeat timeout.
+static uint32_t lastPupTriggerID = 0xffffffff;
+static uint32_t lastPupTriggerTimestamp = 0;
 bool isrotation = true;     // are there rotations to send
 bool* framechecked = NULL;  // are these frames checked?
 uint16_t ignoreUnknownFramesTimeout = 0;
@@ -1984,6 +1989,8 @@ void Serum_free(void) {
   lastFrameId = 0;
   lastTriggerID = 0xffffffff;
   lasttriggerTimestamp = 0;
+  lastPupTriggerID = 0xffffffff;
+  lastPupTriggerTimestamp = 0;
   firstUnknownFrameTimestamp = 0;
   sceneEndHoldUntilMs = 0;
   sceneEndHoldDurationMs = 0;
@@ -2211,6 +2218,11 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
 //            uint8 flags (1: with a turn-off value), two bytes 0, int32
 //            number, int32 value, int32 turn-off value (16 bytes); by
 //            ascending frame ID (see SerumDofFrame).
+//   frame triggers: uint32 frame count, per frame uint32 frame ID, then its
+//            PUP trigger (below 50000), scene trigger (below 65431) and
+//            monochrome trigger (65431 or 65432), uint32 each, 0xffffffff for
+//            none (16 bytes); by ascending frame ID. The frames' triggers are
+//            then these, the triggers of the frame block ignored.
 // Bytes after these are ignored, so fields can be appended to the payload.
 static constexpr uint32_t kCromSettingsMagic = 0x31584353;  // "SCX1"
 static constexpr uint32_t kCromSettingsScenes = 1;
@@ -2221,6 +2233,7 @@ static constexpr uint32_t kCromSettingsSceneFrames = 16;
 static constexpr uint32_t kCromSettingsSceneFrameBytes = 10;
 static constexpr uint32_t kCromSettingsDofEvents = 32;
 static constexpr uint32_t kCromSettingsDofEventBytes = 16;
+static constexpr uint32_t kCromSettingsFrameTriggers = 64;
 static constexpr uint32_t kCromSettingsLightEffectBytes = 24;
 static constexpr uint32_t kCromSettingsLightActionBytes = 8;
 static constexpr uint32_t kCromSettingsSceneBytes = 13;
@@ -2402,6 +2415,36 @@ static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
       }
     }
     g_serumData.dofFrames = std::move(dofFrames);
+  }
+  if (contents & kCromSettingsFrameTriggers) {
+    uint32_t frames = 0;
+    if (!take(&frames, sizeof(frames)) ||
+        (uint64_t)frames * 16 > payload.size() - offset)
+      return false;
+    uint32_t none = 0xffffffff;
+    for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
+      g_serumData.triggerIDs.set(frameId, &none, 1);
+    }
+    g_serumData.pupTriggerIDs.clear();
+    g_serumData.monochromeTriggerIDs.clear();
+    uint32_t previous = 0;
+    for (uint32_t i = 0; i < frames; ++i) {
+      uint32_t frameId = 0, pup = 0, scene = 0, monochrome = 0;
+      if (!take(&frameId, 4) || !take(&pup, 4) || !take(&scene, 4) ||
+          !take(&monochrome, 4) || frameId >= g_serumData.nframes ||
+          (i > 0 && frameId <= previous) ||
+          (pup != none && pup >= PUP_TRIGGER_MAX_THRESHOLD) ||
+          (scene != none && scene >= MONOCHROME_PALETTE_TRIGGER_ID) ||
+          (monochrome != none && monochrome != MONOCHROME_TRIGGER_ID &&
+           monochrome != MONOCHROME_PALETTE_TRIGGER_ID))
+        return false;
+      previous = frameId;
+      if (pup != none) g_serumData.pupTriggerIDs.set(frameId, &pup, 1);
+      if (scene != none) g_serumData.triggerIDs.set(frameId, &scene, 1);
+      if (monochrome != none)
+        g_serumData.monochromeTriggerIDs.set(frameId, &monochrome, 1);
+    }
+    g_serumData.frameTriggersFromColorization = true;
   }
   return true;
 }
@@ -4502,8 +4545,17 @@ static void ReadV2Blocks(Input& input, uint32_t formatVersion,
 }
 
 // After the blocks and the settings: what every v2 load derives from them.
+static bool FrameHasNoTrigger(uint32_t frameId) {
+  return g_serumData.triggerIDs[frameId][0] == 0xffffffff &&
+         g_serumData.pupTriggerIDs[frameId][0] == 0xffffffff &&
+         g_serumData.monochromeTriggerIDs[frameId][0] == 0xffffffff;
+}
+
 static Serum_Frame_Struc* FinishV2Load() {
   g_serumData.BuildPackingSidecarsAndNormalize();
+  if (!g_serumData.frameTriggersFromColorization) {
+    g_serumData.SplitFrameTriggers();
+  }
 
   mySerum.ntriggers = 0;
   uint32_t framespos = g_serumData.nframes / 2;
@@ -4514,7 +4566,7 @@ static Serum_Frame_Struc* FinishV2Load() {
     std::vector<uint32_t> candidates;
     candidates.reserve(framesspace);
     for (uint32_t ti = framespos; ti < g_serumData.nframes; ++ti) {
-      if (g_serumData.triggerIDs[ti][0] == 0xffffffff) {
+      if (FrameHasNoTrigger(ti)) {
         candidates.push_back(ti);
       }
     }
@@ -4527,22 +4579,22 @@ static Serum_Frame_Struc* FinishV2Load() {
       uint32_t toAssign = std::min<uint32_t>(framescount, candidates.size());
       for (uint32_t i = 0; i < toAssign; ++i) {
         uint32_t triggerValue = triggerDist(rng);
-        g_serumData.triggerIDs.set(candidates[i], &triggerValue, 1);
+        g_serumData.monochromeTriggerIDs.set(candidates[i], &triggerValue, 1);
       }
 
       for (uint32_t offset = 0; (framespos + offset) < g_serumData.nframes;
            ++offset) {
         uint32_t idx = framespos + offset;
-        if (g_serumData.triggerIDs[idx][0] == 0xffffffff) {
+        if (FrameHasNoTrigger(idx)) {
           uint32_t triggerValue = triggerDist(rng);
-          g_serumData.triggerIDs.set(idx, &triggerValue, 1);
+          g_serumData.monochromeTriggerIDs.set(idx, &triggerValue, 1);
           break;
         }
       }
     }
   }
   for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
-    if (g_serumData.triggerIDs[ti][0] < PUP_TRIGGER_MAX_THRESHOLD)
+    if (g_serumData.pupTriggerIDs[ti][0] < PUP_TRIGGER_MAX_THRESHOLD)
       mySerum.ntriggers++;
   }
   framechecked = (bool*)malloc(sizeof(bool) * g_serumData.nframes);
@@ -6110,7 +6162,10 @@ static uint32_t BuildRuntimeFeatureFlags(uint32_t frameId) {
     featureFlags |= SERUM_RUNTIME_FEATURE_SCENE;
   }
 
-  if (g_serumData.triggerIDs[frameId][0] < 0xffffffff) {
+  if (g_serumData.triggerIDs[frameId][0] < 0xffffffff ||
+      (g_serumData.SerumVersion == SERUM_V2 &&
+       (g_serumData.pupTriggerIDs[frameId][0] < 0xffffffff ||
+        g_serumData.monochromeTriggerIDs[frameId][0] < 0xffffffff))) {
     featureFlags |= SERUM_RUNTIME_FEATURE_TRIGGER;
   }
 
@@ -8079,8 +8134,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   uint32_t now = GetMonotonicTimeMs();
   bool rotationIsScene = false;
   if (is_real_machine() && !showStatusMessages) {
-    showStatusMessages = (g_serumData.triggerIDs[lastfound][0] > 0xff98 &&
-                          g_serumData.triggerIDs[lastfound][0] < 0xffffffff);
+    showStatusMessages =
+        (g_serumData.monochromeTriggerIDs[lastfound][0] > 0xff98 &&
+         g_serumData.monochromeTriggerIDs[lastfound][0] < 0xffffffff);
     if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
   }
   if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
@@ -8092,17 +8148,17 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     // takes care of that.
     if ((!monochromeMode && !monochromePaletteMode) ||
         !IsFullBlackFrame(frame, NativeFramePixels())) {
-      monochromeMode =
-          (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
+      monochromeMode = (g_serumData.monochromeTriggerIDs[lastfound][0] ==
+                        MONOCHROME_TRIGGER_ID);
       monochromePaletteMode = false;
-      if (g_serumData.triggerIDs[lastfound][0] ==
+      if (g_serumData.monochromeTriggerIDs[lastfound][0] ==
           MONOCHROME_PALETTE_TRIGGER_ID) {
         monochromePaletteMode = CaptureMonochromePaletteFromFrameV2(lastfound);
         monochromeMode = false;
       }
     }
-    if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
-      g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
+    if (g_serumData.monochromeTriggerIDs[lastfound][0] > 0xff98)
+      g_serumData.monochromeTriggerIDs[lastfound][0] = 0xffffffff;
 
     if ((!monochromeMode && !monochromePaletteMode) &&
         g_serumData.sceneGenerator->isActive() && !sceneFrameRequested &&
@@ -8263,12 +8319,25 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
         mySerum.rotationtimer = 0;
 
         // lastfound is set by Identify_Frame, check if we have a new PUP
-        // trigger
-        if ((!monochromeMode && !monochromePaletteMode) &&
-            (g_serumData.triggerIDs[lastfound][0] != lastTriggerID ||
+        // trigger, and a new scene trigger. While the display is monochrome
+        // only a frame that turns it monochrome itself fires its triggers.
+        const bool monochromeActive = monochromeMode || monochromePaletteMode;
+        const bool monochromeFrame =
+            IsCriticalMonochromeTriggerFrame(lastfound);
+        const uint32_t pupTrigger = g_serumData.pupTriggerIDs[lastfound][0];
+        const uint32_t sceneTrigger = g_serumData.triggerIDs[lastfound][0];
+        if ((!monochromeActive ||
+             (monochromeFrame && pupTrigger < 0xffffffff)) &&
+            (pupTrigger != lastPupTriggerID ||
+             lastPupTriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT))) {
+          lastPupTriggerID = mySerum.triggerID = pupTrigger;
+          lastPupTriggerTimestamp = now;
+        }
+        if ((!monochromeActive ||
+             (monochromeFrame && sceneTrigger < 0xffffffff)) &&
+            (sceneTrigger != lastTriggerID ||
              lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT))) {
-          lastTriggerID = mySerum.triggerID =
-              g_serumData.triggerIDs[lastfound][0];
+          lastTriggerID = sceneTrigger;
           lasttriggerTimestamp = now;
           if (DebugTraceAllInputsEnabled()) {
             Log("Serum debug trigger commit: inputCrc=%u frameId=%u "
@@ -8347,7 +8416,12 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                                    sceneFrameCount, sceneDurationPerFrame,
                                    sceneOptionFlags, sceneInterruptable,
                                    sceneStartImmediately, sceneRepeatCount);
+                // Rendering the scene's frame resets the reported trigger;
+                // the frame's own PUP trigger is still news.
+                const uint32_t reportedTrigger = mySerum.triggerID;
                 uint32_t sceneRotationResult = Serum_RenderScene();
+                mySerum.triggerID =
+                    keepTriggersInternal ? 0xffffffff : reportedTrigger;
                 if (sceneRotationResult & FLAG_RETURNED_V2_SCENE) {
                   MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
                   return sceneRotationResult;
@@ -8358,7 +8432,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                                    sceneFrameCount, sceneDurationPerFrame,
                                    sceneOptionFlags, sceneInterruptable,
                                    sceneStartImmediately, sceneRepeatCount);
+                const uint32_t reportedTrigger = mySerum.triggerID;
                 uint32_t sceneRotationResult = Serum_RenderScene();
+                mySerum.triggerID = reportedTrigger;
                 if (sceneRotationResult & FLAG_RETURNED_V2_SCENE) {
                   backgroundScenePrimedThisCall = true;
                 }

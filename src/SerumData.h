@@ -228,6 +228,10 @@ class SerumData {
   bool LoadFromFile(const char *filename, const uint8_t flags);
   bool LoadFromBuffer(const uint8_t *data, size_t size, const uint8_t flags);
   void BuildPackingSidecarsAndNormalize();
+  // One trigger per frame in triggerIDs, as a cROM and a cROMc before
+  // concentrate version 15 have it: an ID below 50000 is the frame's PUP
+  // trigger as well, one of 65431 and up its monochrome trigger only.
+  void SplitFrameTriggers();
   void BuildSpriteRuntimeSidecars();
 
   void BuildCriticalTriggerLookup();
@@ -375,7 +379,17 @@ class SerumData {
   SparseVector<uint32_t> spritedetdwords;
   SparseVector<uint16_t> spritedetdwordpos;
   SparseVector<uint16_t> spritedetareas;
+  // The trigger a frame starts a scene with. For a v2 colorization the PUP
+  // trigger and the monochrome trigger have fields of their own (persisted
+  // from concentrate version 15), so one frame can have all three. A
+  // colorization that does not hand them over apart (the frame triggers of
+  // the settings block) has its one trigger per frame split by range:
+  // SplitFrameTriggers().
   SparseVector<uint32_t> triggerIDs;
+  SparseVector<uint32_t> pupTriggerIDs;
+  SparseVector<uint32_t> monochromeTriggerIDs;
+  // The settings block gave the three triggers of each frame.
+  bool frameTriggersFromColorization = false;
   SparseVector<uint16_t> framespriteBB;
   SparseVector<uint8_t> isextrabackground;
   SparseVector<uint8_t> backgroundframes;
@@ -752,6 +766,9 @@ class SerumData {
       if (concentrateFileVersion >= 14) {
         ar(dofFrames);
       }
+      if (concentrateFileVersion >= 15) {
+        ar(pupTriggerIDs, monochromeTriggerIDs);
+      }
     } else {
       if (concentrateFileVersion >= 8) {
         ar(scalingAlgorithm, shadowOffsetMode);
@@ -797,6 +814,13 @@ class SerumData {
         ar(dofFrames);
       } else {
         dofFrames.clear();
+      }
+      if (concentrateFileVersion >= 15) {
+        ar(pupTriggerIDs, monochromeTriggerIDs);
+      } else {
+        pupTriggerIDs.clear();
+        monochromeTriggerIDs.clear();
+        if (SerumVersion == SERUM_V2) SplitFrameTriggers();
       }
     }
   }

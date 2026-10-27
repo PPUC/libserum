@@ -4946,6 +4946,130 @@ static void Test_CromSettingsDofEvents(void) {
   n256::Unload();
 }
 
+// A frame's PUP, scene and monochrome triggers. A cROM has one trigger per
+// frame, split by range: below 50000 the PUP trigger (and still the trigger a
+// scene is looked up by), 65431 and 65432 the monochrome triggers, the rest
+// the scene trigger. The frame triggers of the settings block give each frame
+// all three; such a frame reports its PUP trigger, starts its scene and turns
+// the display monochrome at once. Through a cROMc too.
+static void Test_CromSettingsFrameTriggers(void) {
+  const uint32_t none = 0xffffffff;
+  {
+    n256::Synth s;
+    s.triggers[n256::kStatic] = 123;
+    s.triggers[n256::kDynamic] = 50010;
+    const std::vector<uint8_t> crom = s.Serialize();
+    CHECK(Serum_LoadFromMemory(crom.data(), crom.size(), n256::kBothPlanes) !=
+          NULL);
+    CHECK_EQ(g_serumData.pupTriggerIDs[n256::kStatic][0], 123u);
+    CHECK_EQ(g_serumData.triggerIDs[n256::kStatic][0], 123u);
+    CHECK_EQ(g_serumData.pupTriggerIDs[n256::kDynamic][0], none);
+    CHECK_EQ(g_serumData.triggerIDs[n256::kDynamic][0], 50010u);
+    CHECK_EQ(g_serumData.monochromeTriggerIDs[n256::kMonoTrigger][0],
+             (uint32_t)MONOCHROME_TRIGGER_ID);
+    CHECK_EQ(g_serumData.triggerIDs[n256::kMonoTrigger][0], none);
+    CHECK_EQ(mySerum.ntriggers, 1u);
+    n256::Colorize(s.Frame(n256::kStatic));
+    CHECK_EQ(mySerum.triggerID, 123u);
+    n256::Colorize(s.Frame(n256::kDynamic));
+    CHECK_EQ(mySerum.triggerID, none);
+    CHECK_EQ(lastTriggerID, 50010u);
+    Serum_Dispose();
+  }
+
+  struct Triggers {
+    uint32_t frameId, pup, scene, monochrome;
+  };
+  const auto block = [](const std::vector<Triggers>& frames) {
+    std::vector<uint8_t> payload;
+    const auto putU32 = [&payload](uint32_t value) {
+      payload.insert(payload.end(), (const uint8_t*)&value,
+                     (const uint8_t*)&value + 4);
+    };
+    putU32(kCromSettingsScenes | kCromSettingsFrameTriggers);
+    putU32(1);
+    const uint16_t scene[3] = {7, 2, 100};
+    const uint8_t flags[7] = {1, 1, 0, 1, 0, 0, 0};  // interrupted, at once
+    payload.insert(payload.end(), (const uint8_t*)scene,
+                   (const uint8_t*)scene + sizeof(scene));
+    payload.insert(payload.end(), flags, flags + sizeof(flags));
+    putU32((uint32_t)frames.size());
+    for (const Triggers& frame : frames) {
+      putU32(frame.frameId);
+      putU32(frame.pup);
+      putU32(frame.scene);
+      putU32(frame.monochrome);
+    }
+    std::vector<uint8_t> result;
+    const uint32_t magic = kCromSettingsMagic;
+    const uint32_t size = (uint32_t)payload.size();
+    result.insert(result.end(), (const uint8_t*)&magic,
+                  (const uint8_t*)&magic + 4);
+    result.insert(result.end(), (const uint8_t*)&size,
+                  (const uint8_t*)&size + 4);
+    result.insert(result.end(), payload.begin(), payload.end());
+    return result;
+  };
+  n256::Synth s;
+  {
+    const std::filesystem::path dir = n256::Dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "scene.csv").string();
+    {
+      std::ofstream out(path);
+      out << "7,2,100\n";
+    }
+    SceneGenerator generator;
+    CHECK(generator.parseCSV(path));
+    generator.setDepth(2);
+    memset(s.Native(n256::kScene), 0, n256::kNPx);
+    CHECK_EQ(generator.generateFrame(7, 1, s.Native(n256::kScene), 1, true),
+             0xffff);
+  }
+  // The frame block's triggers are ignored: kMonoTrigger has none here.
+  std::vector<uint8_t> crom = s.Serialize();
+  const std::vector<uint8_t> all =
+      block({{n256::kStatic, 123, 7, MONOCHROME_TRIGGER_ID},
+             {n256::kDynamic, 124, none, none}});
+  crom.insert(crom.end(), all.begin(), all.end());
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
+    if (viaConcentrate) {
+      Serum_Dispose();
+      std::filesystem::remove(n256::Dir() / n256::kRom /
+                              (std::string(n256::kRom) + ".cROM"));
+      CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
+                       n256::kBothPlanes) != NULL);
+    }
+    CHECK_EQ(g_serumData.monochromeTriggerIDs[n256::kMonoTrigger][0], none);
+    CHECK_EQ(mySerum.ntriggers, 2u);
+    n256::Colorize(s.Frame(n256::kStatic));
+    CHECK_EQ(mySerum.triggerID, 123u);
+    CHECK_EQ(lastTriggerID, 7u);
+    CHECK(sceneFrameCount > 0);
+    CHECK(monochromeMode);
+    n256::Colorize(s.Frame(n256::kDynamic));
+    CHECK_EQ(mySerum.triggerID, 124u);
+    CHECK(!monochromeMode);
+    Serum_Dispose();
+  }
+
+  for (const auto& bad :
+       {block({{n256::kStatic, 50000, none, none}}),
+        block({{n256::kStatic, none, MONOCHROME_PALETTE_TRIGGER_ID, none}}),
+        block({{n256::kStatic, none, none, 1234}}),
+        block(
+            {{n256::kDynamic, 1, none, none}, {n256::kStatic, 2, none, none}}),
+        block({{n256::kFrameCount, 1, none, none}})}) {
+    std::vector<uint8_t> broken = s.Serialize();
+    broken.insert(broken.end(), bad.begin(), bad.end());
+    CHECK(Serum_LoadFromMemory(broken.data(), broken.size(),
+                               n256::kBothPlanes) == NULL);
+  }
+  n256::Unload();
+}
+
 // The original-only dynamic sets from the settings block, directly and through
 // a cROMc; a mask of 0 or frames out of order fail the load.
 static void Test_CromSettingsOriginalOnlySets(void) {
@@ -5521,6 +5645,7 @@ static const TestCase kTests[] = {
     {"crom/settings_original_only_sets", Test_CromSettingsOriginalOnlySets},
     {"crom/settings_scene_frames", Test_CromSettingsSceneFrames},
     {"crom/settings_dof_events", Test_CromSettingsDofEvents},
+    {"crom/settings_frame_triggers", Test_CromSettingsFrameTriggers},
     {"source/builds_the_croms_colorization",
      Test_SourceBuildsTheCromsColorization},
     {"upscale/background_scene_keeps_text_shape",
