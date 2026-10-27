@@ -106,6 +106,33 @@ struct SerumSceneFrame {
   }
 };
 
+// A DOF event of a frame (Serum_Dof_Event), with the value emitted for the
+// element when the next frame is shown (hasOff), unless that frame sets the
+// element itself.
+struct SerumDofEvent {
+  char type = 'S';
+  bool hasOff = false;
+  int32_t number = 0;
+  int32_t value = 0;
+  int32_t offValue = 0;
+
+  template <class Archive>
+  void serialize(Archive &ar) {
+    ar(type, hasOff, number, value, offValue);
+  }
+};
+
+// The DOF events a frame emits when it is shown, in their order.
+struct SerumDofFrame {
+  uint32_t frameId = 0;
+  std::vector<SerumDofEvent> events;
+
+  template <class Archive>
+  void serialize(Archive &ar) {
+    ar(frameId, events);
+  }
+};
+
 struct SerumLightEffectData {
   Serum_Light_Effect effect = {};
 
@@ -265,6 +292,16 @@ class SerumData {
   // markers.
   bool sceneFramesFromColorization = false;
   std::vector<SerumSceneFrame> sceneFrames;
+  // The frames with DOF events, sorted by frame ID (persisted from concentrate
+  // version 14).
+  std::vector<SerumDofFrame> dofFrames;
+  // The frame's DOF events, nullptr when it has none.
+  const SerumDofFrame *DofFrame(uint32_t frameId) const {
+    const auto it = std::lower_bound(
+        dofFrames.begin(), dofFrames.end(), frameId,
+        [](const SerumDofFrame &f, uint32_t id) { return f.frameId < id; });
+    return it != dofFrames.end() && it->frameId == frameId ? &*it : nullptr;
+  }
   // The frame's original-only sets as a bit mask; 0 when it has none.
   uint32_t OriginalOnlySets(uint32_t frameId) const {
     const auto it = std::lower_bound(
@@ -712,6 +749,9 @@ class SerumData {
       if (concentrateFileVersion >= 13) {
         ar(sceneFramesFromColorization, sceneFrames);
       }
+      if (concentrateFileVersion >= 14) {
+        ar(dofFrames);
+      }
     } else {
       if (concentrateFileVersion >= 8) {
         ar(scalingAlgorithm, shadowOffsetMode);
@@ -752,6 +792,11 @@ class SerumData {
       } else {
         sceneFramesFromColorization = false;
         sceneFrames.clear();
+      }
+      if (concentrateFileVersion >= 14) {
+        ar(dofFrames);
+      } else {
+        dofFrames.clear();
       }
     }
   }

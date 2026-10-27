@@ -236,6 +236,16 @@ Serum_GetLightEffects(Serum_Light_Effect effects[SERUM_LIGHT_CHANNELS]);
 // colorization has light settings for, 0 for one without speaker lights.
 SERUM_API uint32_t
 Serum_GetDefaultLightEffects(Serum_Light_Effect effects[SERUM_LIGHT_CHANNELS]);
+// The DOF events of the frames shown since the last call, in the order they
+// came: up to `capacity` of them into `events`, returning how many. Those
+// that did not fit stay for the next call. A frame emits its events when it is
+// shown, not again while it stays on the display; an event with a turn-off
+// value has that value emitted with the next frame shown, unless that frame
+// sets the same element itself. A host passes them to libdof
+// (DOF::DataReceive()) as they come; libserum keeps up to
+// SERUM_DOF_EVENTS_KEPT of them and drops more until they are fetched.
+SERUM_API uint32_t Serum_GetDofEvents(Serum_Dof_Event* events,
+                                      uint32_t capacity);
 
 /** @brief Get the full version of this library
  *

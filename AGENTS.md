@@ -393,7 +393,8 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
   frame group (from 1) it plays; a frame ID beyond the frames, a group of 0 or
   frames out of order fail the load. They set `sceneFramesFromColorization`
   (also for an empty list) and are stored in the cROMc from concentrate
-  version 13. A block that is cut short or malformed fails the load.
+  version 13. The DOF events (`kCromSettingsDofEvents`, 32; see "DOF events")
+  are the last part. A block that is cut short or malformed fails the load.
 - Scenes from the block set `scenesFromColorization`, scaling settings set
   `scalingFromColorization` (also when the block holds zero scenes). Either
   makes the matching sidecar (`<rom>.pup.csv`, `scaling.txt`) ignored, in the
@@ -435,6 +436,28 @@ defaults (a channel without one is off), 0 for a colorization without lights.
 A host passes them to the lights asynchronously; frame rendering never waits
 for them. The duration is the device's to keep: after it the channel returns
 to its default.
+
+## DOF events
+A colorization can drive hardware through DOF (DirectOutput Framework,
+libdof): a frame lists events, each a table element type (a
+`TableElementTypeEnum` letter of libdof, or any capital letter), a number and
+a value, as `DOF::DataReceive(type, number, value)` takes them. An event may
+carry a turn-off value. They come with the DOF part of the cROM settings block
+(`kCromSettingsDofEvents`, 32, layout in the comment above
+`ApplyCromSettings()`) and are stored in the cROMc from concentrate version 14
+(`dofFrames`, `SerumDofFrame`, `SerumDofEvent`). An event type that is not a
+capital letter, a frame without events, a frame ID beyond the frames or frames
+out of order fail the load.
+
+Runtime (`QueueFrameDof()`, called where `QueueFrameLights()` is: when a frame
+is identified, normal or scene frame, not when the same frame stays, nor when
+`Identify_Frame()` reports the frame shown last again, as it does for a
+masked frame whose hidden pixels changed (`dofLastFrame`)): first
+the turn-off values the frame shown before left (`dofTurnOffs`), for each
+element this frame does not set itself, then the frame's own events in their
+order. `Serum_GetDofEvents()` hands them out in that order and removes them;
+at most `SERUM_DOF_EVENTS_KEPT` wait, more are dropped. libserum gives the
+values no meaning; mapping them to toys is DOF's configuration.
 
 ## cROM format version, sprites per frame and sprite IDs
 The cROM header carries no explicit version before header revision 21: the
@@ -1370,7 +1393,8 @@ Finished-scene default behavior:
   scene frame is incomplete/unavailable.
 
 ## cROMc persistence
-Current concentrate version: **13**. Version 13 adds
+Current concentrate version: **14**. Version 14 adds the DOF events after the
+scene frames (see "DOF events"). Version 13 adds
 `sceneFramesFromColorization` and the scene frames of the settings block after
 the original-only dynamic sets (see "cROM settings block"). Version 12 adds the original-only dynamic
 sets after the lights (see "Original-only dynamic sets"). Version 11 adds the

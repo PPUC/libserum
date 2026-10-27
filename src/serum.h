@@ -256,6 +256,22 @@ typedef struct _Serum_Light_Effect {
   uint8_t reserved[3];
 } Serum_Light_Effect;
 
+// A DOF event (DirectOutput Framework, libdof): what a host passes to
+// DOF::DataReceive(type, number, value). type is a TableElementTypeEnum letter
+// of libdof ('S' solenoid, 'L' lamp, 'W' switch, 'G' GI string, 'M' mech, 'N'
+// get mech, 'E' EM table, 'D' LED, 'C' score, 'B' score digit) or another
+// capital letter; number is the element, value its new value.
+typedef struct _Serum_Dof_Event {
+  char type;
+  uint8_t reserved[3];
+  int32_t number;
+  int32_t value;
+} Serum_Dof_Event;
+
+// The DOF events libserum keeps for a host that has not fetched them yet; more
+// are dropped (Serum_GetDofEvents()).
+#define SERUM_DOF_EVENTS_KEPT 1024
+
 typedef struct _Serum_Frame_Struc {
   // data for v1 Serum format
   uint8_t* frame;      // return the colorized frame

@@ -4813,6 +4813,139 @@ static void Test_CromSettingsLights(void) {
   n256::Unload();
 }
 
+namespace dof {
+
+struct Event {
+  char type;
+  int32_t number, value;
+  bool hasOff;
+  int32_t offValue;
+};
+
+// A settings block with the DOF events of the given frames.
+static std::vector<uint8_t> Block(
+    const std::vector<std::pair<uint32_t, std::vector<Event>>>& frames) {
+  std::vector<uint8_t> payload;
+  const auto put = [&payload](const void* data, size_t bytes) {
+    const uint8_t* p = (const uint8_t*)data;
+    payload.insert(payload.end(), p, p + bytes);
+  };
+  const uint32_t contents = kCromSettingsDofEvents;
+  const uint32_t count = (uint32_t)frames.size();
+  put(&contents, 4);
+  put(&count, 4);
+  for (const auto& frame : frames) {
+    const uint32_t events = (uint32_t)frame.second.size();
+    put(&frame.first, 4);
+    put(&events, 4);
+    for (const Event& event : frame.second) {
+      const uint8_t head[4] = {(uint8_t)event.type,
+                               (uint8_t)(event.hasOff ? 1 : 0), 0, 0};
+      put(head, 4);
+      put(&event.number, 4);
+      put(&event.value, 4);
+      put(&event.offValue, 4);
+    }
+  }
+  std::vector<uint8_t> block;
+  const uint32_t magic = kCromSettingsMagic;
+  const uint32_t size = (uint32_t)payload.size();
+  block.insert(block.end(), (const uint8_t*)&magic, (const uint8_t*)&magic + 4);
+  block.insert(block.end(), (const uint8_t*)&size, (const uint8_t*)&size + 4);
+  block.insert(block.end(), payload.begin(), payload.end());
+  return block;
+}
+
+// The pending events as "L12=1 S5=255".
+static std::string Fetch(uint32_t capacity = 16) {
+  Serum_Dof_Event events[16] = {};
+  const uint32_t count = Serum_GetDofEvents(events, capacity);
+  std::string text;
+  for (uint32_t i = 0; i < count; ++i) {
+    if (!text.empty()) text += ' ';
+    text += events[i].type + std::to_string(events[i].number) + '=' +
+            std::to_string(events[i].value);
+  }
+  return text;
+}
+
+}  // namespace dof
+
+// DOF events from the settings block: a frame emits its events when it is
+// shown, not again while it stays; a turn-off value goes out with the next
+// frame shown unless that frame sets the element itself. Through a cROMc too;
+// events of an unknown kind or frames out of order fail the load.
+static void Test_CromSettingsDofEvents(void) {
+  n256::Synth s;
+  std::vector<uint8_t> crom = s.Serialize();
+  const std::vector<uint8_t> block = dof::Block(
+      {{n256::kStatic, {{'L', 12, 1, true, 0}, {'S', 5, 255, false, 0}}},
+       {n256::kDynamic, {{'L', 12, 1, false, 0}, {'D', 33, 7, true, 2}}},
+       {n256::kMasked, {{'S', 9, 1, false, 0}}}});
+  crom.insert(crom.end(), block.begin(), block.end());
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
+    if (viaConcentrate) {
+      Serum_Dispose();
+      std::filesystem::remove(n256::Dir() / n256::kRom /
+                              (std::string(n256::kRom) + ".cROM"));
+      CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
+                       n256::kBothPlanes) != NULL);
+    }
+    CHECK_EQ(g_serumData.dofFrames.size(), 3u);
+    CHECK(dof::Fetch() == std::string());
+    n256::Colorize(s.Frame(n256::kStatic));
+    CHECK(dof::Fetch() == std::string("L12=1 S5=255"));
+    n256::Colorize(s.Frame(n256::kStatic));
+    CHECK(dof::Fetch() == std::string());
+    // kDynamic sets L12 itself: no turn-off for it.
+    n256::Colorize(s.Frame(n256::kDynamic));
+    CHECK(dof::Fetch() == std::string("L12=1 D33=7"));
+    n256::Colorize(s.Frame(n256::kBackground));
+    CHECK(dof::Fetch() == std::string("D33=2"));
+    n256::Colorize(s.Frame(n256::kStatic));
+    n256::Colorize(s.Frame(n256::kBackground));
+    // What does not fit stays for the next call.
+    CHECK(dof::Fetch(2) == std::string("L12=1 S5=255"));
+    CHECK(dof::Fetch() == std::string("L12=0"));
+    // A change under its comparison mask: still the frame, which stays.
+    n256::Colorize(s.Frame(n256::kMasked));
+    CHECK(dof::Fetch() == std::string("S9=1"));
+    std::vector<uint8_t> changed = s.Frame(n256::kMasked);
+    changed[63 * n256::kNW + 255] ^= 1;
+    CHECK(n256::Colorize(changed) != IDENTIFY_NO_FRAME);
+    CHECK(dof::Fetch() == std::string());
+    // Reported again (Identify_Frame() does so for a masked frame whose full
+    // picture changed): it stays as well.
+    QueueFrameDof(n256::kMasked);
+    CHECK(dof::Fetch() == std::string());
+    Serum_Dispose();
+  }
+  // Nothing is left over from the colorization before.
+  CHECK(settings::Load(crom, false) != NULL);
+  n256::Colorize(s.Frame(n256::kStatic));
+  Serum_Dispose();
+  CHECK(Serum_LoadFromMemory(s.Serialize().data(), s.Serialize().size(),
+                             n256::kBothPlanes) != NULL);
+  CHECK(dof::Fetch() == std::string());
+  n256::Colorize(s.Frame(n256::kBackground));
+  CHECK(dof::Fetch() == std::string());
+  Serum_Dispose();
+
+  for (const auto& bad :
+       {dof::Block({{n256::kStatic, {{'l', 12, 1, false, 0}}}}),
+        dof::Block({{n256::kStatic, {}}}),
+        dof::Block({{n256::kDynamic, {{'L', 1, 1, false, 0}}},
+                    {n256::kStatic, {{'L', 2, 1, false, 0}}}}),
+        dof::Block({{n256::kFrameCount, {{'L', 1, 1, false, 0}}}})}) {
+    std::vector<uint8_t> broken = s.Serialize();
+    broken.insert(broken.end(), bad.begin(), bad.end());
+    CHECK(Serum_LoadFromMemory(broken.data(), broken.size(),
+                               n256::kBothPlanes) == NULL);
+  }
+  n256::Unload();
+}
+
 // The original-only dynamic sets from the settings block, directly and through
 // a cROMc; a mask of 0 or frames out of order fail the load.
 static void Test_CromSettingsOriginalOnlySets(void) {
@@ -5387,6 +5520,7 @@ static const TestCase kTests[] = {
     {"crom/settings_lights", Test_CromSettingsLights},
     {"crom/settings_original_only_sets", Test_CromSettingsOriginalOnlySets},
     {"crom/settings_scene_frames", Test_CromSettingsSceneFrames},
+    {"crom/settings_dof_events", Test_CromSettingsDofEvents},
     {"source/builds_the_croms_colorization",
      Test_SourceBuildsTheCromsColorization},
     {"upscale/background_scene_keeps_text_shape",

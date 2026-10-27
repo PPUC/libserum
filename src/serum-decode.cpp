@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -632,6 +633,52 @@ static LightChannelState lightChannels[SERUM_LIGHT_CHANNELS];
 static void ResetLights() {
   lightPendingMask = 0;
   for (LightChannelState& channel : lightChannels) channel = {};
+}
+
+// DOF events: those not fetched yet (Serum_GetDofEvents()), the turn-off
+// values the frame shown last left for the next one, and that frame.
+static std::deque<Serum_Dof_Event> dofPending;
+static std::vector<SerumDofEvent> dofTurnOffs;
+static uint32_t dofLastFrame = IDENTIFY_NO_FRAME;
+
+static void ResetDof() {
+  dofPending.clear();
+  dofTurnOffs.clear();
+  dofLastFrame = IDENTIFY_NO_FRAME;
+}
+
+static void QueueDofEvent(char type, int32_t number, int32_t value) {
+  if (dofPending.size() >= SERUM_DOF_EVENTS_KEPT) return;
+  Serum_Dof_Event event = {};
+  event.type = type;
+  event.number = number;
+  event.value = value;
+  dofPending.push_back(event);
+}
+
+// The DOF events of a frame being shown: first the turn-off values the frame
+// before left, for the elements this frame does not set, then its own. The
+// frame identified again (a comparison mask hides what changed) stays: it
+// emits nothing.
+static void QueueFrameDof(uint32_t frameId) {
+  if (frameId == dofLastFrame) return;
+  dofLastFrame = frameId;
+  const SerumDofFrame* frame = g_serumData.DofFrame(frameId);
+  for (const SerumDofEvent& off : dofTurnOffs) {
+    const bool setHere = frame != nullptr &&
+                         std::any_of(frame->events.begin(), frame->events.end(),
+                                     [&off](const SerumDofEvent& event) {
+                                       return event.type == off.type &&
+                                              event.number == off.number;
+                                     });
+    if (!setHere) QueueDofEvent(off.type, off.number, off.offValue);
+  }
+  dofTurnOffs.clear();
+  if (frame == nullptr) return;
+  for (const SerumDofEvent& event : frame->events) {
+    QueueDofEvent(event.type, event.number, event.value);
+    if (event.hasOff) dofTurnOffs.push_back(event);
+  }
 }
 
 // The light changes of a frame being shown. A channel already playing the
@@ -1905,6 +1952,7 @@ void Serum_free(void) {
   scaledLayerHasCoverage = false;
   cromloaded = false;
   ResetLights();
+  ResetDof();
   upscaleRomOverride = NULL;
   lastfound = 0;
   lastfound_normal = 0;
@@ -2158,6 +2206,11 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
 //            ID, uint16 frame index, uint8 frame group (from 1), uint8 0, by
 //            ascending frame ID (see SerumSceneFrame). The frames of scenes
 //            are then exactly these, with none found by its scene marker.
+//   DOF events: uint32 frame count, per frame uint32 frame ID and uint32 event
+//            count (not 0), then per event uint8 type (a capital letter),
+//            uint8 flags (1: with a turn-off value), two bytes 0, int32
+//            number, int32 value, int32 turn-off value (16 bytes); by
+//            ascending frame ID (see SerumDofFrame).
 // Bytes after these are ignored, so fields can be appended to the payload.
 static constexpr uint32_t kCromSettingsMagic = 0x31584353;  // "SCX1"
 static constexpr uint32_t kCromSettingsScenes = 1;
@@ -2166,6 +2219,8 @@ static constexpr uint32_t kCromSettingsLights = 4;
 static constexpr uint32_t kCromSettingsOriginalOnlySets = 8;
 static constexpr uint32_t kCromSettingsSceneFrames = 16;
 static constexpr uint32_t kCromSettingsSceneFrameBytes = 10;
+static constexpr uint32_t kCromSettingsDofEvents = 32;
+static constexpr uint32_t kCromSettingsDofEventBytes = 16;
 static constexpr uint32_t kCromSettingsLightEffectBytes = 24;
 static constexpr uint32_t kCromSettingsLightActionBytes = 8;
 static constexpr uint32_t kCromSettingsSceneBytes = 13;
@@ -2317,6 +2372,36 @@ static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
     }
     g_serumData.sceneFramesFromColorization = true;
     g_serumData.sceneFrames = std::move(sceneFrames);
+  }
+  if (contents & kCromSettingsDofEvents) {
+    uint32_t frames = 0;
+    if (!take(&frames, sizeof(frames)) ||
+        (uint64_t)frames * 8 > payload.size() - offset)
+      return false;
+    std::vector<SerumDofFrame> dofFrames(frames);
+    for (size_t i = 0; i < dofFrames.size(); ++i) {
+      SerumDofFrame& frame = dofFrames[i];
+      uint32_t count = 0;
+      if (!take(&frame.frameId, sizeof(frame.frameId)) ||
+          !take(&count, sizeof(count)) || count == 0 ||
+          frame.frameId >= g_serumData.nframes ||
+          (i > 0 && frame.frameId <= dofFrames[i - 1].frameId) ||
+          (uint64_t)count * kCromSettingsDofEventBytes >
+              payload.size() - offset)
+        return false;
+      frame.events.resize(count);
+      for (SerumDofEvent& event : frame.events) {
+        uint8_t head[4];
+        if (!take(head, sizeof(head)) || head[0] < 'A' || head[0] > 'Z' ||
+            head[1] > 1 || !take(&event.number, sizeof(event.number)) ||
+            !take(&event.value, sizeof(event.value)) ||
+            !take(&event.offValue, sizeof(event.offValue)))
+          return false;
+        event.type = (char)head[0];
+        event.hasOff = head[1] != 0;
+      }
+    }
+    g_serumData.dofFrames = std::move(dofFrames);
   }
   return true;
 }
@@ -8096,6 +8181,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
 
     mySerum.frameID = frameID;
     QueueFrameLights(frameID, now);
+    QueueFrameDof(frameID);
     if (DebugTraceAllInputsEnabled()) {
       Log("Serum debug input result: api=v2 inputCrc=%u result=frame "
           "frameId=%u sceneRequested=%s",
@@ -9222,6 +9308,19 @@ Serum_GetDefaultLightEffects(Serum_Light_Effect effects[SERUM_LIGHT_CHANNELS]) {
   }
   return (1u << SERUM_LIGHT_CHANNELS) - 1;
   SERUM_API_GUARD_END("Serum_GetDefaultLightEffects", 0)
+}
+
+SERUM_API uint32_t Serum_GetDofEvents(Serum_Dof_Event* events,
+                                      uint32_t capacity) {
+  SERUM_API_GUARD_START("Serum_GetDofEvents")
+  if (events == nullptr) return 0;
+  uint32_t count = 0;
+  while (count < capacity && !dofPending.empty()) {
+    events[count++] = dofPending.front();
+    dofPending.pop_front();
+  }
+  return count;
+  SERUM_API_GUARD_END("Serum_GetDofEvents", 0)
 }
 
 SERUM_API bool Serum_Scene_ParseCSV(const char* const csv_filename) {
