@@ -219,6 +219,33 @@ bool SceneGenerator::generateDump(const std::string &dump_filename, int id) {
   return true;
 }
 
+bool SceneGenerator::setSceneBase(uint16_t sceneId, uint16_t baseSceneId) {
+  const auto find = [this](uint16_t id) {
+    return std::find_if(
+        m_sceneData.begin(), m_sceneData.end(),
+        [id](const SceneData &data) { return data.sceneId == id; });
+  };
+  auto variant = find(sceneId);
+  const auto base = find(baseSceneId);
+  if (sceneId == baseSceneId || variant == m_sceneData.end() ||
+      base == m_sceneData.end() || base->baseSceneId >= 0)
+    return false;
+  variant->baseSceneId = baseSceneId;
+  variant->frameCount = base->frameCount;
+  variant->frameGroups = base->frameGroups;
+  return true;
+}
+
+uint16_t SceneGenerator::framesSceneId(uint16_t sceneId) const {
+  for (const SceneData &data : m_sceneData) {
+    if (data.sceneId == sceneId) {
+      return data.baseSceneId >= 0 ? static_cast<uint16_t>(data.baseSceneId)
+                                   : sceneId;
+    }
+  }
+  return sceneId;
+}
+
 bool SceneGenerator::getSceneInfo(uint16_t sceneId, uint16_t &frameCount,
                                   uint16_t &durationPerFrame,
                                   bool &interruptable, bool &startImmediately,

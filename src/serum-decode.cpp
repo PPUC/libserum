@@ -2223,6 +2223,9 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
 //            monochrome trigger (65431 or 65432), uint32 each, 0xffffffff for
 //            none (16 bytes); by ascending frame ID. The frames' triggers are
 //            then these, the triggers of the frame block ignored.
+//   scene variants: uint32 count, per variant uint16 scene ID and uint16 ID of
+//            the scene whose frames it plays (SceneGenerator::setSceneBase());
+//            both are scenes of the block, the base no variant.
 // Bytes after these are ignored, so fields can be appended to the payload.
 static constexpr uint32_t kCromSettingsMagic = 0x31584353;  // "SCX1"
 static constexpr uint32_t kCromSettingsScenes = 1;
@@ -2234,6 +2237,7 @@ static constexpr uint32_t kCromSettingsSceneFrameBytes = 10;
 static constexpr uint32_t kCromSettingsDofEvents = 32;
 static constexpr uint32_t kCromSettingsDofEventBytes = 16;
 static constexpr uint32_t kCromSettingsFrameTriggers = 64;
+static constexpr uint32_t kCromSettingsSceneVariants = 128;
 static constexpr uint32_t kCromSettingsLightEffectBytes = 24;
 static constexpr uint32_t kCromSettingsLightActionBytes = 8;
 static constexpr uint32_t kCromSettingsSceneBytes = 13;
@@ -2445,6 +2449,18 @@ static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
         g_serumData.monochromeTriggerIDs.set(frameId, &monochrome, 1);
     }
     g_serumData.frameTriggersFromColorization = true;
+  }
+  if (contents & kCromSettingsSceneVariants) {
+    uint32_t count = 0;
+    if (!take(&count, sizeof(count)) ||
+        (uint64_t)count * 4 > payload.size() - offset)
+      return false;
+    for (uint32_t i = 0; i < count; ++i) {
+      uint16_t sceneId = 0, baseSceneId = 0;
+      if (!take(&sceneId, 2) || !take(&baseSceneId, 2) ||
+          !g_serumData.sceneGenerator->setSceneBase(sceneId, baseSceneId))
+        return false;
+    }
   }
   return true;
 }
@@ -5731,6 +5747,8 @@ static void BuildFrameLookupVectors(void) {
     uint8_t generatedSceneFrame[MAX_FRAME_WIDTH * MAX_FRAME_HEIGHT] = {0};
     const auto& scenes = g_serumData.sceneGenerator->getSceneData();
     for (const auto& scene : scenes) {
+      // A variant plays its base's frames; it has no markers of its own.
+      if (scene.baseSceneId >= 0) continue;
       const int groups = scene.frameGroups > 0 ? scene.frameGroups : 1;
       for (int group = 1; group <= groups; ++group) {
         for (uint16_t frameIndex = 0; frameIndex < scene.frameCount;
@@ -5780,6 +5798,7 @@ static void BuildFrameLookupVectors(void) {
       lastframe_full_crc_scene = 0;
 
       for (const auto& scene : scenes) {
+        if (scene.baseSceneId >= 0) continue;
         const int groups = scene.frameGroups > 0 ? scene.frameGroups : 1;
         for (int group = 1; group <= groups; ++group) {
           for (uint16_t frameIndex = 0; frameIndex < scene.frameCount;
@@ -9049,7 +9068,8 @@ uint32_t Serum_RenderScene(void) {
     sceneGroup = currentGroup;
     if (hasGroup && !g_serumData.sceneFrameIdByTriplet.empty()) {
       auto it = g_serumData.sceneFrameIdByTriplet.find(
-          MakeSceneTripletKey(static_cast<uint16_t>(lastTriggerID),
+          MakeSceneTripletKey(g_serumData.sceneGenerator->framesSceneId(
+                                  static_cast<uint16_t>(lastTriggerID)),
                               currentGroup, sceneCurrentFrame));
       if (it != g_serumData.sceneFrameIdByTriplet.end() &&
           it->second < g_serumData.nframes) {
@@ -9080,8 +9100,9 @@ uint32_t Serum_RenderScene(void) {
     }
     if (!renderedFromDirectTriplet) {
       uint16_t result = g_serumData.sceneGenerator->generateFrame(
-          lastTriggerID, sceneCurrentFrame, sceneFrame,
-          hasGroup ? currentGroup : -1);
+          g_serumData.sceneGenerator->framesSceneId(
+              static_cast<uint16_t>(lastTriggerID)),
+          sceneCurrentFrame, sceneFrame, hasGroup ? currentGroup : -1);
       DebugLogSceneEvent("generate", static_cast<uint16_t>(lastTriggerID),
                          sceneCurrentFrame, sceneFrameCount,
                          sceneDurationPerFrame, sceneOptionFlags,

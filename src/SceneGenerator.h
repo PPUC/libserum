@@ -31,6 +31,11 @@ struct SceneData {
   // as end-hold duration for the last frame instead of autostart
   uint8_t autoStart = 0;
   uint8_t sceneOptions = 0;
+  // A variant plays the frames of the scene baseSceneId (-1: its own), with
+  // its own playback settings and frame duration; frameCount and frameGroups
+  // are the base's (setSceneBase()). Not in serialize(): the cROMc keeps the
+  // bases apart (concentrate version 16).
+  int32_t baseSceneId = -1;
   // Serialisation using cereal
   template <class Archive>
   void serialize(Archive &ar) {
@@ -83,6 +88,12 @@ class SceneGenerator {
   // durations included.
   void setSceneData(const std::vector<SceneData> &data);
   const std::vector<SceneData> &getSceneData() const { return m_sceneData; }
+  // Makes sceneId a variant of baseSceneId: it plays the base's frames, with
+  // its frame count and groups. False when either scene is missing, they are
+  // the same or the base is a variant itself.
+  bool setSceneBase(uint16_t sceneId, uint16_t baseSceneId);
+  // The scene whose frames sceneId plays: its base, or itself.
+  uint16_t framesSceneId(uint16_t sceneId) const;
 
  private:
   void Log(const char *format, ...);

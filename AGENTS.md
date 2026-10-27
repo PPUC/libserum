@@ -396,7 +396,9 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
   version 13. The DOF events (`kCromSettingsDofEvents`, 32; see "DOF events")
   follow, then the frame triggers (`kCromSettingsFrameTriggers`, 64; see
   "Frame triggers (v2)"): per frame a PUP, scene and monochrome trigger; one
-  out of its range, frames out of order or beyond the frames fail the load. A block that is cut short or malformed fails the load.
+  out of its range, frames out of order or beyond the frames fail the load.
+  Last come the scene variants (`kCromSettingsSceneVariants`, 128): pairs of a
+  scene and its base, both scenes of the block, the base no variant. A block that is cut short or malformed fails the load.
 - Scenes from the block set `scenesFromColorization`, scaling settings set
   `scalingFromColorization` (also when the block holds zero scenes). Either
   makes the matching sidecar (`<rom>.pup.csv`, `scaling.txt`) ignored, in the
@@ -1369,6 +1371,16 @@ runs precisely when there is no extra plane, and gating there silently made ever
 ## Scene playback and options
 Scene data comes from CSV (`SceneGenerator`).
 
+Scene variants: a scene can play the frames of another (`SceneData::baseSceneId`,
+`SceneGenerator::setSceneBase()`), with its own playback settings and frame
+duration, e.g. one scene played once in front and as a looping background. A
+variant takes its base's frame count and groups, has no markers of its own and
+is skipped when markers are generated; `Serum_RenderScene()` looks its frames
+up under the base (`framesSceneId()`, for the triplet lookup and the marker
+fallback). The base is a scene without a base. Variants come with the settings
+block (`kCromSettingsSceneVariants`, 128) and are stored in the cROMc apart from
+`SceneData` (concentrate version 16), as pup.csv has no column for them.
+
 Flags (from `serum.h`):
 - Scene finish behavior is selected by the low finish-mode bits: `0`, `1`, or
   `2`. Other scene flags are orthogonal and may be combined with that finish
@@ -1426,7 +1438,9 @@ Finished-scene default behavior:
   scene frame is incomplete/unavailable.
 
 ## cROMc persistence
-Current concentrate version: **15**. Version 15 adds the PUP and the
+Current concentrate version: **16**. Version 16 adds the scene variants
+(pairs of scene ID and base scene ID) after the frame triggers (see "Scene
+playback and options"). Version 15 adds the PUP and the
 monochrome trigger of each frame (`pupTriggerIDs`, `monochromeTriggerIDs`)
 after the DOF events (see "Frame triggers (v2)"); an older v2 cROMc has its
 triggers split on load. Version 14 adds the DOF events after the

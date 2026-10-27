@@ -4,6 +4,7 @@
 #include <cereal/archives/portable_binary.hpp>
 #include <cereal/types/string.hpp>
 #include <cereal/types/unordered_map.hpp>
+#include <cereal/types/utility.hpp>
 #include <cereal/types/vector.hpp>
 #include <cstdint>
 #include <sstream>
@@ -769,6 +770,18 @@ class SerumData {
       if (concentrateFileVersion >= 15) {
         ar(pupTriggerIDs, monochromeTriggerIDs);
       }
+      if (concentrateFileVersion >= 16) {
+        std::vector<std::pair<uint16_t, uint16_t>> sceneBases;
+        if (sceneGenerator) {
+          for (const SceneData &scene : sceneGenerator->getSceneData()) {
+            if (scene.baseSceneId >= 0) {
+              sceneBases.emplace_back(scene.sceneId,
+                                      static_cast<uint16_t>(scene.baseSceneId));
+            }
+          }
+        }
+        ar(sceneBases);
+      }
     } else {
       if (concentrateFileVersion >= 8) {
         ar(scalingAlgorithm, shadowOffsetMode);
@@ -821,6 +834,16 @@ class SerumData {
         pupTriggerIDs.clear();
         monochromeTriggerIDs.clear();
         if (SerumVersion == SERUM_V2) SplitFrameTriggers();
+      }
+      if (concentrateFileVersion >= 16) {
+        std::vector<std::pair<uint16_t, uint16_t>> sceneBases;
+        ar(sceneBases);
+        for (const auto &base : sceneBases) {
+          if (!sceneGenerator ||
+              !sceneGenerator->setSceneBase(base.first, base.second)) {
+            throw std::runtime_error("Invalid scene variant in cROMc");
+          }
+        }
       }
     }
   }

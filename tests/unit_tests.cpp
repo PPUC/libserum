@@ -5070,6 +5070,95 @@ static void Test_CromSettingsFrameTriggers(void) {
   n256::Unload();
 }
 
+// A scene variant plays the frames of its base scene with its own settings:
+// scene 8 plays the frames of scene 7, here at another speed. The variant takes
+// the base's frame count. Through a cROMc too; a variant of a scene that is
+// missing or a variant itself fails the load.
+static void Test_CromSettingsSceneVariants(void) {
+  const uint32_t none = 0xffffffff;
+  const auto block = [none](std::vector<std::pair<uint16_t, uint16_t>> bases) {
+    std::vector<uint8_t> payload;
+    const auto put = [&payload](const void* data, size_t bytes) {
+      const uint8_t* p = (const uint8_t*)data;
+      payload.insert(payload.end(), p, p + bytes);
+    };
+    const auto putU32 = [&put](uint32_t value) { put(&value, 4); };
+    const auto putU16 = [&put](uint16_t value) { put(&value, 2); };
+    putU32(kCromSettingsScenes | kCromSettingsSceneFrames |
+           kCromSettingsFrameTriggers | kCromSettingsSceneVariants);
+    // Scenes: 7 with two frames at 100 ms, 8 at 40 ms (its frame count of 1
+    // is replaced by the base's); both can be interrupted and start at once.
+    putU32(3);
+    for (const uint16_t id : {7, 8, 9}) {
+      putU16(id);
+      putU16(id == 7 ? 2 : 1);
+      putU16(id == 7 ? 100 : 40);
+      const uint8_t flags[7] = {1, 1, 0, 1, 0, 0, 0};
+      put(flags, sizeof(flags));
+    }
+    // Scene frames: kBackground and kScene are frames 0 and 1 of scene 7.
+    putU32(2);
+    for (const uint32_t frame :
+         {(uint32_t)n256::kBackground, (uint32_t)n256::kScene}) {
+      putU32(frame);
+      putU16(7);
+      putU16(frame == n256::kScene ? 1 : 0);
+      const uint8_t group[2] = {1, 0};
+      put(group, 2);
+    }
+    // kStatic starts scene 8.
+    putU32(1);
+    putU32(n256::kStatic);
+    putU32(none);
+    putU32(8);
+    putU32(none);
+    putU32((uint32_t)bases.size());
+    for (const auto& base : bases) {
+      putU16(base.first);
+      putU16(base.second);
+    }
+    std::vector<uint8_t> result;
+    const uint32_t magic = kCromSettingsMagic;
+    const uint32_t size = (uint32_t)payload.size();
+    result.insert(result.end(), (const uint8_t*)&magic,
+                  (const uint8_t*)&magic + 4);
+    result.insert(result.end(), (const uint8_t*)&size,
+                  (const uint8_t*)&size + 4);
+    result.insert(result.end(), payload.begin(), payload.end());
+    return result;
+  };
+  n256::Synth s;
+  std::vector<uint8_t> crom = s.Serialize();
+  const std::vector<uint8_t> variants = block({{8, 7}});
+  crom.insert(crom.end(), variants.begin(), variants.end());
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
+    if (viaConcentrate) {
+      Serum_Dispose();
+      std::filesystem::remove(n256::Dir() / n256::kRom /
+                              (std::string(n256::kRom) + ".cROM"));
+      CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
+                       n256::kBothPlanes) != NULL);
+    }
+    CHECK_EQ(g_serumData.sceneGenerator->framesSceneId(8), 7);
+    CHECK_EQ(g_serumData.sceneGenerator->framesSceneId(7), 7);
+    n256::Colorize(s.Frame(n256::kStatic));
+    CHECK_EQ(lastTriggerID, 8u);
+    CHECK_EQ(sceneFrameCount, 2);
+    CHECK_EQ(sceneDurationPerFrame, 40);
+    CHECK_EQ(mySerum.frameID, (uint32_t)n256::kBackground);
+    Serum_Dispose();
+  }
+  for (const auto& bad :
+       {block({{8, 6}}), block({{8, 8}}), block({{8, 7}, {9, 8}})}) {
+    std::vector<uint8_t> broken = s.Serialize();
+    broken.insert(broken.end(), bad.begin(), bad.end());
+    CHECK(Serum_LoadFromMemory(broken.data(), broken.size(),
+                               n256::kBothPlanes) == NULL);
+  }
+  n256::Unload();
+}
+
 // The original-only dynamic sets from the settings block, directly and through
 // a cROMc; a mask of 0 or frames out of order fail the load.
 static void Test_CromSettingsOriginalOnlySets(void) {
@@ -5646,6 +5735,7 @@ static const TestCase kTests[] = {
     {"crom/settings_scene_frames", Test_CromSettingsSceneFrames},
     {"crom/settings_dof_events", Test_CromSettingsDofEvents},
     {"crom/settings_frame_triggers", Test_CromSettingsFrameTriggers},
+    {"crom/settings_scene_variants", Test_CromSettingsSceneVariants},
     {"source/builds_the_croms_colorization",
      Test_SourceBuildsTheCromsColorization},
     {"upscale/background_scene_keeps_text_shape",
