@@ -4833,6 +4833,133 @@ static void Test_CromSettingsOriginalOnlySets(void) {
   n256::Unload();
 }
 
+// The frames of scenes a settings block lists are exactly the frames of
+// scenes, each the frame of its step, found without generating a scene marker;
+// a frame whose original is a marker but is not listed stays a game frame.
+// Through a cROMc as well.
+static void Test_CromSettingsSceneFrames(void) {
+  n256::Synth s;
+  {
+    const std::filesystem::path dir = n256::Dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "scene.csv").string();
+    {
+      std::ofstream out(path);
+      out << "7,2,100\n";
+    }
+    SceneGenerator generator;
+    CHECK(generator.parseCSV(path));
+    generator.setDepth(2);
+    memset(s.Native(n256::kScene), 0, n256::kNPx);
+    CHECK_EQ(generator.generateFrame(7, 1, s.Native(n256::kScene), 1, true),
+             0xffff);
+  }
+  const auto block = [](std::vector<SerumSceneFrame> frames) {
+    std::vector<uint8_t> payload;
+    const auto put = [&payload](const void* data, size_t bytes) {
+      const uint8_t* p = (const uint8_t*)data;
+      payload.insert(payload.end(), p, p + bytes);
+    };
+    const uint32_t contents = kCromSettingsScenes | kCromSettingsSceneFrames;
+    const uint32_t scenes = 1;
+    const uint16_t scene[3] = {7, 2, 100};
+    const uint8_t flags[7] = {0, 0, 0, 1, 0, 0, 0};
+    put(&contents, 4);
+    put(&scenes, 4);
+    put(scene, sizeof(scene));
+    put(flags, sizeof(flags));
+    const uint32_t count = (uint32_t)frames.size();
+    put(&count, 4);
+    for (const SerumSceneFrame& frame : frames) {
+      const uint8_t group[2] = {frame.group, 0};
+      put(&frame.frameId, 4);
+      put(&frame.sceneId, 2);
+      put(&frame.frameIndex, 2);
+      put(group, 2);
+    }
+    std::vector<uint8_t> result;
+    const uint32_t magic = kCromSettingsMagic;
+    const uint32_t size = (uint32_t)payload.size();
+    result.insert(result.end(), (const uint8_t*)&magic,
+                  (const uint8_t*)&magic + 4);
+    result.insert(result.end(), (const uint8_t*)&size,
+                  (const uint8_t*)&size + 4);
+    result.insert(result.end(), payload.begin(), payload.end());
+    return result;
+  };
+  const auto frameOfStep = [](uint8_t group, uint16_t index) {
+    const auto it = g_serumData.sceneFrameIdByTriplet.find(
+        MakeSceneTripletKey(7, group, index));
+    return it == g_serumData.sceneFrameIdByTriplet.end() ? IDENTIFY_NO_FRAME
+                                                         : it->second;
+  };
+  std::vector<uint8_t> crom = s.Serialize();
+  const std::vector<uint8_t> listed =
+      block({{n256::kStatic, 7, 1, 0}, {n256::kRotation, 7, 2, 1}});
+  crom.insert(crom.end(), listed.begin(), listed.end());
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
+    if (viaConcentrate) {
+      Serum_Dispose();
+      std::filesystem::remove(n256::Dir() / n256::kRom /
+                              (std::string(n256::kRom) + ".cROM"));
+      CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
+                       n256::kBothPlanes) != NULL);
+    }
+    CHECK(g_serumData.sceneFramesFromColorization);
+    CHECK_EQ(g_serumData.sceneFrames.size(), 2u);
+    CHECK_EQ(g_serumData.frameIsScene.size(), n256::kFrameCount);
+    if (g_serumData.frameIsScene.size() == n256::kFrameCount) {
+      CHECK_EQ(g_serumData.frameIsScene[n256::kStatic], 1);
+      CHECK_EQ(g_serumData.frameIsScene[n256::kRotation], 1);
+      CHECK_EQ(g_serumData.frameIsScene[n256::kScene], 0);
+    }
+    CHECK_EQ(frameOfStep(1, 0), (uint32_t)n256::kStatic);
+    CHECK_EQ(frameOfStep(2, 1), (uint32_t)n256::kRotation);
+    CHECK_EQ(frameOfStep(1, 1), IDENTIFY_NO_FRAME);
+    Serum_Dispose();
+  }
+
+  // An empty list: no frame of a scene, not even the one with the marker.
+  std::vector<uint8_t> none = s.Serialize();
+  const std::vector<uint8_t> empty = block({});
+  none.insert(none.end(), empty.begin(), empty.end());
+  CHECK(Serum_LoadFromMemory(none.data(), none.size(), n256::kBothPlanes) !=
+        NULL);
+  CHECK(g_serumData.sceneFramesFromColorization);
+  CHECK(std::none_of(g_serumData.frameIsScene.begin(),
+                     g_serumData.frameIsScene.end(),
+                     [](uint8_t isScene) { return isScene != 0; }));
+  CHECK(g_serumData.sceneFrameIdByTriplet.empty());
+  Serum_Dispose();
+
+  // Without the list the marker makes the frame one, as before.
+  std::vector<uint8_t> markers = s.Serialize();
+  const std::vector<uint8_t> scenesOnly =
+      settings::Block(kCromSettingsScenes, 0, 0);
+  markers.insert(markers.end(), scenesOnly.begin(), scenesOnly.end());
+  CHECK(Serum_LoadFromMemory(markers.data(), markers.size(),
+                             n256::kBothPlanes) != NULL);
+  CHECK(!g_serumData.sceneFramesFromColorization);
+  if (g_serumData.frameIsScene.size() == n256::kFrameCount)
+    CHECK_EQ(g_serumData.frameIsScene[n256::kScene], 1);
+  Serum_Dispose();
+
+  // A frame that does not exist, a list out of order and group 0 fail the
+  // load.
+  for (const auto& bad :
+       {block({{n256::kFrameCount, 7, 1, 0}}),
+        block({{n256::kRotation, 7, 1, 0}, {n256::kStatic, 7, 1, 1}}),
+        block({{n256::kStatic, 7, 0, 0}})}) {
+    std::vector<uint8_t> broken = s.Serialize();
+    broken.insert(broken.end(), bad.begin(), bad.end());
+    CHECK(Serum_LoadFromMemory(broken.data(), broken.size(),
+                               n256::kBothPlanes) == NULL);
+  }
+  n256::Unload();
+}
+
 // Serum_LoadFromSource() builds the colorization a cROM of the same data
 // loads: the same cROMc, for 8- and 16-bit sprite IDs and with a settings
 // block.
@@ -5221,6 +5348,7 @@ static const TestCase kTests[] = {
     {"crom/settings_block", Test_CromSettingsBlock},
     {"crom/settings_lights", Test_CromSettingsLights},
     {"crom/settings_original_only_sets", Test_CromSettingsOriginalOnlySets},
+    {"crom/settings_scene_frames", Test_CromSettingsSceneFrames},
     {"source/builds_the_croms_colorization",
      Test_SourceBuildsTheCromsColorization},
     {"upscale/background_scene_keeps_text_shape",

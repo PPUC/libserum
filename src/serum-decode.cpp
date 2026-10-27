@@ -2147,12 +2147,18 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
 //   original-only dynamic sets: uint32 frame count, per frame uint32 frame ID
 //            and uint32 set mask (bit n for dynamic set n, not 0), by
 //            ascending frame ID (see SerumOriginalOnlySets).
+//   scene frames: uint32 frame count, per frame uint32 frame ID, uint16 scene
+//            ID, uint16 frame index, uint8 frame group (from 1), uint8 0, by
+//            ascending frame ID (see SerumSceneFrame). The frames of scenes
+//            are then exactly these, with none found by its scene marker.
 // Bytes after these are ignored, so fields can be appended to the payload.
 static constexpr uint32_t kCromSettingsMagic = 0x31584353;  // "SCX1"
 static constexpr uint32_t kCromSettingsScenes = 1;
 static constexpr uint32_t kCromSettingsScaling = 2;
 static constexpr uint32_t kCromSettingsLights = 4;
 static constexpr uint32_t kCromSettingsOriginalOnlySets = 8;
+static constexpr uint32_t kCromSettingsSceneFrames = 16;
+static constexpr uint32_t kCromSettingsSceneFrameBytes = 10;
 static constexpr uint32_t kCromSettingsLightEffectBytes = 24;
 static constexpr uint32_t kCromSettingsLightActionBytes = 8;
 static constexpr uint32_t kCromSettingsSceneBytes = 13;
@@ -2282,6 +2288,28 @@ static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
         return false;
     }
     g_serumData.originalOnlySets = std::move(sets);
+  }
+  if (contents & kCromSettingsSceneFrames) {
+    uint32_t frames = 0;
+    if (!take(&frames, sizeof(frames)) ||
+        (uint64_t)frames * kCromSettingsSceneFrameBytes >
+            payload.size() - offset)
+      return false;
+    std::vector<SerumSceneFrame> sceneFrames(frames);
+    for (size_t i = 0; i < sceneFrames.size(); ++i) {
+      SerumSceneFrame& frame = sceneFrames[i];
+      uint8_t group[2];
+      if (!take(&frame.frameId, sizeof(frame.frameId)) ||
+          !take(&frame.sceneId, sizeof(frame.sceneId)) ||
+          !take(&frame.frameIndex, sizeof(frame.frameIndex)) ||
+          !take(group, sizeof(group)) || group[0] == 0 ||
+          frame.frameId >= g_serumData.nframes ||
+          (i > 0 && frame.frameId <= sceneFrames[i - 1].frameId))
+        return false;
+      frame.group = group[0];
+    }
+    g_serumData.sceneFramesFromColorization = true;
+    g_serumData.sceneFrames = std::move(sceneFrames);
   }
   return true;
 }
@@ -5502,11 +5530,39 @@ static void BuildFrameLookupVectors(void) {
   g_serumData.frameToNormalBucket.assign(g_serumData.nframes, 0xffffffffu);
   const uint32_t pixels = NativeFramePixels();
 
-  // Build scene signatures in the same domain used by Identify_Frame:
-  // (mask, shape, crc32 over original frame pixels).
+  // The frames of scenes: those the colorization lists, or else those whose
+  // originals are scene markers, by signatures in the domain Identify_Frame
+  // uses (mask, shape, crc32 over original frame pixels).
   if (g_serumData.SerumVersion == SERUM_V2 && g_serumData.fwidth == 128 &&
       g_serumData.fheight == 32 && g_serumData.sceneGenerator &&
-      g_serumData.sceneGenerator->isActive()) {
+      g_serumData.sceneGenerator->isActive() &&
+      g_serumData.sceneFramesFromColorization) {
+    // The colorization lists its frames of scenes: no scene marker is
+    // generated, and no frame becomes one because its original matches one.
+    for (const SerumSceneFrame& sceneFrame : g_serumData.sceneFrames) {
+      const uint32_t frameId = sceneFrame.frameId;
+      if (frameId >= g_serumData.nframes || g_serumData.frameIsScene[frameId])
+        continue;
+      g_serumData.frameIsScene[frameId] = 1;
+      // The search Serum_RenderScene() falls back to for a step without a
+      // frame finds the listed frames only.
+      g_serumData
+          .sceneFramesBySignature[MakeFrameSignature(
+              g_serumData.compmaskID[frameId][0],
+              g_serumData.shapecompmode[frameId][0],
+              g_serumData.hashcodes[frameId][0])]
+          .push_back(frameId);
+      g_serumData.sceneFrameIdByTriplet.emplace(
+          MakeSceneTripletKey(sceneFrame.sceneId, sceneFrame.group,
+                              sceneFrame.frameIndex),
+          frameId);
+      numSceneFrames++;
+    }
+    g_serumData.BuildCriticalTriggerLookup();
+  } else if (g_serumData.SerumVersion == SERUM_V2 &&
+             g_serumData.fwidth == 128 && g_serumData.fheight == 32 &&
+             g_serumData.sceneGenerator &&
+             g_serumData.sceneGenerator->isActive()) {
     std::unordered_set<uint16_t> uniqueMaskShapeKeys;
     std::vector<std::pair<uint8_t, uint8_t>> uniqueMaskShapes;
     uniqueMaskShapes.reserve(g_serumData.nframes);

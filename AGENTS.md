@@ -387,8 +387,13 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
   be appended. The original-only dynamic sets (`kCromSettingsOriginalOnlySets`,
   8; see "Original-only dynamic sets") are a part as well: frames by ascending
   ID with a non-zero set mask each; a mask of 0 or frames out of order fail the
-  load. They are stored in the cROMc from concentrate version 12. A block
-  that is cut short or malformed fails the load.
+  load. They are stored in the cROMc from concentrate version 12. The scene
+  frames (`kCromSettingsSceneFrames`, 16; see "Scene lookup vector build") are
+  a part too: frames by ascending ID, each with the scene ID, frame index and
+  frame group (from 1) it plays; a frame ID beyond the frames, a group of 0 or
+  frames out of order fail the load. They set `sceneFramesFromColorization`
+  (also for an empty list) and are stored in the cROMc from concentrate
+  version 13. A block that is cut short or malformed fails the load.
 - Scenes from the block set `scenesFromColorization`, scaling settings set
   `scalingFromColorization` (also when the block holds zero scenes). Either
   makes the matching sidecar (`<rom>.pup.csv`, `scaling.txt`) ignored, in the
@@ -515,6 +520,17 @@ Return values:
 Function: `BuildFrameLookupVectors()`.
 
 Goal: classify loaded frame IDs into scene/non-scene and build scene signature index.
+
+A colorization whose settings block lists its scene frames
+(`sceneFramesFromColorization`, `g_serumData.sceneFrames`, from an editor that
+knows which frames are which) skips steps 2-4 and 6: with the scene generator
+active, exactly the listed frames get `frameIsScene`, their stored
+`(mask,shape,hash)` signature in `sceneFramesBySignature` (for the generic
+scene search `Serum_RenderScene()` falls back to) and their
+`(sceneId,group,frameIndex)` entry in `sceneFrameIdByTriplet`. No scene marker
+is generated, and a frame whose original happens to match one stays a game
+frame. A cROM without the list (every cROM of the Win32 editor) takes the
+marker steps below.
 
 How it works:
 1. Initialize `frameIsScene` with all zeros.
@@ -1347,7 +1363,9 @@ Finished-scene default behavior:
   scene frame is incomplete/unavailable.
 
 ## cROMc persistence
-Current concentrate version: **12**. Version 12 adds the original-only dynamic
+Current concentrate version: **13**. Version 13 adds
+`sceneFramesFromColorization` and the scene frames of the settings block after
+the original-only dynamic sets (see "cROM settings block"). Version 12 adds the original-only dynamic
 sets after the lights (see "Original-only dynamic sets"). Version 11 adds the
 speaker lights after
 the version 9 flags (see "Speaker lights"). Version 10 stores `framesprites` and

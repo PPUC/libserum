@@ -90,6 +90,22 @@ struct SerumOriginalOnlySets {
   }
 };
 
+// A frame of a scene as the colorization names it: the frame played for step
+// frameIndex of the scene's frame group `group` (from 1). An editor that knows
+// which frames are which lists them, so that no scene marker has to be
+// generated and matched to find them.
+struct SerumSceneFrame {
+  uint32_t frameId = 0;
+  uint16_t sceneId = 0;
+  uint8_t group = 1;
+  uint16_t frameIndex = 0;
+
+  template <class Archive>
+  void serialize(Archive &ar) {
+    ar(frameId, sceneId, group, frameIndex);
+  }
+};
+
 struct SerumLightEffectData {
   Serum_Light_Effect effect = {};
 
@@ -243,6 +259,12 @@ class SerumData {
   // concentrate version 12), sorted by frame ID; frames without any are left
   // out.
   std::vector<SerumOriginalOnlySets> originalOnlySets;
+  // The frames of scenes, by ascending frame ID, when the colorization lists
+  // them (persisted from concentrate version 13). With the list the frames of
+  // scenes are exactly these; without it they are found by their scene
+  // markers.
+  bool sceneFramesFromColorization = false;
+  std::vector<SerumSceneFrame> sceneFrames;
   // The frame's original-only sets as a bit mask; 0 when it has none.
   uint32_t OriginalOnlySets(uint32_t frameId) const {
     const auto it = std::lower_bound(
@@ -687,6 +709,9 @@ class SerumData {
       if (concentrateFileVersion >= 12) {
         ar(originalOnlySets);
       }
+      if (concentrateFileVersion >= 13) {
+        ar(sceneFramesFromColorization, sceneFrames);
+      }
     } else {
       if (concentrateFileVersion >= 8) {
         ar(scalingAlgorithm, shadowOffsetMode);
@@ -721,6 +746,12 @@ class SerumData {
         ar(originalOnlySets);
       } else {
         originalOnlySets.clear();
+      }
+      if (concentrateFileVersion >= 13) {
+        ar(sceneFramesFromColorization, sceneFrames);
+      } else {
+        sceneFramesFromColorization = false;
+        sceneFrames.clear();
       }
     }
   }
