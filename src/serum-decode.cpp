@@ -322,6 +322,10 @@ static inline uint32_t NativeFramePixels(void) {
 static inline bool ExtraPlaneIsNative(void) { return g_serumData.is256x64; }
 uint16_t sceneFrameCount = 0;
 uint16_t sceneCurrentFrame = 0;
+// A scene played back and forth (FLAG_SCENE_BACK_AND_FORTH) is on its way
+// back, in the frame group sceneGroup.
+bool sceneBackward = false;
+uint8_t sceneGroup = 1;
 uint16_t sceneDurationPerFrame = 0;
 bool sceneInterruptable = false;
 bool sceneStartImmediately = false;
@@ -595,6 +599,7 @@ uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested);
 struct SceneResumeState {
   uint16_t nextFrame = 0;
   uint32_t timestampMs = 0;
+  bool backward = false;
 };
 static std::unordered_map<uint32_t, SceneResumeState> g_sceneResumeState;
 static constexpr uint32_t SCENE_RESUME_WINDOW_MS = 8000;
@@ -1920,6 +1925,8 @@ void Serum_free(void) {
   // would not be reported again within its repeat timeout.
   sceneFrameCount = 0;
   sceneCurrentFrame = 0;
+  sceneBackward = false;
+  sceneGroup = 1;
   sceneDurationPerFrame = 0;
   sceneInterruptable = false;
   sceneStartImmediately = false;
@@ -8149,7 +8156,8 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
             (sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
                 FLAG_SCENE_RESUME_IF_RETRIGGERED &&
             lastTriggerID < 0xffffffff && sceneCurrentFrame < sceneFrameCount) {
-          g_sceneResumeState[lastTriggerID] = {sceneCurrentFrame, now};
+          g_sceneResumeState[lastTriggerID] = {sceneCurrentFrame, now,
+                                               sceneBackward};
         }
 
         // stop any scene
@@ -8231,6 +8239,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
               //     m_pSerum->triggerID, sceneFrameCount,
               //     sceneDurationPerFrame);
               sceneCurrentFrame = 0;
+              sceneBackward = false;
               if ((sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
                   FLAG_SCENE_RESUME_IF_RETRIGGERED) {
                 auto it = g_sceneResumeState.find(lastTriggerID);
@@ -8239,6 +8248,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                           SCENE_RESUME_WINDOW_MS &&
                       it->second.nextFrame < sceneFrameCount) {
                     sceneCurrentFrame = it->second.nextFrame;
+                    sceneBackward = it->second.backward;
                   }
                   g_sceneResumeState.erase(it);
                 }
@@ -8742,6 +8752,46 @@ uint32_t Serum_ApplyRotationsv1(void) {
                         // if not, just the delay to the next rotation
 }
 
+// One more run of the running scene: a repeat count of 1 loops, a higher one
+// counts down; false when no run follows.
+static bool NextSceneRun(void) {
+  if (sceneRepeatCount == 0) return false;
+  if (sceneRepeatCount > 1 && --sceneRepeatCount <= 1) {
+    sceneRepeatCount = 0;  // no more repeat
+  }
+  return true;
+}
+
+// The step after the one just shown; sceneCurrentFrame >= sceneFrameCount when
+// the scene has finished. Played back and forth (FLAG_SCENE_BACK_AND_FORTH), a
+// run goes from the first frame to the last and back to the second; the next
+// run starts at the first, and the last run ends on it.
+static void AdvanceSceneFrame(void) {
+  if ((sceneOptionFlags & FLAG_SCENE_BACK_AND_FORTH) == 0 ||
+      sceneFrameCount < 2) {
+    sceneCurrentFrame++;
+    if (sceneCurrentFrame >= sceneFrameCount && NextSceneRun()) {
+      sceneCurrentFrame = 0;
+    }
+    return;
+  }
+  if (!sceneBackward) {
+    if (sceneCurrentFrame + 1 < sceneFrameCount) {
+      sceneCurrentFrame++;
+      return;
+    }
+    sceneBackward = true;
+  }
+  if (sceneCurrentFrame > 1) {
+    sceneCurrentFrame--;
+  } else if (sceneCurrentFrame == 1) {
+    sceneCurrentFrame = 0;
+    if (NextSceneRun()) sceneBackward = false;
+  } else {
+    sceneCurrentFrame = sceneFrameCount;  // the last run is over
+  }
+}
+
 uint32_t Serum_RenderScene(void) {
   BeginProfileFrameOperation();
   auto finishSceneProfile = [&](uint32_t result) -> uint32_t {
@@ -8830,9 +8880,11 @@ uint32_t Serum_RenderScene(void) {
 
     bool renderedFromDirectTriplet = false;
     uint8_t currentGroup = 1;
+    // On its way back a scene ends on its first frame in the group it ran in.
     bool hasGroup = g_serumData.sceneGenerator->updateAndGetCurrentGroup(
-        static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame, -1,
-        currentGroup);
+        static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame,
+        sceneBackward ? sceneGroup : -1, currentGroup);
+    sceneGroup = currentGroup;
     if (hasGroup && !g_serumData.sceneFrameIdByTriplet.empty()) {
       auto it = g_serumData.sceneFrameIdByTriplet.find(
           MakeSceneTripletKey(static_cast<uint16_t>(lastTriggerID),
@@ -8903,17 +8955,7 @@ uint32_t Serum_RenderScene(void) {
                          sceneRepeatCount, currentGroup, 0xffff);
     }
 
-    sceneCurrentFrame++;
-    if (sceneCurrentFrame >= sceneFrameCount && sceneRepeatCount > 0) {
-      if (sceneRepeatCount == 1) {
-        sceneCurrentFrame = 0;  // loop
-      } else {
-        sceneCurrentFrame = 0;  // repeat the scene
-        if (--sceneRepeatCount <= 1) {
-          sceneRepeatCount = 0;  // no more repeat
-        }
-      }
-    }
+    AdvanceSceneFrame();
 
     if (sceneCurrentFrame >= sceneFrameCount) {
       DebugLogSceneEvent("scene-finished", static_cast<uint16_t>(lastTriggerID),
@@ -9253,7 +9295,7 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
       (sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
           FLAG_SCENE_RESUME_IF_RETRIGGERED &&
       lastTriggerID < 0xffffffff && sceneCurrentFrame < sceneFrameCount) {
-    g_sceneResumeState[lastTriggerID] = {sceneCurrentFrame, now};
+    g_sceneResumeState[lastTriggerID] = {sceneCurrentFrame, now, sceneBackward};
   }
 
   sceneFrameCount = frameCount;
@@ -9272,6 +9314,7 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
   sceneIsLastForegroundFrame = false;
   sceneIsLastBackgroundFrame = false;
   sceneCurrentFrame = 0;
+  sceneBackward = false;
   sceneNextFrameAtMs = 0;
 
   if ((sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
@@ -9281,6 +9324,7 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
       if ((now - it->second.timestampMs) <= SCENE_RESUME_WINDOW_MS &&
           it->second.nextFrame < sceneFrameCount) {
         sceneCurrentFrame = it->second.nextFrame;
+        sceneBackward = it->second.backward;
       }
       g_sceneResumeState.erase(it);
     }

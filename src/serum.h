@@ -122,6 +122,10 @@ enum {
   // that resolve to a colour keep it instead of showing the background scene.
   // They cast dynamic shadows like lit dynamic content.
   FLAG_SCENE_REPLACE_DYNAMIC_BLACK = 32,
+  // play the scene forward and back: a run shows frames 1 to n and back to 2,
+  // the next run starts at 1 again (with a new frame group), and the last run
+  // ends on frame 1. How many runs follows the repeat setting.
+  FLAG_SCENE_BACK_AND_FORTH = 64,
 };
 
 enum  // returned by Serum_Load in *SerumVersion

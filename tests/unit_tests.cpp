@@ -4136,6 +4136,44 @@ static void Test_LoadForgetsTheRunningScene(void) {
   }
 }
 
+// The steps of a scene: forward, looped or repeated, and back and forth
+// (FLAG_SCENE_BACK_AND_FORTH), where a run goes to the last frame and back to
+// the second, the next run starts at the first and the last run ends on it.
+static void Test_SceneStepsBackAndForth(void) {
+  const auto steps = [](uint16_t frames, uint8_t repeat, uint8_t options) {
+    sceneFrameCount = frames;
+    sceneRepeatCount = repeat;
+    sceneOptionFlags = options;
+    sceneCurrentFrame = 0;
+    sceneBackward = false;
+    std::vector<int> shown;
+    while (sceneCurrentFrame < sceneFrameCount && shown.size() < 16) {
+      shown.push_back(sceneCurrentFrame);
+      AdvanceSceneFrame();
+    }
+    sceneFrameCount = 0;
+    sceneRepeatCount = 0;
+    sceneOptionFlags = 0;
+    sceneCurrentFrame = 0;
+    sceneBackward = false;
+    return shown;
+  };
+  using Steps = std::vector<int>;
+  const uint8_t both = FLAG_SCENE_BACK_AND_FORTH;
+  CHECK(steps(4, 0, 0) == Steps({0, 1, 2, 3}));
+  CHECK(steps(3, 2, 0) == Steps({0, 1, 2, 0, 1, 2}));
+  CHECK(steps(4, 1, 0) ==
+        Steps({0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3}));
+  CHECK(steps(4, 0, both) == Steps({0, 1, 2, 3, 2, 1, 0}));
+  CHECK(steps(3, 2, both) == Steps({0, 1, 2, 1, 0, 1, 2, 1, 0}));
+  CHECK(steps(4, 1, both) ==
+        Steps({0, 1, 2, 3, 2, 1, 0, 1, 2, 3, 2, 1, 0, 1, 2, 3}));
+  CHECK(steps(2, 1, both) ==
+        Steps({0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1}));
+  CHECK(steps(2, 0, both) == Steps({0, 1, 0}));
+  CHECK(steps(1, 0, both) == Steps({0}));
+}
+
 // The extra plane's dynamic masks, colours and shadow tables of a 128x32
 // project are never read (its 64-row plane is rendered in layer mode, from the
 // SD zones and shadows), so a load drops them; the 256x64 plane of an
@@ -5354,6 +5392,7 @@ static const TestCase kTests[] = {
     {"upscale/background_scene_keeps_text_shape",
      Test_BackgroundSceneKeepsTextShape},
     {"scene/load_forgets_the_running_scene", Test_LoadForgetsTheRunningScene},
+    {"scene/steps_back_and_forth", Test_SceneStepsBackAndForth},
     {"load/unused_extra_dynamic_data_is_dropped",
      Test_UnusedExtraDynamicDataIsDropped},
     {"memory/writes_no_file", Test_MemoryLoadWritesNoFile},

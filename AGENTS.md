@@ -1332,6 +1332,13 @@ Flags (from `serum.h`):
   Unlit dynamic-zone pixels whose dynamic color for shade `0` is not black keep
   that color instead of showing the background scene.
   They cast dynamic shadows like lit dynamic content.
+- `64`: back and forth (`AdvanceSceneFrame()`): a run shows the frames from
+  the first to the last and back to the second; the next run starts at the
+  first again, and the last run ends on it. The repeat setting counts runs as
+  it counts passes otherwise (`1` loops). A frame group is picked at the start
+  of each run and kept on the way back (`sceneBackward`, `sceneGroup`); a scene
+  resumed after a retrigger goes on in the direction it had. A scene of one
+  frame plays as without the flag.
 
 Finished-scene default behavior:
 - Foreground scenes with flag `0` leave the last rendered scene frame visible
