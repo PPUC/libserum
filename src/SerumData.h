@@ -134,6 +134,20 @@ struct SerumDofFrame {
   }
 };
 
+// Where the sprite of a frame's slot is drawn relative to where it is found,
+// in ROM-frame pixels (twice that on a 64-high extra plane of a 32-high ROM).
+struct SerumSpriteOffset {
+  uint32_t frameId = 0;
+  uint8_t slot = 0;
+  int16_t x = 0;
+  int16_t y = 0;
+
+  template <class Archive>
+  void serialize(Archive &ar) {
+    ar(frameId, slot, x, y);
+  }
+};
+
 struct SerumLightEffectData {
   Serum_Light_Effect effect = {};
 
@@ -306,6 +320,25 @@ class SerumData {
         dofFrames.begin(), dofFrames.end(), frameId,
         [](const SerumDofFrame &f, uint32_t id) { return f.frameId < id; });
     return it != dofFrames.end() && it->frameId == frameId ? &*it : nullptr;
+  }
+  // The sprite offsets of slots that have one, sorted by frame ID and slot
+  // (persisted from concentrate version 17).
+  std::vector<SerumSpriteOffset> spriteOffsets;
+  // The offset of the slot, nullptr when it has none.
+  const SerumSpriteOffset *SpriteOffset(uint32_t frameId, uint8_t slot) const {
+    if (spriteOffsets.empty()) return nullptr;
+    const auto it = std::lower_bound(
+        spriteOffsets.begin(), spriteOffsets.end(),
+        std::make_pair(frameId, slot),
+        [](const SerumSpriteOffset &o,
+           const std::pair<uint32_t, uint8_t> &key) {
+          return o.frameId < key.first ||
+                 (o.frameId == key.first && o.slot < key.second);
+        });
+    return it != spriteOffsets.end() && it->frameId == frameId &&
+                   it->slot == slot
+               ? &*it
+               : nullptr;
   }
   // The frame's original-only sets as a bit mask; 0 when it has none.
   uint32_t OriginalOnlySets(uint32_t frameId) const {
@@ -782,6 +815,9 @@ class SerumData {
         }
         ar(sceneBases);
       }
+      if (concentrateFileVersion >= 17) {
+        ar(spriteOffsets);
+      }
     } else {
       if (concentrateFileVersion >= 8) {
         ar(scalingAlgorithm, shadowOffsetMode);
@@ -844,6 +880,11 @@ class SerumData {
             throw std::runtime_error("Invalid scene variant in cROMc");
           }
         }
+      }
+      if (concentrateFileVersion >= 17) {
+        ar(spriteOffsets);
+      } else {
+        spriteOffsets.clear();
       }
     }
   }

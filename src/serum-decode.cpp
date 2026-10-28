@@ -2226,6 +2226,10 @@ static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
 //   scene variants: uint32 count, per variant uint16 scene ID and uint16 ID of
 //            the scene whose frames it plays (SceneGenerator::setSceneBase());
 //            both are scenes of the block, the base no variant.
+//   sprite offsets: uint32 count, per slot uint32 frame ID, uint8 slot, uint8
+//            0, int16 x, int16 y (10 bytes; not both 0), by ascending frame ID
+//            and slot: the sprite found through that slot is drawn moved by
+//            the offset (see SerumSpriteOffset).
 // Bytes after these are ignored, so fields can be appended to the payload.
 static constexpr uint32_t kCromSettingsMagic = 0x31584353;  // "SCX1"
 static constexpr uint32_t kCromSettingsScenes = 1;
@@ -2238,6 +2242,8 @@ static constexpr uint32_t kCromSettingsDofEvents = 32;
 static constexpr uint32_t kCromSettingsDofEventBytes = 16;
 static constexpr uint32_t kCromSettingsFrameTriggers = 64;
 static constexpr uint32_t kCromSettingsSceneVariants = 128;
+static constexpr uint32_t kCromSettingsSpriteOffsets = 256;
+static constexpr uint32_t kCromSettingsSpriteOffsetBytes = 10;
 static constexpr uint32_t kCromSettingsLightEffectBytes = 24;
 static constexpr uint32_t kCromSettingsLightActionBytes = 8;
 static constexpr uint32_t kCromSettingsSceneBytes = 13;
@@ -2461,6 +2467,30 @@ static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
           !g_serumData.sceneGenerator->setSceneBase(sceneId, baseSceneId))
         return false;
     }
+  }
+  if (contents & kCromSettingsSpriteOffsets) {
+    uint32_t count = 0;
+    if (!take(&count, sizeof(count)) ||
+        (uint64_t)count * kCromSettingsSpriteOffsetBytes >
+            payload.size() - offset)
+      return false;
+    std::vector<SerumSpriteOffset> offsets;
+    offsets.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+      SerumSpriteOffset entry;
+      uint8_t zero = 0;
+      if (!take(&entry.frameId, 4) || !take(&entry.slot, 1) ||
+          !take(&zero, 1) || !take(&entry.x, 2) || !take(&entry.y, 2) ||
+          entry.frameId >= g_serumData.nframes ||
+          entry.slot >= g_serumData.SpritesPerFrame() ||
+          (entry.x == 0 && entry.y == 0) ||
+          (!offsets.empty() && (entry.frameId < offsets.back().frameId ||
+                                (entry.frameId == offsets.back().frameId &&
+                                 entry.slot <= offsets.back().slot))))
+        return false;
+      offsets.push_back(entry);
+    }
+    g_serumData.spriteOffsets = std::move(offsets);
   }
   return true;
 }
@@ -6344,10 +6374,14 @@ bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
   return false;
 }
 
+// poffx and poffy, when given, take the offset each sprite was moved by from
+// where it was found (SerumSpriteOffset): Colorize_Spritev2() reads the ROM
+// shades of its dynamic pixels there.
 bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                      uint16_t* pquelsprites, uint8_t* nspr, uint16_t* pfrx,
                      uint16_t* pfry, uint16_t* pspx, uint16_t* pspy,
-                     uint16_t* pwid, uint16_t* phei) {
+                     uint16_t* pwid, uint16_t* phei, int16_t* poffx = nullptr,
+                     int16_t* poffy = nullptr) {
   *nspr = 0;
   // Sprites are matched against the ROM frame as it arrives, at its own
   // resolution, never against a scaled version of it: the bounding boxes, the
@@ -6439,6 +6473,8 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
                         ? g_serumData.spriteHeight[qspr]
                         : MAX_SPRITE_HEIGHT;
 
+    const SerumSpriteOffset* slotOffset =
+        g_serumData.SpriteOffset(quelleframe, spriteSlot);
     short minxBB = (short)(frameSpriteBoundingBoxes[spriteSlot * 4]);
     short minyBB = (short)(frameSpriteBoundingBoxes[spriteSlot * 4 + 1]);
     short maxxBB = (short)(frameSpriteBoundingBoxes[spriteSlot * 4 + 2]);
@@ -6546,6 +6582,41 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
             phei[*nspr] =
                 std::min((uint16_t)(maxyBB - pfry[*nspr] + 1), (uint16_t)sph);
           }
+          // An offset moves the sprite, cut to its bounding box, by that
+          // much: drawn in the bounding box moved alike, as far as that lies
+          // in the frame.
+          if (slotOffset) {
+            int x = pfrx[*nspr] + slotOffset->x;
+            int y = pfry[*nspr] + slotOffset->y;
+            int sx = pspx[*nspr], sy = pspy[*nspr];
+            int w = pwid[*nspr], h = phei[*nspr];
+            if (x < 0) {
+              sx -= x;
+              w += x;
+              x = 0;
+            }
+            if (y < 0) {
+              sy -= y;
+              h += y;
+              y = 0;
+            }
+            w = std::min(w, (int)nativeWidth - x);
+            h = std::min(h, (int)nativeHeight - y);
+            if (w <= 0 || h <= 0) {
+              DebugLogSpriteRejected(quelleframe, qspr, spriteSlot,
+                                     "offset-outside-frame", tm - detectStart,
+                                     frax, fray, 0, 0, 0, 0, 0, 0);
+              return false;
+            }
+            pfrx[*nspr] = (uint16_t)x;
+            pfry[*nspr] = (uint16_t)y;
+            pspx[*nspr] = (uint16_t)sx;
+            pspy[*nspr] = (uint16_t)sy;
+            pwid[*nspr] = (uint16_t)w;
+            phei[*nspr] = (uint16_t)h;
+          }
+          if (poffx) poffx[*nspr] = slotOffset ? slotOffset->x : 0;
+          if (poffy) poffy[*nspr] = slotOffset ? slotOffset->y : 0;
           // we check the identical sprites as there may be duplicate due
           // to the multi detection zones
           bool identicalfound = false;
@@ -7315,9 +7386,12 @@ static inline uint16_t SpriteColourAt(const uint16_t* fetched, Store& store,
   return fetched ? fetched[index] : store[sprite][index];
 }
 
+// ofx, ofy: how far the sprite was moved from where it was found
+// (SerumSpriteOffset); its dynamic pixels take the ROM shades from there.
 void Colorize_Spritev2(uint8_t* oframe, uint16_t nosprite, uint16_t frx,
                        uint16_t fry, uint16_t spx, uint16_t spy, uint16_t wid,
-                       uint16_t hei, uint32_t IDfound) {
+                       uint16_t hei, uint32_t IDfound, int16_t ofx = 0,
+                       int16_t ofy = 0) {
   uint16_t *pfr, *prot;
   uint16_t* prt;
   uint32_t* cshft;
@@ -7461,7 +7535,9 @@ void Colorize_Spritev2(uint8_t* oframe, uint16_t nosprite, uint16_t frx,
             const uint8_t dynacouche = spriteDyna[tl];
             pfr[tk] = SpriteColourAt(
                 spriteDynaColors, g_serumData.dynasprite4cols, nosprite,
-                dynacouche * g_serumData.nocolors + oframe[tk]);
+                dynacouche * g_serumData.nocolors +
+                    oframe[(fry + tj - ofy) * g_serumData.fwidth + frx + ti -
+                           ofx]);
             if (ColorInRotationOnPlane(originalPlaneRotates, IDfound, pfr[tk],
                                        &prot[tk * 2], &prot[tk * 2 + 1], false))
               pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
@@ -7634,13 +7710,17 @@ void Colorize_Spritev2(uint8_t* oframe, uint16_t nosprite, uint16_t frx,
             const uint8_t dynacouche = spriteExtraDyna[spritePixel];
             // Same original-resolution source frame as in Colorize_Framev2,
             // addressed through the sprite's extra-plane position.
+            // A moved sprite reads them where it was found.
             const uint8_t srcShade =
-                extraIsNative  ? oframe[tk]
-                : upscaleExtra ? SampleUpscaled2x(oframe, g_serumData.fwidth,
-                                                  g_serumData.fheight,
-                                                  tfrx + ti, tfry + tj)
-                               : oframe[(tj * 2 + fry) * g_serumData.fwidth +
-                                        ti * 2 + frx];
+                extraIsNative
+                    ? oframe[(tfry + tj - ofy) * g_serumData.fwidth_extra +
+                             tfrx + ti - ofx]
+                : upscaleExtra
+                    ? SampleUpscaled2x(oframe, g_serumData.fwidth,
+                                       g_serumData.fheight, tfrx + ti - 2 * ofx,
+                                       tfry + tj - 2 * ofy)
+                    : oframe[(tj * 2 + fry - ofy) * g_serumData.fwidth +
+                             ti * 2 + frx - ofx];
             pfr[tk] = SpriteColourAt(
                 spriteExtraDynaColors, g_serumData.dynasprite4cols_extra,
                 nosprite, dynacouche * g_serumData.nocolors + srcShade);
@@ -8480,18 +8560,20 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
     uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
         spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
         wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
+    int16_t offx[MAX_SPRITES_PER_FRAME], offy[MAX_SPRITES_PER_FRAME];
     std::fill(nosprite, nosprite + MAX_SPRITES_PER_FRAME, SERUM_NO_SPRITE);
 
     // Sprite detection is timed for the profiler like the stages after it.
     const auto spriteCheckStart = g_profileDynamicHotPaths
                                       ? std::chrono::steady_clock::now()
                                       : std::chrono::steady_clock::time_point{};
-    bool isspr = (sceneFrameRequested && !isBackgroundSceneRequested)
-                     ? false
-                     : Check_Spritesv2(
-                           isBackgroundSceneRequested ? lastFrame : frame,
-                           isBackgroundSceneRequested ? lastFrameId : lastfound,
-                           nosprite, &nspr, frx, fry, spx, spy, wid, hei);
+    bool isspr =
+        (sceneFrameRequested && !isBackgroundSceneRequested)
+            ? false
+            : Check_Spritesv2(
+                  isBackgroundSceneRequested ? lastFrame : frame,
+                  isBackgroundSceneRequested ? lastFrameId : lastfound,
+                  nosprite, &nspr, frx, fry, spx, spy, wid, hei, offx, offy);
     if (g_profileDynamicHotPaths) {
       g_profileCheckSpritesV2Ns +=
           (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -8537,7 +8619,8 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
           Colorize_Spritev2(
               isBackgroundSceneRequested ? lastFrame : frame, nosprite[ti],
               frx[ti], fry[ti], spx[ti], spy[ti], wid[ti], hei[ti],
-              isBackgroundSceneRequested ? lastFrameId : lastfound);
+              isBackgroundSceneRequested ? lastFrameId : lastfound, offx[ti],
+              offy[ti]);
           ti++;
         }
         if (g_debugStageHashes &&

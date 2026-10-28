@@ -5159,6 +5159,87 @@ static void Test_CromSettingsSceneVariants(void) {
   n256::Unload();
 }
 
+// Sprite offsets from the settings block: the sprite of frame kSprite, found
+// at (61,37) in its bounding box (32,20)-(95,43), is drawn moved by the offset
+// of its slot; its dynamic pixel takes the ROM shade where it was found, the
+// place it was found shows the frame's own colors. Cut where it leaves the
+// frame. Directly and through a cROMc; a zero offset, a slot or frame out of
+// range and slots out of order fail the load.
+static void Test_CromSettingsSpriteOffsets(void) {
+  struct Entry {
+    uint32_t frame;
+    uint8_t slot;
+    int16_t x, y;
+  };
+  const auto block = [](std::vector<Entry> entries) {
+    std::vector<uint8_t> payload;
+    const auto put = [&payload](const void* data, size_t bytes) {
+      const uint8_t* p = (const uint8_t*)data;
+      payload.insert(payload.end(), p, p + bytes);
+    };
+    const uint32_t contents = kCromSettingsSpriteOffsets;
+    const uint32_t count = (uint32_t)entries.size();
+    put(&contents, 4);
+    put(&count, 4);
+    for (const Entry& entry : entries) {
+      const uint8_t zero = 0;
+      put(&entry.frame, 4);
+      put(&entry.slot, 1);
+      put(&zero, 1);
+      put(&entry.x, 2);
+      put(&entry.y, 2);
+    }
+    std::vector<uint8_t> result;
+    const uint32_t magic = kCromSettingsMagic;
+    const uint32_t size = (uint32_t)payload.size();
+    result.insert(result.end(), (const uint8_t*)&magic,
+                  (const uint8_t*)&magic + 4);
+    result.insert(result.end(), (const uint8_t*)&size,
+                  (const uint8_t*)&size + 4);
+    result.insert(result.end(), payload.begin(), payload.end());
+    return result;
+  };
+  n256::Synth s;
+  // Moved right and up; then so far right that only its first three columns
+  // are in the frame.
+  const int16_t moves[2][2] = {{100, -5}, {192, 0}};
+  for (const auto& move : moves) {
+    std::vector<uint8_t> crom = s.Serialize();
+    const std::vector<uint8_t> offsets =
+        block({{(uint32_t)n256::kSprite, 0, move[0], move[1]}});
+    crom.insert(crom.end(), offsets.begin(), offsets.end());
+    for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+      CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
+      if (viaConcentrate) {
+        Serum_Dispose();
+        std::filesystem::remove(n256::Dir() / n256::kRom /
+                                (std::string(n256::kRom) + ".cROM"));
+        CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
+                         FLAG_REQUEST_64P_FRAMES) != NULL);
+      }
+      CHECK_EQ(g_serumData.spriteOffsets.size(), 1u);
+      n256::Colorize(s.Frame(n256::kSprite));
+      CHECK_EQ(mySerum.frameID, n256::kSprite);
+      const uint32_t sx = n256::kSprX + move[0], sy = n256::kSprY + move[1];
+      EXPECT_PLANE64([sx, sy](uint32_t x, uint32_t y) {
+        return N256SpritePlane64(sx, sy, x, y);
+      });
+      Serum_Dispose();
+    }
+  }
+  const uint32_t frame = n256::kSprite;
+  for (const auto& bad :
+       {block({{frame, 0, 0, 0}}), block({{frame, 1, 4, 0}, {frame, 0, 4, 0}}),
+        block({{frame, (uint8_t)LEGACY_SPRITES_PER_FRAME, 4, 0}}),
+        block({{1000000, 0, 4, 0}})}) {
+    std::vector<uint8_t> broken = s.Serialize();
+    broken.insert(broken.end(), bad.begin(), bad.end());
+    CHECK(Serum_LoadFromMemory(broken.data(), broken.size(),
+                               n256::kBothPlanes) == NULL);
+  }
+  n256::Unload();
+}
+
 // The original-only dynamic sets from the settings block, directly and through
 // a cROMc; a mask of 0 or frames out of order fail the load.
 static void Test_CromSettingsOriginalOnlySets(void) {
@@ -5736,6 +5817,7 @@ static const TestCase kTests[] = {
     {"crom/settings_dof_events", Test_CromSettingsDofEvents},
     {"crom/settings_frame_triggers", Test_CromSettingsFrameTriggers},
     {"crom/settings_scene_variants", Test_CromSettingsSceneVariants},
+    {"crom/settings_sprite_offsets", Test_CromSettingsSpriteOffsets},
     {"source/builds_the_croms_colorization",
      Test_SourceBuildsTheCromsColorization},
     {"upscale/background_scene_keeps_text_shape",

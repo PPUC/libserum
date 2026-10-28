@@ -397,8 +397,10 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
   follow, then the frame triggers (`kCromSettingsFrameTriggers`, 64; see
   "Frame triggers (v2)"): per frame a PUP, scene and monochrome trigger; one
   out of its range, frames out of order or beyond the frames fail the load.
-  Last come the scene variants (`kCromSettingsSceneVariants`, 128): pairs of a
-  scene and its base, both scenes of the block, the base no variant. A block that is cut short or malformed fails the load.
+  Then come the scene variants (`kCromSettingsSceneVariants`, 128): pairs of a
+  scene and its base, both scenes of the block, the base no variant. Last come
+  the sprite offsets (`kCromSettingsSpriteOffsets`, 256; see "Sprite offsets").
+  A block that is cut short or malformed fails the load.
 - Scenes from the block set `scenesFromColorization`, scaling settings set
   `scalingFromColorization` (also when the block holds zero scenes). Either
   makes the matching sidecar (`<rom>.pup.csv`, `scaling.txt`) ignored, in the
@@ -408,6 +410,22 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
 - Both flags are stored in the cROMc from concentrate version 9; older cROMcs
   load with both false and behave as before.
 - A frame group count of 0 is read as 1, as `parseCSV()` reads it.
+
+## Sprite offsets
+A frame's sprite slot can have an offset (`SerumSpriteOffset`, x and y in
+ROM-frame pixels, from the settings block): the sprite found through that slot
+is drawn moved by it instead of where it was found. Detection does not change:
+it still looks in the slot's bounding box of the ROM frame. `Check_Spritesv2()`
+cuts the found sprite to the bounding box as always, then moves the result by
+the offset and cuts it to the frame (nothing left: the sprite is dropped). It
+reports the offset of each sprite (`poffx`, `poffy`), and
+`Colorize_Spritev2()` takes the ROM shades of the sprite's dynamic pixels from
+where it was found (destination minus the offset; twice the offset on an
+upscaled extra plane). The place it was found shows the frame's colorization
+like any pixel without a sprite. Slots without an offset are not listed; the
+list is sorted by frame ID and slot (`SpriteOffset()` searches it), entries
+with a zero offset, a slot beyond `SpritesPerFrame()` or a frame beyond the
+frames fail the load. Stored in the cROMc from concentrate version 17.
 
 ## Speaker lights
 A colorization can drive the speaker lights of a DMD (WS2812FX strips driven
@@ -1438,7 +1456,8 @@ Finished-scene default behavior:
   scene frame is incomplete/unavailable.
 
 ## cROMc persistence
-Current concentrate version: **16**. Version 16 adds the scene variants
+Current concentrate version: **17**. Version 17 adds the sprite offsets after
+the scene variants (see "Sprite offsets"). Version 16 adds the scene variants
 (pairs of scene ID and base scene ID) after the frame triggers (see "Scene
 playback and options"). Version 15 adds the PUP and the
 monochrome trigger of each frame (`pupTriggerIDs`, `monochromeTriggerIDs`)

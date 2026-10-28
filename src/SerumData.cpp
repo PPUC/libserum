@@ -170,6 +170,7 @@ void SerumData::Clear() {
   sceneFramesFromColorization = false;
   sceneFrames.clear();
   dofFrames.clear();
+  spriteOffsets.clear();
   hashcodes.clear();
   shapecompmode.clear();
   compmaskID.clear();
