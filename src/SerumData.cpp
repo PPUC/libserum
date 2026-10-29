@@ -3,7 +3,6 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
-#include <unordered_set>
 
 #include "DecompressingIStream.h"
 #include "miniz/miniz.h"
@@ -812,8 +811,9 @@ void SerumData::BuildSpriteRuntimeSidecars() {
   for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
     spriteCandidateOffsets[frameId] =
         static_cast<uint32_t>(spriteCandidateIds.size());
-    std::unordered_set<uint16_t> dedupe;
-    dedupe.reserve(slots);
+    // Every slot is a candidate of its own, a sprite in two slots too: each
+    // slot has its own bounding box and offset, and the runtime drops a find
+    // that repeats an earlier one.
     const uint16_t *frameSprites = framesprites[frameId];
     for (uint32_t i = 0; i < slots; ++i) {
       const uint16_t spriteId = frameSprites[i];
@@ -825,9 +825,6 @@ void SerumData::BuildSpriteRuntimeSidecars() {
         continue;
       }
       if (spriteDetectOffsets[spriteId] == spriteDetectOffsets[spriteId + 1]) {
-        continue;
-      }
-      if (!dedupe.insert(spriteId).second) {
         continue;
       }
       spriteCandidateIds.push_back(spriteId);

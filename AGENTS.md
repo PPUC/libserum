@@ -160,7 +160,10 @@ Vector policy currently used in `SerumData`:
   preprocessing otherwise.
 - Sprite runtime sidecars are precomputed and used by `Check_Spritesv2`:
   - frame candidate list with sprite slot indices (`spriteCandidateOffsets`,
-    `spriteCandidateIds`, `spriteCandidateSlots`)
+    `spriteCandidateIds`, `spriteCandidateSlots`): one entry per used slot, so
+    a sprite in two slots is searched in both bounding boxes. A cROMc written
+    before 2.99.12 lists such a sprite only for its first slot; it has to be
+    generated again.
   - frame-level shaped-sprite marker (`frameHasShapeSprite`)
   - per-sprite dimensions and shape flags (`spriteWidth`, `spriteHeight`,
     `spriteUsesShape`)

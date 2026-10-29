@@ -3201,6 +3201,37 @@ static void Test_N256SpriteDetection(void) {
   }
 }
 
+// The same sprite in two slots, each with its own bounding box, is found in
+// both (issue #49 of the editor).
+static void Test_SameSpriteInTwoSlots(void) {
+  n256::Synth s;
+  s.SetBB(n256::kSprite, 32, 20, 70, 43, 0);
+  s.framesprites[(size_t)n256::kSprite * s.slotsPerFrame + 1] = 0;
+  s.SetBB(n256::kSprite, 80, 20, 127, 43, 1);
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    if (!n256::Load(s, n256::kBothPlanes, viaConcentrate != 0)) continue;
+    uint16_t which[MAX_SPRITES_PER_FRAME];
+    uint8_t count = 0;
+    uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
+        spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
+        wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
+    std::vector<uint8_t> frame = s.Frame(n256::kSprite);
+    n256::Synth::PlaceSprite0(frame.data(), 100, 25);
+    CHECK(Check_Spritesv2(frame.data(), n256::kSprite, which, &count, frx, fry,
+                          spx, spy, wid, hei));
+    CHECK_EQ(count, 2);
+    if (count == 2) {
+      CHECK_EQ(which[0], 0);
+      CHECK_EQ(frx[0], n256::kSprX);
+      CHECK_EQ(fry[0], n256::kSprY);
+      CHECK_EQ(which[1], 0);
+      CHECK_EQ(frx[1], 100);
+      CHECK_EQ(fry[1], 25);
+    }
+    n256::Unload();
+  }
+}
+
 // A sprite found at ROM position (x, y) is drawn there, 1:1, from the
 // extra-plane sprite arrays. The half-size picture the file also stores for
 // the 128x32 plane goes nowhere.
@@ -5786,6 +5817,7 @@ static const TestCase kTests[] = {
     {"n256/dynamic_content", Test_N256DynamicContent},
     {"n256/background_over_black", Test_N256BackgroundOverBlack},
     {"n256/sprite_detection", Test_N256SpriteDetection},
+    {"n256/same_sprite_in_two_slots", Test_SameSpriteInTwoSlots},
     {"crom/format_1_sprites", Test_CromFormat1Sprites},
     {"cromc/version_9_sprites", Test_ConcentrateVersion9Sprites},
     {"n256/sprite_drawing", Test_N256SpriteDrawing},
