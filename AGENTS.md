@@ -10,10 +10,11 @@ considered done.
 
 **Version rule:** `master` carries 2.99.x, the unstable development line towards
 3.0.0 (the builder API, cROMc only, no Serum V1). Raise `SERUM_VERSION_PATCH`
-(`src/serum-version.h`) in every commit. Within this line the cROMc format does
-not have to stay readable by the next version, as authors generate a new cROMc;
-still raise `SERUM_CONCENTRATE_VERSION` when it changes. The next stable release
-will be 3.0.0; `2.8.x` is the stable branch.
+(`src/serum-version.h`) once between two pushes, in the first commit after the
+last push; later commits before the next push keep it. Within this line the
+cROMc format does not have to stay readable by the next version, as authors
+generate a new cROMc; still raise `SERUM_CONCENTRATE_VERSION` when it changes.
+The next stable release will be 3.0.0; `2.8.x` is the stable branch.
 
 **Local notes rule:** If `AGENTS.local.md` exists in the repository root, read
 it before working. It is untracked on purpose and carries detail about this
