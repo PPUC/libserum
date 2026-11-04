@@ -2029,6 +2029,125 @@ static void Test_SparseVectorWideValuesRoundTrip(void) {
   for (int i = 0; i < 8; ++i) CHECK_EQ(w[1][i], wide[i]);
 }
 
+// Frames of 512 colours that change in a few places from one to the next, the
+// way the frames of a scene do: hard to compress alone, easy as a difference.
+static std::vector<std::vector<uint16_t>> SimilarFrames(size_t count) {
+  std::vector<std::vector<uint16_t>> frames(count, std::vector<uint16_t>(512));
+  uint32_t seed = 12345;
+  for (auto& v : frames[0]) {
+    seed = seed * 1664525u + 1013904223u;
+    v = (uint16_t)(seed >> 16);
+  }
+  for (size_t f = 1; f < count; ++f) {
+    frames[f] = frames[f - 1];
+    for (int k = 0; k < 6; ++k) {
+      seed = seed * 1664525u + 1013904223u;
+      frames[f][(seed >> 8) % 512] = (uint16_t)(seed >> 16);
+    }
+  }
+  return frames;
+}
+
+// Elements stored as the difference to another element read back the values
+// they were stored with: right after storing, with caches that hold none of
+// the chain, and at the end of a long chain read first.
+static void Test_SparseVectorDifferencesReadBackTheValues(void) {
+  const auto frames = SimilarFrames(40);
+  SparseVector<uint16_t> v(0, false, true);
+  for (uint32_t f = 0; f < frames.size(); ++f) v.set(f, frames[f].data(), 512);
+  std::vector<std::pair<uint32_t, uint32_t>> chain;
+  for (uint32_t f = 1; f < frames.size(); ++f) chain.emplace_back(f, f - 1);
+  CHECK_EQ(v.storeAsDifferences(chain), frames.size() - 1);
+  CHECK(!v.isStoredAsDifference(0));
+  CHECK(v.isStoredAsDifference(39));
+  CHECK(v.differenceBases() == chain);
+  // Last first: every base has to be applied.
+  CHECK(memcmp(v[39], frames[39].data(), 1024) == 0);
+  for (uint32_t f = 0; f < frames.size(); ++f)
+    CHECK(memcmp(v[f], frames[f].data(), 1024) == 0);
+  // The same from an archive, with no cache filled.
+  const auto copy = [&v](SparseVector<uint16_t>& to) {
+    std::stringstream stream;
+    {
+      cereal::PortableBinaryOutputArchive out(stream);
+      out(v);
+    }
+    cereal::PortableBinaryInputArchive in(stream);
+    in(to);
+  };
+  SparseVector<uint16_t> loaded(0, false, true);
+  copy(loaded);
+  loaded.setDifferenceBases(v.differenceBases());
+  for (uint32_t f : {20u, 39u, 1u, 0u, 38u})
+    CHECK(memcmp(loaded[f], frames[f].data(), 1024) == 0);
+  // Without the bases the payloads are the differences.
+  SparseVector<uint16_t> bare(0, false, true);
+  copy(bare);
+  CHECK(memcmp(bare[39], frames[39].data(), 1024) != 0);
+}
+
+// An element is stored as a difference only where that makes the payloads
+// smaller: not while it shares its payload with another element (which keeps
+// it, so it costs nothing), not when its values are the base's, not twice,
+// and not with a base that leads back to it; nothing in a vector without
+// compression.
+static void Test_SparseVectorDifferencesKeepSharedPayloads(void) {
+  const auto frames = SimilarFrames(3);
+  SparseVector<uint16_t> v(0, false, true);
+  v.set(1, frames[0].data(), 512);
+  v.set(2, frames[1].data(), 512);
+  v.set(3, frames[1].data(), 512);  // the same as 2
+  v.set(4, frames[0].data(), 512);  // the same as 1
+  CHECK_EQ(v.storeAsDifferences({{2, 1}, {3, 1}, {4, 1}}), 0u);
+  CHECK(!v.hasDifferences());
+  // 2 alone has its payload now.
+  v.set(3, frames[2].data(), 512);
+  CHECK_EQ(v.storeAsDifferences({{2, 1}, {2, 1}, {1, 2}, {3, 2}, {4, 1}}), 2u);
+  CHECK(v.isStoredAsDifference(2));
+  CHECK(!v.isStoredAsDifference(1));  // its base leads back to it
+  CHECK(v.isStoredAsDifference(3));   // on 2, a difference itself
+  CHECK(!v.isStoredAsDifference(4));  // its values are the base's
+  CHECK(v.differenceBases() ==
+        (std::vector<std::pair<uint32_t, uint32_t>>{{2, 1}, {3, 2}}));
+  for (uint32_t id : {1u, 4u})
+    CHECK(memcmp(v[id], frames[0].data(), 1024) == 0);
+  CHECK(memcmp(v[2], frames[1].data(), 1024) == 0);
+  CHECK(memcmp(v[3], frames[2].data(), 1024) == 0);
+  // Set again, an element is stored whole.
+  v.set(3, frames[0].data(), 512);
+  CHECK(!v.isStoredAsDifference(3));
+  CHECK(memcmp(v[3], frames[0].data(), 1024) == 0);
+
+  SparseVector<uint16_t> plain(0);
+  plain.set(1, frames[0].data(), 512);
+  plain.set(2, frames[1].data(), 512);
+  CHECK_EQ(plain.storeAsDifferences({{2, 1}}), 0u);
+}
+
+// Bases read from an archive that name the element itself or lead back to it
+// are refused.
+static void Test_SparseVectorDifferenceBasesWithoutCycles(void) {
+  SparseVector<uint16_t> v(0, false, true);
+  bool threw = false;
+  try {
+    v.setDifferenceBases({{1, 1}});
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  CHECK(threw);
+  threw = false;
+  try {
+    v.setDifferenceBases({{1, 2}, {2, 3}, {3, 1}});
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  CHECK(threw);
+  CHECK(!v.hasDifferences());
+  v.setDifferenceBases({{1, 2}, {2, 3}, {5, 3}});
+  CHECK(v.isStoredAsDifference(5));
+  CHECK(!v.isStoredAsDifference(3));
+}
+
 // ---------------------------------------------------------------------------
 // Colour rotations
 // ---------------------------------------------------------------------------
@@ -5190,6 +5309,104 @@ static void Test_CromSettingsSceneVariants(void) {
   n256::Unload();
 }
 
+// A cROMc stores each frame of a scene group after the first as the
+// difference to the frame before it, on each plane where that is smaller, and
+// reads back the frames' colours. The cROM itself has them whole. A cROMc of
+// an earlier version cannot hold them.
+static void Test_ConcentrateStoresSceneFramesAsDifferences(void) {
+  std::vector<uint8_t> payload;
+  const auto put = [&payload](const void* data, size_t bytes) {
+    const uint8_t* p = (const uint8_t*)data;
+    payload.insert(payload.end(), p, p + bytes);
+  };
+  const auto putU32 = [&put](uint32_t value) { put(&value, 4); };
+  const auto putU16 = [&put](uint16_t value) { put(&value, 2); };
+  putU32(kCromSettingsScenes | kCromSettingsSceneFrames);
+  // Scene 7: kBackground, then kScene.
+  putU32(1);
+  putU16(7);
+  putU16(2);
+  putU16(100);
+  const uint8_t flags[7] = {1, 1, 0, 1, 0, 0, 0};
+  put(flags, sizeof(flags));
+  putU32(2);
+  for (const uint32_t frame :
+       {(uint32_t)n256::kBackground, (uint32_t)n256::kScene}) {
+    putU32(frame);
+    putU16(7);
+    putU16(frame == n256::kScene ? 1 : 0);
+    const uint8_t group[2] = {1, 0};
+    put(group, 2);
+  }
+  std::vector<uint8_t> block;
+  const uint32_t magic = kCromSettingsMagic;
+  const uint32_t size = (uint32_t)payload.size();
+  block.insert(block.end(), (const uint8_t*)&magic, (const uint8_t*)&magic + 4);
+  block.insert(block.end(), (const uint8_t*)&size, (const uint8_t*)&size + 4);
+  block.insert(block.end(), payload.begin(), payload.end());
+
+  // Colours that change in a few places from the first frame to the second.
+  n256::Synth s;
+  uint32_t seed = 4711;
+  const auto next = [&seed]() {
+    seed = seed * 1664525u + 1013904223u;
+    return (uint16_t)(seed >> 16);
+  };
+  const auto fill = [&](std::vector<uint16_t>& plane, size_t px) {
+    uint16_t* first = &plane[(size_t)n256::kBackground * px];
+    uint16_t* second = &plane[(size_t)n256::kScene * px];
+    for (size_t i = 0; i < px; ++i) first[i] = next();
+    memcpy(second, first, px * 2);
+    for (int k = 0; k < 20; ++k) second[next() % px] = next();
+  };
+  fill(s.cframes, n256::kOPx);
+  fill(s.cframesx, n256::kNPx);
+  const auto colours = [](const std::vector<uint16_t>& plane, uint32_t frame,
+                          size_t px) {
+    return std::vector<uint16_t>(plane.begin() + (size_t)frame * px,
+                                 plane.begin() + (size_t)(frame + 1) * px);
+  };
+  const auto expectFrames = [&]() {
+    for (const uint32_t frame :
+         {(uint32_t)n256::kBackground, (uint32_t)n256::kScene}) {
+      CHECK(colours(s.cframes, frame, n256::kOPx) ==
+            std::vector<uint16_t>(g_serumData.cframes_v2[frame],
+                                  g_serumData.cframes_v2[frame] + n256::kOPx));
+      CHECK(colours(s.cframesx, frame, n256::kNPx) ==
+            std::vector<uint16_t>(
+                g_serumData.cframes_v2_extra[frame],
+                g_serumData.cframes_v2_extra[frame] + n256::kNPx));
+    }
+  };
+  std::vector<uint8_t> crom = s.Serialize();
+  crom.insert(crom.end(), block.begin(), block.end());
+
+  CHECK(settings::Load(crom, false) != NULL);
+  CHECK(!g_serumData.cframes_v2.hasDifferences());
+  CHECK(!g_serumData.cframes_v2_extra.hasDifferences());
+  expectFrames();
+  Serum_Dispose();
+
+  CHECK(settings::Load(crom, true) != NULL);
+  Serum_Dispose();
+  std::filesystem::remove(n256::Dir() / n256::kRom /
+                          (std::string(n256::kRom) + ".cROM"));
+  CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
+                   n256::kBothPlanes) != NULL);
+  CHECK_EQ(g_serumData.concentrateFileVersion, 18);
+  for (const auto* plane :
+       {&g_serumData.cframes_v2, &g_serumData.cframes_v2_extra}) {
+    CHECK(plane->isStoredAsDifference(n256::kScene));
+    CHECK(!plane->isStoredAsDifference(n256::kBackground));
+  }
+  expectFrames();
+
+  const std::string older = (n256::Dir() / "older.cROMc").string();
+  g_serumData.concentrateFileVersion = 17;
+  CHECK(!g_serumData.SaveToFile(older.c_str()));
+  n256::Unload();
+}
+
 // Sprite offsets from the settings block: the sprite of frame kSprite, found
 // at (61,37) in its bounding box (32,20)-(95,43), is drawn moved by the offset
 // of its slot; its dynamic pixel takes the ROM shade where it was found, the
@@ -5800,6 +6017,12 @@ static const TestCase kTests[] = {
     {"sparse/parent_gating", Test_SparseVectorParentGating},
     {"sparse/value_packing_is_exact", Test_SparseVectorValuePackingIsExact},
     {"sparse/wide_values_round_trip", Test_SparseVectorWideValuesRoundTrip},
+    {"sparse/differences_read_back_the_values",
+     Test_SparseVectorDifferencesReadBackTheValues},
+    {"sparse/differences_keep_shared_payloads",
+     Test_SparseVectorDifferencesKeepSharedPayloads},
+    {"sparse/difference_bases_without_cycles",
+     Test_SparseVectorDifferenceBasesWithoutCycles},
     {"rotation/advances_tagged_pixels_only",
      Test_RotationAdvancesTaggedPixelsOnly},
     {"rotation/wraps_at_length", Test_RotationWrapsAtItsLength},
@@ -5819,6 +6042,8 @@ static const TestCase kTests[] = {
     {"n256/sprite_detection", Test_N256SpriteDetection},
     {"n256/same_sprite_in_two_slots", Test_SameSpriteInTwoSlots},
     {"crom/format_1_sprites", Test_CromFormat1Sprites},
+    {"cromc/scene_frames_as_differences",
+     Test_ConcentrateStoresSceneFramesAsDifferences},
     {"cromc/version_9_sprites", Test_ConcentrateVersion9Sprites},
     {"n256/sprite_drawing", Test_N256SpriteDrawing},
     {"n256/rotation", Test_N256Rotation},

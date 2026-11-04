@@ -4,20 +4,25 @@
 // or installed.
 //
 // They are defined in `serum-accel-ref.cpp`, or in the sources the CMake
-// variable `SERUM_ACCEL_DIR` names. Nothing they compute is persisted.
+// variable `SERUM_ACCEL_DIR` names. Nothing persisted depends on which one is
+// built.
 //
-// The CRC-32 functions and UnpackValues() may be called from anywhere. All
-// others are called with the API mutex held.
+// The CRC-32 functions, UnpackValues(), KeepPackedPayloads() and
+// LoadPackedPayloads() may be called from anywhere. All others are called with
+// the API mutex held.
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 class SerumData;
 
 // To be raised when a declaration or a contract in this header changes.
 // CMakeLists.txt compares it with the version `SERUM_ACCEL_DIR` states.
 // 2: sprite IDs are uint16_t (more than 255 sprites).
-#define SERUM_ACCEL_SEAM_VERSION 2
+// 3: KeepPackedPayloads(), LoadPackedPayloads(), ElementResolved(),
+//    FindResolvedElement().
+#define SERUM_ACCEL_SEAM_VERSION 3
 
 namespace serum_accel {
 
@@ -48,6 +53,47 @@ uint32_t Crc32MaskedShape(const uint8_t* s, const uint8_t* mask, uint32_t n);
 // `count`.
 void UnpackValues(const uint8_t* packed, uint8_t bitsPerValue, uint8_t* out,
                   size_t count);
+
+// The packed payloads of a sparse vector: entry `i` is element `ids[i]`, and
+// its payload is the `sizes[i]` bytes at `offsets[i]` of `blob`.
+struct PackedPayloads {
+  std::vector<uint32_t>& ids;
+  std::vector<uint32_t>& offsets;
+  std::vector<uint32_t>& sizes;
+  std::vector<uint8_t>& blob;
+};
+
+// Keeps, in their order, the entries `i` with `keep[i] != 0` that have an
+// offset and a size and whose payload lies in `blob` (`keep` holds
+// `ids.size()` values). `blob` then holds each distinct payload of them once,
+// in the order of the first entry with it, and the offsets point there.
+// Returns true, or changes nothing and returns false; the caller then does it.
+bool KeepPackedPayloads(const PackedPayloads& payloads, const uint8_t* keep);
+
+// Puts the next `size` bytes of the archive being loaded into `dst`. Throws
+// when the archive has fewer.
+typedef void (*PayloadReader)(void* archive, uint8_t* dst, size_t size);
+
+// Loads the blob of a sparse vector whose entry table `payloads` already has
+// (`blob` is empty): the next `blobSize` bytes `read` delivers from `archive`.
+// Either reads all of them and leaves the four vectors as KeepPackedPayloads()
+// with `keep` leaves them for the blob read whole, and returns true, or reads
+// nothing and returns false; the caller then reads the blob.
+bool LoadPackedPayloads(const PackedPayloads& payloads, const uint8_t* keep,
+                        uint64_t blobSize, PayloadReader read, void* archive);
+
+// Elements stored as the difference to another element. A sparse vector's
+// stamp changes whenever its elements may have changed, and no stamp is used
+// for other elements again.
+
+// Element `id` of the sparse vector `vector`, stored as a difference, was
+// resolved to the `size` bytes at `values` while the vector had the stamp.
+void ElementResolved(const void* vector, uint64_t stamp, uint32_t id,
+                     const uint8_t* values, size_t size);
+// The `size` bytes ElementResolved() reported for element `id` of the vector
+// with that stamp, or null.
+const uint8_t* FindResolvedElement(const void* vector, uint64_t stamp,
+                                   uint32_t id, size_t size);
 
 // ---------------------------------------------------------------------------
 // Sprite detection

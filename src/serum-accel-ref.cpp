@@ -99,6 +99,19 @@ void UnpackValues(const uint8_t* packed, uint8_t bitsPerValue, uint8_t* out,
   }
 }
 
+bool KeepPackedPayloads(const PackedPayloads&, const uint8_t*) { return false; }
+
+bool LoadPackedPayloads(const PackedPayloads&, const uint8_t*, uint64_t,
+                        PayloadReader, void*) {
+  return false;
+}
+
+void ElementResolved(const void*, uint64_t, uint32_t, const uint8_t*, size_t) {}
+
+const uint8_t* FindResolvedElement(const void*, uint64_t, uint32_t, size_t) {
+  return nullptr;
+}
+
 // ---------------------------------------------------------------------------
 // Sprite detection
 // ---------------------------------------------------------------------------

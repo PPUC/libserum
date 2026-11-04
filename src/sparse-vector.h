@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cereal/access.hpp>
 #include <cereal/types/unordered_map.hpp>
 #include <cereal/types/vector.hpp>
@@ -39,6 +40,13 @@ inline void SetLegacyLoadExpected(bool expected) {
 
 inline bool IsLegacyLoadExpected() { return LegacyLoadExpectedFlag(); }
 }  // namespace sparse_vector_serialization
+
+// A value no two states of the elements of any sparse vector share: taken
+// anew whenever a vector's elements may have changed.
+inline uint64_t NextSparseVectorStamp() {
+  static std::atomic<uint64_t> next{1};
+  return next.fetch_add(1, std::memory_order_relaxed);
+}
 
 template <typename T>
 class SparseVector {
@@ -88,6 +96,14 @@ class SparseVector {
   mutable std::unordered_map<uint32_t, uint32_t> packedIndexById;
   mutable std::vector<uint32_t> packedDenseIndexById;
   mutable bool packedIndexReady = false;
+  // The element each element is stored as the difference to (its values XOR
+  // that element's), by element ID; UINT32_MAX for one stored whole. Empty
+  // when none is.
+  std::vector<uint32_t> deltaBases;
+  uint64_t elementsStamp = NextSparseVectorStamp();
+  const void *loadParent = nullptr;
+  bool (*loadParentHasData)(const void *, uint32_t) = nullptr;
+  bool keptAtLoad = false;
 
   static constexpr uint8_t kLegacyBitPackedMagic = 0xB1;
   static constexpr uint8_t kValuePackedMagic = 0xB2;
@@ -554,6 +570,75 @@ class SparseVector {
     return packedBlob.data() + offset;
   }
 
+  // The decoded values of an element if a cache holds them, or null.
+  const uint8_t *cachedValues(uint32_t elementId) const {
+    if (elementId == lastAccessedId && !lastDecompressed.empty()) {
+      return reinterpret_cast<const uint8_t *>(lastDecompressed.data());
+    }
+    if (elementId == secondAccessedId && !secondDecompressed.empty()) {
+      return reinterpret_cast<const uint8_t *>(secondDecompressed.data());
+    }
+    for (const auto &entry : decodedCache) {
+      if (entry.id == elementId && !entry.values.empty()) {
+        return reinterpret_cast<const uint8_t *>(entry.values.data());
+      }
+    }
+    return serum_accel::FindResolvedElement(this, elementsStamp, elementId,
+                                            rawByteSize());
+  }
+
+  // The element's payload unpacked into `out`, without its base applied.
+  bool unpackOwnPayload(uint32_t elementId, std::vector<uint8_t> &out) const {
+    uint32_t payloadSize = 0;
+    const uint8_t *payload = nullptr;
+    if (!packedIds.empty()) {
+      payload = getPackedPayload(elementId, &payloadSize);
+    } else {
+      const auto it = data.find(elementId);
+      if (it != data.end()) {
+        payload = it->second.data();
+        payloadSize = static_cast<uint32_t>(it->second.size());
+      }
+    }
+    if (!payload) return false;
+    const size_t rawBytes = rawByteSize();
+    out.resize(rawBytes);
+    return LZ4_decompress_safe(reinterpret_cast<const char *>(payload),
+                               reinterpret_cast<char *>(out.data()),
+                               static_cast<int>(payloadSize),
+                               static_cast<int>(rawBytes)) ==
+           static_cast<int>(rawBytes);
+  }
+
+  // The values of an element stored as a difference, whose own payload is
+  // unpacked in decodeScratch: XORed with each base in turn until one whose
+  // values are known or that is stored whole.
+  T *resolveDifference(uint32_t elementId) {
+    const size_t rawBytes = rawByteSize();
+    std::vector<uint8_t> values(decodeScratch.begin(),
+                                decodeScratch.begin() + rawBytes);
+    std::vector<uint8_t> own;
+    uint32_t base = deltaBases[elementId];
+    for (size_t steps = 0;; ++steps) {
+      if (steps > deltaBases.size()) return noData.data();
+      if (const uint8_t *known = cachedValues(base)) {
+        for (size_t i = 0; i < rawBytes; ++i) values[i] ^= known[i];
+        break;
+      }
+      if (!unpackOwnPayload(base, own)) return noData.data();
+      for (size_t i = 0; i < rawBytes; ++i) values[i] ^= own[i];
+      if (!isStoredAsDifference(base)) break;
+      base = deltaBases[base];
+    }
+    serum_accel::ElementResolved(this, elementsStamp, elementId, values.data(),
+                                 rawBytes);
+    prepareDecodedCacheForWrite(elementId);
+    memcpy(lastDecompressed.data(), values.data(), rawBytes);
+    lastAccessedId = elementId;
+    cacheDecodedFromBytes(elementId, values.data(), rawBytes);
+    return lastDecompressed.data();
+  }
+
  public:
   SparseVector(T noDataSignature, bool index, bool compress = false,
                bool binaryBitPack = false, T bitPackFalse = 0,
@@ -714,6 +799,9 @@ class SparseVector {
         if (static_cast<size_t>(decompressedSize) != rawBytes) {
           return noData.data();
         }
+        if (isStoredAsDifference(elementId)) {
+          return resolveDifference(elementId);
+        }
 
         prepareDecodedCacheForWrite(elementId);
         memcpy(lastDecompressed.data(), decodeScratch.data(), rawBytes);
@@ -754,6 +842,142 @@ class SparseVector {
     return data.find(elementId) != data.end();
   }
 
+  // Whether the element is stored as the difference to another one
+  // (storeAsDifferences(), setDifferenceBases()).
+  bool isStoredAsDifference(uint32_t elementId) const {
+    return elementId < deltaBases.size() && deltaBases[elementId] != UINT32_MAX;
+  }
+
+  bool hasDifferences() const {
+    for (uint32_t base : deltaBases)
+      if (base != UINT32_MAX) return true;
+    return false;
+  }
+
+  // The elements stored as differences, each with the element it is the
+  // difference to, by ascending element ID; only those the vector has.
+  std::vector<std::pair<uint32_t, uint32_t>> differenceBases() const {
+    std::vector<std::pair<uint32_t, uint32_t>> bases;
+    for (uint32_t id = 0; id < deltaBases.size(); ++id) {
+      if (deltaBases[id] != UINT32_MAX && hasData(id)) {
+        bases.emplace_back(id, deltaBases[id]);
+      }
+    }
+    return bases;
+  }
+
+  // Which elements are stored as differences, as differenceBases() gives
+  // them. Throws for bases that lead back to an element.
+  void setDifferenceBases(
+      const std::vector<std::pair<uint32_t, uint32_t>> &bases) {
+    deltaBases.clear();
+    for (const auto &base : bases) {
+      if (base.first == UINT32_MAX || base.first == base.second) {
+        throw std::runtime_error("Invalid element difference");
+      }
+      if (deltaBases.size() <= base.first) {
+        deltaBases.resize(static_cast<size_t>(base.first) + 1, UINT32_MAX);
+      }
+      deltaBases[base.first] = base.second;
+    }
+    // Every chain of bases ends: 0 not walked yet, 1 on the walk now, 2 ends.
+    std::vector<uint8_t> state(deltaBases.size(), 0);
+    std::vector<uint32_t> walk;
+    for (uint32_t id = 0; id < deltaBases.size(); ++id) {
+      uint32_t at = id;
+      walk.clear();
+      while (at < deltaBases.size() && deltaBases[at] != UINT32_MAX &&
+             state[at] != 2) {
+        if (state[at] == 1) {
+          deltaBases.clear();
+          throw std::runtime_error("Element differences form a cycle");
+        }
+        state[at] = 1;
+        walk.push_back(at);
+        at = deltaBases[at];
+      }
+      for (uint32_t done : walk) state[done] = 2;
+    }
+    resetDecodedCaches();
+    elementsStamp = NextSparseVectorStamp();
+  }
+
+  // Stores each element of `candidates`, in their order, as the XOR of its
+  // values with those of the base element paired with it, where that makes
+  // the payloads smaller. A payload the same bytes of another element also
+  // use costs nothing, so an element that shares its payload stays whole, and
+  // a difference that another element has already costs nothing. The values
+  // read back are the same. Skips an element stored as a difference already,
+  // a base that leads back to it, and values that would be the no-data
+  // values; does nothing for a vector without LZ4 compression. Returns how
+  // many elements it stored as differences.
+  size_t storeAsDifferences(
+      const std::vector<std::pair<uint32_t, uint32_t>> &candidates) {
+    if (useIndex || !useCompression || useBinaryBitPacking) return 0;
+    restoreDataFromPacked();
+    // How many elements use each payload, by its hash.
+    std::unordered_map<uint64_t, uint32_t> uses;
+    for (const auto &entry : data) {
+      ++uses[hashPayload(entry.second.data(), entry.second.size())];
+    }
+    size_t stored = 0;
+    std::vector<T> difference;
+    for (const auto &candidate : candidates) {
+      const uint32_t elementId = candidate.first;
+      const uint32_t base = candidate.second;
+      if (elementId == base || base == UINT32_MAX || !hasData(elementId) ||
+          !hasData(base) || isStoredAsDifference(elementId)) {
+        continue;
+      }
+      bool leadsBack = false;
+      for (uint32_t at = base; at != UINT32_MAX;
+           at = at < deltaBases.size() ? deltaBases[at] : UINT32_MAX) {
+        if (at == elementId) {
+          leadsBack = true;
+          break;
+        }
+      }
+      if (leadsBack) continue;
+
+      const size_t count = elementSize;
+      const T *values = (*this)[elementId];
+      difference.assign(values, values + count);
+      const T *baseValues = (*this)[base];
+      bool any = false;
+      for (size_t i = 0; i < count; ++i) {
+        difference[i] = static_cast<T>(difference[i] ^ baseValues[i]);
+        any = any || difference[i] != noData[0];
+      }
+      if (!any) continue;
+
+      const std::vector<uint8_t> whole = data[elementId];
+      const uint64_t wholeHash = hashPayload(whole.data(), whole.size());
+      std::vector<uint32_t> bases = std::move(deltaBases);
+      set(elementId, difference.data(), count);
+      deltaBases = std::move(bases);
+      const std::vector<uint8_t> &packed = data[elementId];
+      const uint64_t packedHash = hashPayload(packed.data(), packed.size());
+      const size_t costBefore = uses[wholeHash] == 1 ? whole.size() : 0;
+      const auto shared = uses.find(packedHash);
+      const size_t costAfter =
+          shared != uses.end() && shared->second > 0 ? 0 : packed.size();
+      if (costAfter >= costBefore) {
+        data[elementId] = whole;
+        continue;
+      }
+      --uses[wholeHash];
+      ++uses[packedHash];
+      if (deltaBases.size() <= elementId) {
+        deltaBases.resize(static_cast<size_t>(elementId) + 1, UINT32_MAX);
+      }
+      deltaBases[elementId] = base;
+      ++stored;
+    }
+    resetDecodedCaches();
+    elementsStamp = NextSparseVectorStamp();
+    return stored;
+  }
+
   template <typename U = T>
   void set(uint32_t elementId, const T *values, size_t size,
            SparseVector<U> *parent = nullptr,
@@ -766,6 +990,9 @@ class SparseVector {
     elementSize = size;
     clearPacked();
     resetDecodedCaches();
+    elementsStamp = NextSparseVectorStamp();
+    // Stored whole from now on.
+    if (elementId < deltaBases.size()) deltaBases[elementId] = UINT32_MAX;
 
     if (decompBuffer.size() < (elementSize * sizeof(T))) {
       decompBuffer.resize(elementSize * sizeof(T));
@@ -891,6 +1118,8 @@ class SparseVector {
     resetDecodedCaches();
     forceDecodedReads = false;
     forcedDecoded.clear();
+    deltaBases.clear();
+    elementsStamp = NextSparseVectorStamp();
   }
 
   template <typename U = T>
@@ -899,48 +1128,62 @@ class SparseVector {
       return;  // Parent cannot be set for index-based vectors or if no parent
                // is provided
     }
+    // The archive load has filtered by this parent already.
+    if (keptAtLoad) {
+      keptAtLoad = false;
+      return;
+    }
+    elementsStamp = NextSparseVectorStamp();
 
     if (!packedIds.empty()) {
-      std::vector<uint32_t> newIds;
-      std::vector<uint32_t> newOffsets;
-      std::vector<uint32_t> newSizes;
-      std::vector<uint8_t> newBlob;
-
-      newIds.reserve(packedIds.size());
-      newOffsets.reserve(packedOffsets.size());
-      newSizes.reserve(packedSizes.size());
-      newBlob.reserve(packedBlob.size());
-
-      uint32_t offset = 0;
+      std::vector<uint8_t> keep(packedIds.size());
       for (size_t i = 0; i < packedIds.size(); ++i) {
-        const uint32_t elementId = packedIds[i];
-        if (!parent->hasData(elementId)) {
-          continue;
-        }
-        if (i >= packedOffsets.size() || i >= packedSizes.size()) {
-          continue;
-        }
-
-        const uint32_t oldOffset = packedOffsets[i];
-        const uint32_t size = packedSizes[i];
-        if (oldOffset > packedBlob.size() ||
-            size > packedBlob.size() - oldOffset) {
-          continue;
-        }
-
-        newIds.push_back(elementId);
-        newOffsets.push_back(offset);
-        newSizes.push_back(size);
-        newBlob.insert(newBlob.end(), packedBlob.begin() + oldOffset,
-                       packedBlob.begin() + oldOffset + size);
-        offset += size;
+        keep[i] = parent->hasData(packedIds[i]) ? 1 : 0;
       }
+      const serum_accel::PackedPayloads payloads{packedIds, packedOffsets,
+                                                 packedSizes, packedBlob};
+      if (!serum_accel::KeepPackedPayloads(payloads, keep.data())) {
+        std::vector<uint32_t> newIds;
+        std::vector<uint32_t> newOffsets;
+        std::vector<uint32_t> newSizes;
+        std::vector<uint8_t> newBlob;
 
-      packedIds = std::move(newIds);
-      packedOffsets = std::move(newOffsets);
-      packedSizes = std::move(newSizes);
-      packedBlob = std::move(newBlob);
-      deduplicatePackedBlob();
+        newIds.reserve(packedIds.size());
+        newOffsets.reserve(packedOffsets.size());
+        newSizes.reserve(packedSizes.size());
+        newBlob.reserve(packedBlob.size());
+
+        uint32_t offset = 0;
+        for (size_t i = 0; i < packedIds.size(); ++i) {
+          const uint32_t elementId = packedIds[i];
+          if (!keep[i]) {
+            continue;
+          }
+          if (i >= packedOffsets.size() || i >= packedSizes.size()) {
+            continue;
+          }
+
+          const uint32_t oldOffset = packedOffsets[i];
+          const uint32_t size = packedSizes[i];
+          if (oldOffset > packedBlob.size() ||
+              size > packedBlob.size() - oldOffset) {
+            continue;
+          }
+
+          newIds.push_back(elementId);
+          newOffsets.push_back(offset);
+          newSizes.push_back(size);
+          newBlob.insert(newBlob.end(), packedBlob.begin() + oldOffset,
+                         packedBlob.begin() + oldOffset + size);
+          offset += size;
+        }
+
+        packedIds = std::move(newIds);
+        packedOffsets = std::move(newOffsets);
+        packedSizes = std::move(newSizes);
+        packedBlob = std::move(newBlob);
+        deduplicatePackedBlob();
+      }
       packedIndexById.clear();
       packedDenseIndexById.clear();
       packedIndexReady = false;
@@ -1014,7 +1257,43 @@ class SparseVector {
     forceDecodedReads = true;
   }
 
+  // The parent the next archive load filters by, as setParent() does after it.
+  template <typename U>
+  void setLoadParent(const SparseVector<U> *parent) {
+    loadParent = parent;
+    loadParentHasData = [](const void *p, uint32_t elementId) {
+      return static_cast<const SparseVector<U> *>(p)->hasData(elementId);
+    };
+  }
+
   friend class cereal::access;
+
+  template <class Archive>
+  static void readFromArchive(void *archive, uint8_t *dst, size_t size) {
+    (*static_cast<Archive *>(archive))(cereal::binary_data(dst, size));
+  }
+
+  // The packed blob, in the layout of a std::vector<uint8_t> in the archive.
+  template <class Archive>
+  void loadPackedBlob(Archive &ar) {
+    cereal::size_type size = 0;
+    ar(cereal::make_size_tag(size));
+    keptAtLoad = false;
+    if (loadParent) {
+      std::vector<uint8_t> keep(packedIds.size());
+      for (size_t i = 0; i < packedIds.size(); ++i) {
+        keep[i] = loadParentHasData(loadParent, packedIds[i]) ? 1 : 0;
+      }
+      const serum_accel::PackedPayloads payloads{packedIds, packedOffsets,
+                                                 packedSizes, packedBlob};
+      keptAtLoad = serum_accel::LoadPackedPayloads(
+          payloads, keep.data(), size, &readFromArchive<Archive>, &ar);
+    }
+    if (!keptAtLoad) {
+      packedBlob.resize(static_cast<size_t>(size));
+      ar(cereal::binary_data(packedBlob.data(), static_cast<size_t>(size)));
+    }
+  }
 
   template <class Archive>
   void serialize(Archive &ar) {
@@ -1031,6 +1310,9 @@ class SparseVector {
       return;
     }
 
+    keptAtLoad = false;
+    deltaBases.clear();
+    elementsStamp = NextSparseVectorStamp();
     if (sparse_vector_serialization::IsLegacyLoadExpected()) {
       ar(index, data, noData, elementSize, decompBuffer, useIndex,
          useCompression);
@@ -1046,13 +1328,15 @@ class SparseVector {
       decompBuffer.clear();
       clearPacked();
       if (!useIndex) {
-        ar(packedIds, packedOffsets, packedSizes, packedBlob);
+        ar(packedIds, packedOffsets, packedSizes);
+        loadPackedBlob(ar);
         // v6 cROMc files are guaranteed to have sorted packedIds from save-time
         // enforcement. Only ensure indices are built, don't repair (saves RAM
         // on resource-constrained devices).
         ensurePackedIndex();
       }
     }
+    loadParent = nullptr;
 
     // Clear cache
     lastPayloadId = UINT32_MAX;

@@ -16,6 +16,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <random>
@@ -4062,6 +4063,7 @@ static std::string BuildConcentratePathFromSourcePath(const char* filename) {
 }
 
 static bool SaveConcentrateTo(const std::string& concentratePath);
+static void EncodeSceneFrameDifferences(void);
 
 bool Serum_SaveConcentrate(const char* filename) {
   return SaveConcentrateTo(BuildConcentratePathFromSourcePath(filename));
@@ -4079,8 +4081,41 @@ static bool SaveConcentrateTo(const std::string& concentratePath) {
     g_serumData.sceneGenerator->setDepth(g_serumData.nocolors == 16 ? 4 : 2);
   }
   BuildFrameLookupVectors();
+  EncodeSceneFrameDifferences();
 
   return g_serumData.SaveToFile(concentratePath.c_str());
+}
+
+// Each frame of a scene group after the first is stored as the difference to
+// the frame before it in the group, on each plane where that makes the stored
+// frames smaller and both have the plane. The values read back are the same.
+static void EncodeSceneFrameDifferences(void) {
+  // (scene ID, group) -> frame index -> frame ID, from the keys of
+  // MakeSceneTripletKey().
+  std::map<uint32_t, std::map<uint16_t, uint32_t>> groups;
+  for (const auto& entry : g_serumData.sceneFrameIdByTriplet) {
+    groups[static_cast<uint32_t>(entry.first >> 16)]
+          [static_cast<uint16_t>(entry.first & 0xffff)] = entry.second;
+  }
+  // (frame, the frame before it) for each plane, in playback order.
+  std::vector<std::pair<uint32_t, uint32_t>> original, extra;
+  for (const auto& group : groups) {
+    const std::map<uint16_t, uint32_t>& frames = group.second;
+    for (auto it = frames.begin(); it != frames.end(); ++it) {
+      const auto next = std::next(it);
+      if (next == frames.end() || next->first != it->first + 1) continue;
+      const uint32_t base = it->second;
+      const uint32_t frame = next->second;
+      if (frame >= g_serumData.nframes || base >= g_serumData.nframes) continue;
+      original.emplace_back(frame, base);
+      if (g_serumData.isextraframe.hasData(frame) &&
+          g_serumData.isextraframe.hasData(base)) {
+        extra.emplace_back(frame, base);
+      }
+    }
+  }
+  g_serumData.cframes_v2.storeAsDifferences(original);
+  g_serumData.cframes_v2_extra.storeAsDifferences(extra);
 }
 
 // Allocate the per-frame working buffers the v2 render path needs.

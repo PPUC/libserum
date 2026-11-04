@@ -505,14 +505,57 @@ class SerumData {
     }
   }
 
+  // The parents the archive load filters by (setParent() below), known to each
+  // vector before it is read.
+  void SetLoadParents() {
+    cframes_v2_extra.setLoadParent(&isextraframe);
+    dynamasks_extra.setLoadParent(&isextraframe);
+    dynamasks_extra_active.setLoadParent(&isextraframe);
+    dyna4cols_v2_extra.setLoadParent(&isextraframe);
+    spritemask_extra.setLoadParent(&isextrasprite);
+    spritemask_extra_opaque.setLoadParent(&isextrasprite);
+    spritecolored_extra.setLoadParent(&isextrasprite);
+    colorrotations_v2_extra.setLoadParent(&isextraframe);
+    framespriteBB.setLoadParent(&framesprites);
+    backgroundframes_v2_extra.setLoadParent(&isextrabackground);
+    backgroundmask.setLoadParent(&backgroundIDs);
+    backgroundmask_extra.setLoadParent(&backgroundIDs);
+    dynashadowsdir_extra.setLoadParent(&isextraframe);
+    dynashadowscol_extra.setLoadParent(&isextraframe);
+    dynasprite4cols_extra.setLoadParent(&isextraframe);
+    dynaspritemasks_extra.setLoadParent(&isextraframe);
+    dynaspritemasks_extra_active.setLoadParent(&isextrasprite);
+    backgroundBB.setLoadParent(&backgroundIDs);
+  }
+
   template <class Archive>
   void serialize(Archive &ar) {
     ar(rname, SerumVersion, fwidth, fheight, fwidth_extra, fheight_extra,
        nframes, nocolors, nccolors, ncompmasks, nmovmasks, nsprites,
-       nbackgrounds, is256x64, hashcodes, shapecompmode, compmaskID, movrctID,
-       compmasks, movrcts, cpal, isextraframe, cframes, cframes_v2,
-       cframes_v2_extra, dynamasks, dynamasks_extra, dyna4cols, dyna4cols_v2,
-       dyna4cols_v2_extra);
+       nbackgrounds, is256x64);
+    // Whether the extra plane is dropped on load, known from the header. Its
+    // indices are emptied as they are read, before the data that depends on
+    // them.
+    bool dropExtraPlane = false;
+    if constexpr (!Archive::is_saving::value) {
+      // An is256x64 project is rendered from its extra-plane data only, and a
+      // 32p-only request with FLAG_REQUEST_FALLBACK gets that plane too, so
+      // the data has to stay for it.
+      const bool nativePlaneFallback =
+          is256x64 && (m_loadFlags & FLAG_REQUEST_32P_FRAMES) &&
+          (m_loadFlags & FLAG_REQUEST_FALLBACK);
+      dropExtraPlane =
+          SERUM_V2 == SerumVersion &&
+          ((fheight == 32 && !(m_loadFlags & FLAG_REQUEST_64P_FRAMES) &&
+            !nativePlaneFallback) ||
+           (fheight == 64 && !(m_loadFlags & FLAG_REQUEST_32P_FRAMES)));
+      SetLoadParents();
+    }
+    ar(hashcodes, shapecompmode, compmaskID, movrctID, compmasks, movrcts, cpal,
+       isextraframe);
+    if (dropExtraPlane) isextraframe.clearIndex();
+    ar(cframes, cframes_v2, cframes_v2_extra, dynamasks, dynamasks_extra,
+       dyna4cols, dyna4cols_v2, dyna4cols_v2_extra);
     // 16-bit sprite IDs from concentrate version 10 on, 8 bit before.
     if (concentrateFileVersion >= 10) {
       ar(framesprites);
@@ -524,16 +567,18 @@ class SerumData {
       ar(legacy);
       WidenFrameSprites(legacy);
     }
-    ar(spritedescriptionso, spritedescriptionsc, isextrasprite, spriteoriginal,
-       spritemask_extra, spritecolored, spritecolored_extra, activeframes,
-       colorrotations, colorrotations_v2, colorrotations_v2_extra,
+    ar(spritedescriptionso, spritedescriptionsc, isextrasprite);
+    if (dropExtraPlane) isextrasprite.clearIndex();
+    ar(spriteoriginal, spritemask_extra, spritecolored, spritecolored_extra,
+       activeframes, colorrotations, colorrotations_v2, colorrotations_v2_extra,
        spritedetdwords, spritedetdwordpos, spritedetareas, triggerIDs,
-       framespriteBB, isextrabackground, backgroundframes, backgroundframes_v2,
-       backgroundframes_v2_extra, backgroundIDs, backgroundBB, backgroundmask,
-       backgroundmask_extra, dynashadowsdir, dynashadowscol,
-       dynashadowsdir_extra, dynashadowscol_extra, dynasprite4cols,
-       dynasprite4cols_extra, dynaspritemasks, dynaspritemasks_extra,
-       sprshapemode);
+       framespriteBB, isextrabackground);
+    if (dropExtraPlane) isextrabackground.clearIndex();
+    ar(backgroundframes, backgroundframes_v2, backgroundframes_v2_extra,
+       backgroundIDs, backgroundBB, backgroundmask, backgroundmask_extra,
+       dynashadowsdir, dynashadowscol, dynashadowsdir_extra,
+       dynashadowscol_extra, dynasprite4cols, dynasprite4cols_extra,
+       dynaspritemasks, dynaspritemasks_extra, sprshapemode);
 
     if constexpr (Archive::is_saving::value) {
       if (concentrateFileVersion >= 6) {
@@ -718,21 +763,6 @@ class SerumData {
                           : std::vector<SceneData>{});
       }
     } else {
-      // An is256x64 project is rendered from its extra-plane data only, and a
-      // 32p-only request with FLAG_REQUEST_FALLBACK gets that plane too, so
-      // the data has to stay for it.
-      const bool nativePlaneFallback =
-          is256x64 && (m_loadFlags & FLAG_REQUEST_32P_FRAMES) &&
-          (m_loadFlags & FLAG_REQUEST_FALLBACK);
-      if (SERUM_V2 == SerumVersion &&
-          ((fheight == 32 && !(m_loadFlags & FLAG_REQUEST_64P_FRAMES) &&
-            !nativePlaneFallback) ||
-           (fheight == 64 && !(m_loadFlags & FLAG_REQUEST_32P_FRAMES)))) {
-        isextraframe.clearIndex();
-        isextrabackground.clearIndex();
-        isextrasprite.clearIndex();
-      }
-
       cframes_v2_extra.setParent(&isextraframe);
       dynamasks_extra.setParent(&isextraframe);
       dynamasks_extra_active.setParent(&isextraframe);
@@ -818,6 +848,15 @@ class SerumData {
       if (concentrateFileVersion >= 17) {
         ar(spriteOffsets);
       }
+      // The frames stored as the difference to another frame (scene frames,
+      // EncodeSceneFrameDifferences()).
+      if (concentrateFileVersion >= 18) {
+        ar(cframes_v2.differenceBases(), cframes_v2_extra.differenceBases());
+      } else if (cframes_v2.hasDifferences() ||
+                 cframes_v2_extra.hasDifferences()) {
+        throw std::runtime_error(
+            "frames stored as differences need concentrate version 18");
+      }
     } else {
       if (concentrateFileVersion >= 8) {
         ar(scalingAlgorithm, shadowOffsetMode);
@@ -885,6 +924,12 @@ class SerumData {
         ar(spriteOffsets);
       } else {
         spriteOffsets.clear();
+      }
+      if (concentrateFileVersion >= 18) {
+        std::vector<std::pair<uint32_t, uint32_t>> bases, basesExtra;
+        ar(bases, basesExtra);
+        cframes_v2.setDifferenceBases(bases);
+        cframes_v2_extra.setDifferenceBases(basesExtra);
       }
     }
   }

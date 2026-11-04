@@ -183,6 +183,21 @@ Vector policy currently used in `SerumData`:
   include / `>0` exclude) and therefore do not need separate transparency
   sidecar vectors.
 
+Elements stored as differences:
+- An LZ4-compressed vector can store an element as the XOR of its values with
+  another element's (`storeAsDifferences()`, `setDifferenceBases()`). Reading
+  it (`operator[]`) applies the chain of bases until an element whose values a
+  cache holds, or one stored whole, and caches the result like any decoded
+  element; what callers read is unchanged.
+- `storeAsDifferences()` stores an element as a difference only where that
+  makes the payloads smaller, counting a payload another element shares as
+  free; it never stores values equal to the no-data values, never twice, and
+  never on a base that leads back to the element. `setDifferenceBases()` refuses
+  bases that do. `set()` stores an element whole again.
+- Each vector has a stamp (`NextSparseVectorStamp()`) that changes whenever its
+  elements may have changed. Resolved elements are reported to and looked up
+  through the internal helper interface with it.
+
 ## Load flow
 Entry point: `Serum_Load(altcolorpath, romname, flags)`.
 
@@ -1459,7 +1474,10 @@ Finished-scene default behavior:
   scene frame is incomplete/unavailable.
 
 ## cROMc persistence
-Current concentrate version: **17**. Version 17 adds the sprite offsets after
+Current concentrate version: **18**. Version 18 adds, after the sprite
+offsets, the frames of `cframes_v2` and of `cframes_v2_extra` stored as the
+difference to another frame, as (frame ID, base frame ID) pairs per plane (see
+"SparseVector storage and compression"). Version 17 adds the sprite offsets after
 the scene variants (see "Sprite offsets"). Version 16 adds the scene variants
 (pairs of scene ID and base scene ID) after the frame triggers (see "Scene
 playback and options"). Version 15 adds the PUP and the
@@ -1528,6 +1546,14 @@ Stored in v6:
 - Sparse vectors in packed sparse layout.
 - Normalized sentinel vectors plus sidecar flag vectors for transparency and
   dynamic-zone activity.
+- Scene frames as differences (version 18): `Serum_SaveConcentrate()` runs
+  `EncodeSceneFrameDifferences()` after `BuildFrameLookupVectors()`. Each frame
+  of a scene group after the first is stored as the difference to the frame
+  before it in the group (`sceneFrameIdByTriplet`), on each plane where that
+  makes the stored frames smaller; on the extra plane only where both frames
+  have `isextraframe`. The first frame of a group is stored whole. Saving with
+  `concentrateFileVersion` below 18 fails while frames are stored as
+  differences. A cROM never holds differences.
 
 Backward compatibility:
 - v5 files are loadable.
