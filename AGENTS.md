@@ -1383,6 +1383,19 @@ steps, so text in front of a background movie flickered
 (`upscale/background_scene_keeps_text_shape`). Not for an `is256x64` project,
 whose ROM frame is not laid out as the plane is.
 
+Where a corner of the scaled layer selects a pixel outside the layer, the HD
+content there stands, and where the HD plane is black the layer keeps its own
+pixel. Behind a background scene that question is not asked of the plane, which
+holds the scene's picture of the step or the step before's output: where the
+selected pixel is one the scene shows (`upscaleSceneMask`), the corner rounds
+to the scene in every step. Asking the plane let a dark movie decide, and the
+corners of text in a dynamic zone over a frame with a black HD picture
+flickered (`upscale/background_scene_rounds_zone_corners`). The colorize call
+that starts the scene colorizes the scene's first frame inside the frame's own
+call; the inner call gives the outer one its `romFrameForUpscale` and
+`upscaleRomOverride` back when it returns, so the frame's own upscale is judged
+as in the steps after it.
+
 Because libserum applies the rule itself, it asks libframeutil to select with
 plain **`Scale2x`** (`selectionAlgorithm` in `UpscaleOriginalPlaneIntoExtra()`).
 libframeutil's own `Scale2xPreserve` decides first and returns the centre

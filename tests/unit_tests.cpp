@@ -4233,6 +4233,88 @@ static void Test_BackgroundSceneKeepsTextShape(void) {
   Unload();
 }
 
+// The same with the text in a dynamic zone of its own, the rest of the frame
+// static and unlit: a corner Scale2x rounds then selects a pixel outside the
+// zone. Where the HD frame holds content there, the content stands, and where
+// it is black the zone keeps its own pixel (a speck along every rounded edge
+// otherwise). Behind a background scene the plane held the scene's picture of
+// the step, or the step before's output, so the corner rounded where the scene
+// was lit and stayed square where it was black: the text flickered at its
+// corners while a dark movie played. The corner now rounds to the scene in
+// every step. The first colorize, which starts the scene inside its own call,
+// scales the same as the steps after it.
+static void Test_BackgroundSceneRoundsZoneCorners(void) {
+  using namespace n256;
+  const char* const csv = "7,1,100,0,1,1,1,0,0,4\n";  // looping, as background
+  Synth s;
+  s.is256x64 = false;
+  s.compmasks.assign((size_t)s.ncompmasks * kOPx, 0);
+  s.compmaskid.assign(s.nframes, 255);
+  s.framesprites.assign(s.framesprites.size(), 255);
+  s.isextraframe.assign(s.nframes, 0);
+  {
+    const std::filesystem::path dir = Dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "scene.csv").string();
+    {
+      std::ofstream out(path);
+      out << csv;
+    }
+    SceneGenerator generator;
+    CHECK(generator.parseCSV(path));
+    generator.setDepth(2);
+    memset(s.Native(kScene), 0, kNPx);
+    CHECK_EQ(generator.generateFrame(7, 0, s.Native(kScene), 1, true), 0xffff);
+  }
+  // A solid block with its top left corner at (bx, by), the only dynamic zone
+  // of the game frame, which starts scene 7 and shows it behind everything
+  // unlit. The scene is black around that corner.
+  const uint32_t bx = 40, by = 10;
+  memset(s.Native(kDynamic), 0, kNPx);
+  memset(&s.dynamasks[(size_t)kDynamic * kOPx], 255, kOPx);
+  for (uint32_t y = by; y < by + 6; ++y)
+    for (uint32_t x = bx; x < bx + 6; ++x) {
+      s.Native(kDynamic)[y * kOW + x] = 3;
+      s.dynamasks[(size_t)kDynamic * kOPx + y * kOW + x] = 0;
+    }
+  for (uint32_t y = by - 1; y <= by; ++y)
+    for (uint32_t x = bx - 1; x <= bx; ++x)
+      s.cframes[(size_t)kScene * kOPx + y * kOW + x] = 0;
+  s.bgids[kDynamic] = 0;
+  memset(&s.bgmask[(size_t)kDynamic * kOPx], 1, kOPx);
+  s.triggers[kDynamic] = 7;
+  // The game frame has an HD picture, black: the zone is what covers it.
+  s.isextraframe[kDynamic] = 1;
+  std::fill_n(&s.cframesx[(size_t)kDynamic * kNPx], kNPx, (uint16_t)0);
+  memset(&s.bgmaskx[(size_t)kDynamic * kNPx], 1, kNPx);
+  const uint16_t kText = (uint16_t)(0x0100 + 3);
+
+  if (!Load(s, FLAG_REQUEST_64P_FRAMES, false, csv)) return;
+  std::vector<uint8_t> game(s.Native(kDynamic), s.Native(kDynamic) + kOPx);
+  game.shrink_to_fit();
+  // The outer quadrant of the corner, and one inside the block.
+  const auto quadrant = [](uint32_t x, uint32_t y) {
+    return mySerum.frame64[(size_t)(y * 2) * (kOW * 2) + x * 2];
+  };
+  Serum_Colorize(game.data());
+  CHECK(g_serumData.sceneGenerator->isActive());
+  CHECK(quadrant(bx, by) != kText);
+  CHECK_EQ(quadrant(bx + 1, by + 1), kText);
+  int steps = 0;
+  for (int i = 0; i < 4; ++i) {
+    sceneNextFrameAtMs = 0;
+    const uint32_t r = Serum_Rotate();
+    if (!(r & (FLAG_RETURNED_V2_ROTATED32 | FLAG_RETURNED_V2_ROTATED64)))
+      continue;
+    ++steps;
+    CHECK(quadrant(bx, by) != kText);
+    CHECK_EQ(quadrant(bx + 1, by + 1), kText);
+  }
+  CHECK(steps > 0);
+  Unload();
+}
+
 // A colorization loaded after another starts with no scene running and no
 // trigger reported. A background scene the last one was playing used to stay
 // "running": the first frame of the new load that fires the same trigger was
@@ -6079,6 +6161,8 @@ static const TestCase kTests[] = {
      Test_SourceBuildsTheCromsColorization},
     {"upscale/background_scene_keeps_text_shape",
      Test_BackgroundSceneKeepsTextShape},
+    {"upscale/background_scene_rounds_zone_corners",
+     Test_BackgroundSceneRoundsZoneCorners},
     {"scene/load_forgets_the_running_scene", Test_LoadForgetsTheRunningScene},
     {"scene/steps_back_and_forth", Test_SceneStepsBackAndForth},
     {"load/unused_extra_dynamic_data_is_dropped",

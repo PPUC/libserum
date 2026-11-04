@@ -3713,6 +3713,15 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       // lost at that one pixel, which is what a square edge against the
       // artwork looks like, and nothing else changes where the HD frame does
       // hold content.
+      //
+      // Behind a background scene, though, the plane holds the scene's picture
+      // of the step, or the output of the step before: black there or not is
+      // the scene's, and changes from step to step. Where the selection lands
+      // on a pixel the scene shows, the corner rounds to the scene in every
+      // step, as it does on black (see upscaleSceneMask).
+      if (coverageProtectsHd && scaledLayerCoverage[src] == 0 && sceneBehind &&
+          upscaleSceneMask[src])
+        continue;
       if (coverageProtectsHd && scaledLayerCoverage[src] == 0) {
         // A bounded pass is a sprite compositing its own region. What stands
         // there is not authored HD content but this plane's own earlier
@@ -8203,14 +8212,20 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   // one without going through the palette. Valid for this call only; the
   // upscale runs inside it, including once per sprite and once after the
   // sprite loop.
-  romFrameForUpscale = frame;
-  upscaleRomOverride = NULL;
+  //
+  // A call nested in another (the scene a frame starts, colorized inside the
+  // frame's call) gives the outer call's frame back when it returns: the outer
+  // call's upscale still has to judge on it.
   struct RomFrameScope {
+    const uint8_t* const rom = romFrameForUpscale;
+    const uint8_t* const override = upscaleRomOverride;
     ~RomFrameScope() {
-      romFrameForUpscale = NULL;
-      upscaleRomOverride = NULL;
+      romFrameForUpscale = rom;
+      upscaleRomOverride = override;
     }
   } romFrameScope;
+  romFrameForUpscale = frame;
+  upscaleRomOverride = NULL;
   bool backgroundScenePrimedThisCall = false;
   if (g_profileDynamicHotPaths && !sceneFrameRequested &&
       knownFrameId >= g_serumData.nframes) {
