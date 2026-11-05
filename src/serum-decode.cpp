@@ -21,6 +21,7 @@
 #include <optional>
 #include <random>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -601,6 +602,18 @@ static void ForceNormalFrameRefreshAfterSceneEnd(void);
 static void ResetNotice(void);
 // What the signature of the loaded cROMc says (see "Signed colorizations").
 static serum_signing::CheckResult g_authenticity;
+static void LogColorizationText(void);
+// How much longer Serum_Load() takes for an unsigned cROMc of the current
+// version (SERUM_UNSIGNED_LOAD_DELAY_MS, 30 s unless the build sets another),
+// and how it waits; tests replace both.
+#ifndef SERUM_UNSIGNED_LOAD_DELAY_MS
+#define SERUM_UNSIGNED_LOAD_DELAY_MS 30000
+#endif
+static uint32_t g_unsignedLoadDelayMs = SERUM_UNSIGNED_LOAD_DELAY_MS;
+static void WaitMs(uint32_t ms) {
+  std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+static void (*g_unsignedLoadDelay)(uint32_t ms) = WaitMs;
 static void LogAuthenticity(void);
 static bool ValidateLoadedGeometry(bool isV2, const char* sourceTag);
 uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested);
@@ -2006,6 +2019,9 @@ uint32_t calc_crc32(uint8_t* source, uint8_t mask, uint32_t n, uint8_t Shape) {
 //            colorization, a byte per pixel): the frame libserum shows when
 //            the cROMc was modified after it was signed (see
 //            SerumData::noticeFrameId). It is never identified.
+//   colorization text: uint32 byte count, then UTF-8 text: the author, the
+//            license and the terms of use, stored readable in the cROMc
+//            header (SerumData::colorizationText).
 // Bytes after these are ignored, so fields can be appended to the payload.
 static constexpr uint32_t kCromSettingsMagic = 0x31584353;  // "SCX1"
 static constexpr uint32_t kCromSettingsScenes = 1;
@@ -2020,6 +2036,7 @@ static constexpr uint32_t kCromSettingsFrameTriggers = 64;
 static constexpr uint32_t kCromSettingsSceneVariants = 128;
 static constexpr uint32_t kCromSettingsSpriteOffsets = 256;
 static constexpr uint32_t kCromSettingsNoticeFrame = 512;
+static constexpr uint32_t kCromSettingsColorizationText = 1024;
 static constexpr uint32_t kCromSettingsSpriteOffsetBytes = 10;
 static constexpr uint32_t kCromSettingsLightEffectBytes = 24;
 static constexpr uint32_t kCromSettingsLightActionBytes = 8;
@@ -2279,6 +2296,15 @@ static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
     g_serumData.noticeOriginal.assign(payload.begin() + offset,
                                       payload.begin() + offset + pixels);
     offset += pixels;
+  }
+  if (contents & kCromSettingsColorizationText) {
+    uint32_t bytes = 0;
+    if (!take(&bytes, 4) || bytes > SerumData::kMaxColorizationTextBytes ||
+        bytes > payload.size() - offset)
+      return false;
+    g_serumData.colorizationText.assign(
+        reinterpret_cast<const char*>(payload.data()) + offset, bytes);
+    offset += bytes;
   }
   return true;
 }
@@ -4314,7 +4340,18 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     FinishColorizationLoad(loadedFromConcentrate, false, loadTotalStart, 0.0,
                            cromcLoadMs, 0.0, 0.0);
     g_authenticity = serum_signing::CheckFile(pFoundFile->c_str());
+    LogColorizationText();
     LogAuthenticity();
+    // A cROMc of the current version comes from an editor that signs it: one
+    // without a signature had it removed, or comes from an author who does
+    // not sign. Either way it loads late.
+    if (g_serumData.concentrateFileVersion == SERUM_CONCENTRATE_VERSION &&
+        g_authenticity.authenticity == serum_signing::Authenticity::Unsigned &&
+        g_unsignedLoadDelayMs > 0) {
+      Log("The colorization is not signed: loading it takes %u seconds longer",
+          g_unsignedLoadDelayMs / 1000);
+      g_unsignedLoadDelay(g_unsignedLoadDelayMs);
+    }
     Log("Upscaling algorithm: %s (source=%s, extra plane: %s)",
         ScalingAlgorithmName(),
         g_serumData.concentrateFileVersion >= 8 ? "cROMc header" : "default",
@@ -7841,6 +7878,24 @@ static void DrawNoticeTextIfShowing(void) {
   if ((mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) && mySerum.width64)
     DrawNoticeText(mySerum.frame64, mySerum.rotationsinframe64, mySerum.width64,
                    64);
+}
+
+// Logs the colorization's text (author, license, terms), line by line.
+static void LogColorizationText(void) {
+  const std::string& text = g_serumData.colorizationText;
+  size_t start = 0;
+  while (start < text.size()) {
+    size_t end = text.find('\n', start);
+    if (end == std::string::npos) end = text.size();
+    if (end > start) Log("%s", text.substr(start, end - start).c_str());
+    start = end + 1;
+  }
+}
+
+SERUM_API const char* Serum_GetColorizationText(void) {
+  SERUM_API_GUARD_START("Serum_GetColorizationText")
+  return g_serumData.colorizationText.c_str();
+  SERUM_API_GUARD_END("Serum_GetColorizationText", "")
 }
 
 // Logs what the signature of a loaded cROMc says.

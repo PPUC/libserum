@@ -353,8 +353,11 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
   scene and its base, both scenes of the block, the base no variant. Last come
   the sprite offsets (`kCromSettingsSpriteOffsets`, 256; see "Sprite offsets").
   The notice frame (`kCromSettingsNoticeFrame`, 512; see "Signed
-  colorizations") comes last: a frame ID and the ROM frame it is colorized
-  from; a frame beyond the frames fails the load.
+  colorizations") follows: a frame ID and the ROM frame it is colorized
+  from; a frame beyond the frames fails the load. Last comes the
+  colorization's text (`kCromSettingsColorizationText`, 1024): its author,
+  license and terms of use as UTF-8, which the cROMc keeps readable in its
+  header.
   A block that is cut short or malformed fails the load.
 - Scenes from the block set `scenesFromColorization`, scaling settings set
   `scalingFromColorization` (also when the block holds zero scenes). Either
@@ -1465,35 +1468,36 @@ removed. `src/SerumSigning.h` documents the formats.
 - The notice starts and ends only with a call from the host: the outermost
   `Serum_ColorizeWithMetadatav2()` call that is not a scene frame
   (`NoticeState::colorizeDepth`; scenes render through nested calls).
+- An unsigned cROMc of the current version loads late: `Serum_Load()` waits
+  `SERUM_UNSIGNED_LOAD_DELAY_MS` (30 s, a CMake cache variable of that name)
+  after loading it, through `g_unsignedLoadDelay`. A cROMc of libserum 2.8.2
+  and a modified one do not wait. Only `Serum_Load()` waits: an authoring
+  tool's `Serum_LoadFromSource()` does not. A build that loads cROMc files to
+  test them (libserum-accel's, an editor's tests) may set the delay to 0; the
+  unit tests record it instead of waiting.
+- `Serum_Load()` logs the colorization's text line by line;
+  `Serum_GetColorizationText()` returns it.
 - `tools/serum-signing` makes keys and certificates: `keygen`, `public`,
   `certify` (a root key certifies an issuer or an author, an issuer an
   author), `show` and `check`.
 
 ## cROMc persistence
-Current concentrate version: **19**. Version 19 adds, after the frames stored
-as differences, the notice frame (`noticeFrameId`, `noticeOriginal`; see
-"Signed colorizations"); a signed cROMc of version 19 on ends with its
-signature block, which `LoadFromFile()` leaves out of the compressed data.
-Version 18 adds, after the sprite
-offsets, the frames of `cframes_v2` and of `cframes_v2_extra` stored as the
-difference to another frame, as (frame ID, base frame ID) pairs per plane (see
-"SparseVector storage and compression"). Version 17 adds the sprite offsets after
-the scene variants (see "Sprite offsets"). Version 16 adds the scene variants
-(pairs of scene ID and base scene ID) after the frame triggers (see "Scene
-playback and options"). Version 15 adds the PUP and the
-monochrome trigger of each frame (`pupTriggerIDs`, `monochromeTriggerIDs`)
-after the DOF events (see "Frame triggers (v2)"); an older v2 cROMc has its
-triggers split on load. Version 14 adds the DOF events after the
-scene frames (see "DOF events"). Version 13 adds
-`sceneFramesFromColorization` and the scene frames of the settings block after
-the original-only dynamic sets (see "cROM settings block"). Version 12 adds the original-only dynamic
-sets after the lights (see "Original-only dynamic sets"). Version 11 adds the
-speaker lights after
-the version 9 flags (see "Speaker lights"). Version 10 stores `framesprites` and
-`spriteCandidateIds` with 16-bit sprite IDs and the slot count of the
-colorization (see "cROM format version, sprites per frame and sprite IDs").
-Version 9 adds `scenesFromColorization` and `scalingFromColorization` after
-the scaling settings of version 8 (see "cROM settings block").
+Current concentrate version: **20** (`SERUM_CONCENTRATE_VERSION`). libserum
+reads the current version and the versions libserum 2.8.2 wrote (up to 9,
+`SERUM_CONCENTRATE_VERSION_STABLE`; 6 was never stable and is refused). The
+development versions in between (10 to 19) are refused: they were written by
+unreleased 2.99.x builds, whose authors export the colorization again. So
+`SerumData::serialize()` knows two shapes only: up to 9, and the current one,
+which stores after the version 9 flags, in this order, the speaker lights, the
+original-only dynamic sets, the scene frames, the DOF events, the frame
+triggers, the scene variants, the sprite offsets, the frames stored as
+differences and the notice frame.
+
+The current version has the colorization's text (`colorizationText`, from the
+settings block; see "Signed colorizations") uncompressed in its header:
+`"CROM"`, uint16 version, uint32 text length, the UTF-8 text, uint32 original
+size, then the compressed archive. A signed cROMc ends with its signature
+block, which `LoadFromFile()` leaves out of the compressed data.
 
 `cROMc` stores the full Serum model. The format still has the fields of Serum
 v1 content, but a v1 cROMc is refused at load time: libserum plays Serum v2

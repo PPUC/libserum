@@ -107,6 +107,12 @@ offline against the root keys it carries and logs the result, which
   minutes. The notice is a frame the author designed for it, or, when there is
   none, the words "COLORIZATION MODIFIED" over the colorized frames.
 
+A `*.cROMc` of the current format that is not signed takes 30 seconds longer
+to load.
+
+The `*.cROMc` keeps the colorization's author, license and terms of use
+readable at its start (`Serum_GetColorizationText()` returns them).
+
 `tools/serum-signing` creates keys and certificates for the people who issue
 them.
 

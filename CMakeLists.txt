@@ -6,6 +6,10 @@ set(ARCH "x64" CACHE STRING "Arch")
 option(BUILD_SHARED "Option to build shared library" ON)
 option(BUILD_STATIC "Option to build static library" ON)
 option(ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan for Debug builds" OFF)
+# How much longer Serum_Load() takes for an unsigned cROMc of the current version. An authoring
+# tool that loads cROMc files only to test them may build with 0.
+set(SERUM_UNSIGNED_LOAD_DELAY_MS 30000 CACHE STRING
+    "Delay in ms when Serum_Load() loads an unsigned cROMc of the current version")
 set(SERUM_ACCEL_DIR "" CACHE PATH "Directory whose serum-accel.cmake names the sources to build instead of src/serum-accel-ref.cpp")
 
 message(STATUS "PLATFORM: ${PLATFORM}")
@@ -107,6 +111,8 @@ if(ENABLE_SANITIZERS AND NOT (CMAKE_BUILD_TYPE STREQUAL "Debug" AND
       "'${CMAKE_BUILD_TYPE}' and PLATFORM='${PLATFORM}'). Nothing will be "
       "instrumented.")
 endif()
+
+add_compile_definitions(SERUM_UNSIGNED_LOAD_DELAY_MS=${SERUM_UNSIGNED_LOAD_DELAY_MS})
 
 set(SERUM_SOURCES
    src/serum-decode.cpp

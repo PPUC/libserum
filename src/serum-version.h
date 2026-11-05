@@ -2,8 +2,12 @@
 
 #define SERUM_VERSION_MAJOR 2         // X Digits
 #define SERUM_VERSION_MINOR 99        // Max 2 Digits
-#define SERUM_VERSION_PATCH 14        // Max 2 Digits
-#define SERUM_CONCENTRATE_VERSION 19  // Max 2 Digits
+#define SERUM_VERSION_PATCH 15        // Max 2 Digits
+#define SERUM_CONCENTRATE_VERSION 20  // Max 2 Digits
+// The newest cROMc version libserum 2.8.2 writes. A cROMc of this version or
+// older is read; the development versions after it, up to
+// SERUM_CONCENTRATE_VERSION, are not.
+#define SERUM_CONCENTRATE_VERSION_STABLE 9
 // The newest cROM format this library reads (the header's format version,
 // header revision 21 on; 0 for a cROM without it). 1: up to
 // MAX_SPRITES_PER_FRAME sprites per frame, the count in the header, 16-bit

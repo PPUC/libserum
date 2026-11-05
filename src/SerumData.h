@@ -328,6 +328,12 @@ class SerumData {
   // the ROM frame it is colorized from (NativeFramePixels() bytes). Persisted
   // from concentrate version 19.
   static constexpr uint32_t kNoNoticeFrame = 0xffffffffu;
+  // What the authoring tool says about the colorization to anyone who opens
+  // the cROMc: its author, its license and the terms of use, as UTF-8 text.
+  // Stored uncompressed in the cROMc header of the current version, so that
+  // it can be read without libserum (SaveToFile()). Not part of the archive.
+  std::string colorizationText;
+  static constexpr uint32_t kMaxColorizationTextBytes = 1u << 20;
   uint32_t noticeFrameId = kNoNoticeFrame;
   std::vector<uint8_t> noticeOriginal;
   bool IsNoticeFrame(uint32_t frameId) const {
@@ -822,6 +828,10 @@ class SerumData {
       }
     }
 
+    // A cROMc of libserum 2.8.2 or earlier (version 9 and below) ends here,
+    // or after the scaling settings and flags of versions 8 and 9. The
+    // current version (kConcentrateVersionCurrent) has everything below; the
+    // development versions between the two are not read (LoadFromFile()).
     if constexpr (Archive::is_saving::value) {
       if (concentrateFileVersion >= 8) {
         ar(scalingAlgorithm, shadowOffsetMode);
@@ -829,23 +839,9 @@ class SerumData {
       if (concentrateFileVersion >= 9) {
         ar(scenesFromColorization, scalingFromColorization);
       }
-      if (concentrateFileVersion >= 11) {
+      if (concentrateFileVersion >= 10) {
         ar(hasLights, lightEffects, lightFrames);
         for (SerumLightAction &action : lightDefaults) ar(action);
-      }
-      if (concentrateFileVersion >= 12) {
-        ar(originalOnlySets);
-      }
-      if (concentrateFileVersion >= 13) {
-        ar(sceneFramesFromColorization, sceneFrames);
-      }
-      if (concentrateFileVersion >= 14) {
-        ar(dofFrames);
-      }
-      if (concentrateFileVersion >= 15) {
-        ar(pupTriggerIDs, monochromeTriggerIDs);
-      }
-      if (concentrateFileVersion >= 16) {
         std::vector<std::pair<uint16_t, uint16_t>> sceneBases;
         if (sceneGenerator) {
           for (const SceneData &scene : sceneGenerator->getSceneData()) {
@@ -855,22 +851,17 @@ class SerumData {
             }
           }
         }
-        ar(sceneBases);
-      }
-      if (concentrateFileVersion >= 17) {
-        ar(spriteOffsets);
-      }
-      // The frames stored as the difference to another frame (scene frames,
-      // EncodeSceneFrameDifferences()).
-      if (concentrateFileVersion >= 18) {
-        ar(cframes_v2.differenceBases(), cframes_v2_extra.differenceBases());
+        // The frames stored as the difference to another frame (scene
+        // frames, EncodeSceneFrameDifferences()).
+        ar(originalOnlySets, sceneFramesFromColorization, sceneFrames,
+           dofFrames, pupTriggerIDs, monochromeTriggerIDs, sceneBases,
+           spriteOffsets, cframes_v2.differenceBases(),
+           cframes_v2_extra.differenceBases(), noticeFrameId, noticeOriginal);
       } else if (cframes_v2.hasDifferences() ||
                  cframes_v2_extra.hasDifferences()) {
         throw std::runtime_error(
-            "frames stored as differences need concentrate version 18");
-      }
-      if (concentrateFileVersion >= 19) {
-        ar(noticeFrameId, noticeOriginal);
+            "frames stored as differences need the current concentrate "
+            "version");
       }
     } else {
       if (concentrateFileVersion >= 8) {
@@ -893,65 +884,38 @@ class SerumData {
         scenesFromColorization = false;
         scalingFromColorization = false;
       }
-      if (concentrateFileVersion >= 11) {
+      if (concentrateFileVersion >= 10) {
         ar(hasLights, lightEffects, lightFrames);
         for (SerumLightAction &action : lightDefaults) ar(action);
-      } else {
-        hasLights = false;
-        lightEffects.clear();
-        lightFrames.clear();
-        for (SerumLightAction &action : lightDefaults) action = {};
-      }
-      if (concentrateFileVersion >= 12) {
-        ar(originalOnlySets);
-      } else {
-        originalOnlySets.clear();
-      }
-      if (concentrateFileVersion >= 13) {
-        ar(sceneFramesFromColorization, sceneFrames);
-      } else {
-        sceneFramesFromColorization = false;
-        sceneFrames.clear();
-      }
-      if (concentrateFileVersion >= 14) {
-        ar(dofFrames);
-      } else {
-        dofFrames.clear();
-      }
-      if (concentrateFileVersion >= 15) {
-        ar(pupTriggerIDs, monochromeTriggerIDs);
-      } else {
-        pupTriggerIDs.clear();
-        monochromeTriggerIDs.clear();
-        if (SerumVersion == SERUM_V2) SplitFrameTriggers();
-      }
-      if (concentrateFileVersion >= 16) {
         std::vector<std::pair<uint16_t, uint16_t>> sceneBases;
-        ar(sceneBases);
+        std::vector<std::pair<uint32_t, uint32_t>> bases, basesExtra;
+        ar(originalOnlySets, sceneFramesFromColorization, sceneFrames,
+           dofFrames, pupTriggerIDs, monochromeTriggerIDs, sceneBases,
+           spriteOffsets, bases, basesExtra, noticeFrameId, noticeOriginal);
         for (const auto &base : sceneBases) {
           if (!sceneGenerator ||
               !sceneGenerator->setSceneBase(base.first, base.second)) {
             throw std::runtime_error("Invalid scene variant in cROMc");
           }
         }
-      }
-      if (concentrateFileVersion >= 17) {
-        ar(spriteOffsets);
-      } else {
-        spriteOffsets.clear();
-      }
-      if (concentrateFileVersion >= 18) {
-        std::vector<std::pair<uint32_t, uint32_t>> bases, basesExtra;
-        ar(bases, basesExtra);
         cframes_v2.setDifferenceBases(bases);
         cframes_v2_extra.setDifferenceBases(basesExtra);
-      }
-      if (concentrateFileVersion >= 19) {
-        ar(noticeFrameId, noticeOriginal);
         if (noticeFrameId != kNoNoticeFrame && noticeFrameId >= nframes) {
           throw std::runtime_error("Invalid notice frame in cROMc");
         }
       } else {
+        hasLights = false;
+        lightEffects.clear();
+        lightFrames.clear();
+        for (SerumLightAction &action : lightDefaults) action = {};
+        originalOnlySets.clear();
+        sceneFramesFromColorization = false;
+        sceneFrames.clear();
+        dofFrames.clear();
+        pupTriggerIDs.clear();
+        monochromeTriggerIDs.clear();
+        if (SerumVersion == SERUM_V2) SplitFrameTriggers();
+        spriteOffsets.clear();
         noticeFrameId = kNoNoticeFrame;
         noticeOriginal.clear();
       }

@@ -5179,7 +5179,7 @@ static void Test_ConcentrateStoresSceneFramesAsDifferences(void) {
   expectFrames();
 
   const std::string older = (n256::Dir() / "older.cROMc").string();
-  g_serumData.concentrateFileVersion = 17;
+  g_serumData.concentrateFileVersion = 9;
   CHECK(!g_serumData.SaveToFile(older.c_str()));
   n256::Unload();
 }
@@ -5992,6 +5992,102 @@ static void Test_SigningNoticeText(void) {
   n256::Unload();
 }
 
+// The delays Serum_Load() asked for since the test began (WaitMs() is
+// replaced in main()).
+static std::vector<uint32_t> g_loadDelays;
+static void RecordLoadDelay(uint32_t ms) { g_loadDelays.push_back(ms); }
+
+// A cROMc of the current version without a signature loads late; a signed
+// one, a modified one and a cROMc of libserum 2.8.2 (version 9) do not.
+static void Test_UnsignedLoadDelay(void) {
+  const signing::TestKeys keys;
+  n256::Synth s;
+  // As libserum is built by default; a build may set another delay.
+  struct DelayScope {
+    const uint32_t saved = g_unsignedLoadDelayMs;
+    DelayScope() { g_unsignedLoadDelayMs = 30000; }
+    ~DelayScope() { g_unsignedLoadDelayMs = saved; }
+  } delay;
+  g_loadDelays.clear();
+  CHECK(signing::Write(s.Serialize(), NULL));
+  CHECK(signing::Load() != NULL);
+  CHECK(g_loadDelays == std::vector<uint32_t>{30000});
+
+  const std::string cromc = signing::CromcPath().string();
+  g_serumData.concentrateFileVersion = 9;
+  CHECK(g_serumData.SaveToFile(cromc.c_str()));
+  Serum_Dispose();
+  g_loadDelays.clear();
+  CHECK(signing::Load() != NULL);
+  CHECK_EQ(g_serumData.concentrateFileVersion, 9);
+  CHECK(g_loadDelays.empty());
+  Serum_Dispose();
+
+  const Serum_Signing_Key key = keys.Key();
+  CHECK(signing::Write(s.Serialize(), &key));
+  CHECK(signing::Load() != NULL);
+  signing::DamageSignature();
+  Serum_Dispose();
+  CHECK(signing::Load() != NULL);
+  CHECK(g_loadDelays.empty());
+  n256::Unload();
+}
+
+// The colorization's text from the settings block is in the cROMc header as
+// it is, right after the version, and comes back with the load.
+static void Test_ColorizationText(void) {
+  n256::Synth s;
+  const std::string text =
+      "Serum colorization of n256tst\nAuthor: Someone\nLicense: CC BY-ND "
+      "4.0\n";
+  std::vector<uint8_t> payload;
+  const auto put = [&payload](const void* data, size_t bytes) {
+    const uint8_t* p = (const uint8_t*)data;
+    payload.insert(payload.end(), p, p + bytes);
+  };
+  const uint32_t contents = kCromSettingsColorizationText;
+  const uint32_t length = (uint32_t)text.size();
+  put(&contents, 4);
+  put(&length, 4);
+  put(text.data(), text.size());
+  std::vector<uint8_t> crom = s.Serialize();
+  const uint32_t magic = kCromSettingsMagic;
+  const uint32_t size = (uint32_t)payload.size();
+  crom.insert(crom.end(), (const uint8_t*)&magic, (const uint8_t*)&magic + 4);
+  crom.insert(crom.end(), (const uint8_t*)&size, (const uint8_t*)&size + 4);
+  crom.insert(crom.end(), payload.begin(), payload.end());
+
+  CHECK(signing::Write(crom, NULL));
+  std::ifstream in(signing::CromcPath(), std::ios::binary);
+  std::vector<char> head(10 + text.size());
+  in.read(head.data(), (std::streamsize)head.size());
+  CHECK(std::string(head.data(), 4) == "CROM");
+  CHECK(std::string(head.data() + 10, text.size()) == text);
+  CHECK(signing::Load() != NULL);
+  CHECK(std::string(Serum_GetColorizationText()) == text);
+  Serum_Dispose();
+  CHECK(std::string(Serum_GetColorizationText()).empty());
+  n256::Unload();
+}
+
+// The development versions between libserum 2.8.2's cROMc (version 9) and the
+// current one are not read.
+static void Test_DevelopmentVersionsRefused(void) {
+  n256::Synth s;
+  CHECK(signing::Write(s.Serialize(), NULL));
+  CHECK(signing::Load() != NULL);
+  Serum_Dispose();
+  for (uint16_t version : {10, 18, SERUM_CONCENTRATE_VERSION - 1}) {
+    std::fstream file(signing::CromcPath(),
+                      std::ios::in | std::ios::out | std::ios::binary);
+    file.seekp(4);
+    file.write((const char*)&version, 2);
+    file.close();
+    CHECK(signing::Load() == NULL);
+  }
+  n256::Unload();
+}
+
 static const TestCase kTests[] = {
     {"preserve/thin_arm_under_lit_band", Test_ThinArmUnderLitBandIsKept},
     {"preserve/lit_band_scales_as_artwork", Test_LitBandStillScalesAsArtwork},
@@ -6128,11 +6224,16 @@ static const TestCase kTests[] = {
     {"signing/cromc", Test_SigningCromc},
     {"signing/notice_frame", Test_SigningNoticeFrame},
     {"signing/notice_text", Test_SigningNoticeText},
+    {"signing/unsigned_load_delay", Test_UnsignedLoadDelay},
+    {"cromc/colorization_text", Test_ColorizationText},
+    {"cromc/development_versions_refused", Test_DevelopmentVersionsRefused},
 };
 
 int main(int argc, char** argv) {
   const char* filter = argc > 1 ? argv[1] : NULL;
   int ran = 0;
+  // No test waits for the delay of an unsigned cROMc; it is recorded.
+  g_unsignedLoadDelay = RecordLoadDelay;
   for (const TestCase& t : kTests) {
     if (filter && !strstr(t.name, filter)) continue;
     g_currentTest = t.name;

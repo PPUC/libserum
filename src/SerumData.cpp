@@ -173,6 +173,7 @@ void SerumData::Clear() {
   spriteOffsets.clear();
   noticeFrameId = kNoNoticeFrame;
   noticeOriginal.clear();
+  colorizationText.clear();
   hashcodes.clear();
   shapecompmode.clear();
   compmaskID.clear();
@@ -1042,6 +1043,14 @@ bool SerumData::SaveToFile(const char *filename) {
     uint16_t littleVersion = ToLittleEndian16(concentrateFileVersion);
     fwrite(&littleVersion, sizeof(uint16_t), 1, fp);
 
+    // The colorization's text, readable as it is (ReadColorizationText()).
+    if (concentrateFileVersion > SERUM_CONCENTRATE_VERSION_STABLE) {
+      const uint32_t textSize =
+          ToLittleEndian32((uint32_t)colorizationText.size());
+      fwrite(&textSize, sizeof(uint32_t), 1, fp);
+      fwrite(colorizationText.data(), 1, colorizationText.size(), fp);
+    }
+
     // Write original size
     uint32_t littleEndianSize =
         ToLittleEndian32((uint32_t)srcLen);  // Use srcLen directly
@@ -1121,6 +1130,35 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
       return false;
     }
 
+    if (concentrateFileVersion > SERUM_CONCENTRATE_VERSION_STABLE &&
+        concentrateFileVersion < SERUM_CONCENTRATE_VERSION) {
+      Log("The cROMc version %d of %s is a development version that is not "
+          "read any more. Get the colorization's current cROMc.",
+          concentrateFileVersion, filename);
+      fclose(fp);
+      return false;
+    }
+
+    // The colorization's text.
+    uint32_t textBytes = 0;
+    if (concentrateFileVersion > SERUM_CONCENTRATE_VERSION_STABLE) {
+      uint32_t littleTextSize = 0;
+      if (fread(&littleTextSize, sizeof(uint32_t), 1, fp) != 1 ||
+          FromLittleEndian32(littleTextSize) > kMaxColorizationTextBytes) {
+        Log("Failed to read the header of %s", filename);
+        fclose(fp);
+        return false;
+      }
+      textBytes = FromLittleEndian32(littleTextSize);
+      colorizationText.assign(textBytes, '\0');
+      if (textBytes > 0 &&
+          fread(&colorizationText[0], 1, textBytes, fp) != textBytes) {
+        Log("Failed to read the header of %s", filename);
+        fclose(fp);
+        return false;
+      }
+    }
+
     // Read original size
     uint32_t littleEndianSize;
     if (fread(&littleEndianSize, sizeof(uint32_t), 1, fp) != 1) {
@@ -1147,12 +1185,16 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
     uint32_t totalSize = (uint32_t)totalSizeLong;
     // A signed cROMc ends with its signature (SerumSigning.h), which is no
     // part of the compressed data.
-    if (concentrateFileVersion >= 19) {
+    if (concentrateFileVersion > SERUM_CONCENTRATE_VERSION_STABLE) {
       totalSize -= (uint32_t)serum_signing::TrailerBytes(fp, totalSize);
     }
 
-    // Adjust for magic(4) + version bytes(2) + size bytes(4)
-    uint32_t headerSize = 4 + sizeof(uint16_t) + sizeof(uint32_t);
+    // Adjust for magic(4) + version bytes(2) + the text + size bytes(4)
+    uint32_t headerSize =
+        4 + sizeof(uint16_t) + sizeof(uint32_t) +
+        (concentrateFileVersion > SERUM_CONCENTRATE_VERSION_STABLE
+             ? sizeof(uint32_t) + textBytes
+             : 0);
     fseek(fp, headerSize, SEEK_SET);
 
     // Calculate compressed size
@@ -1261,12 +1303,52 @@ bool SerumData::LoadFromBuffer(const uint8_t *data, size_t size,
       return false;
     }
 
+    if (concentrateFileVersion > SERUM_CONCENTRATE_VERSION_STABLE &&
+        concentrateFileVersion < SERUM_CONCENTRATE_VERSION) {
+      Log("The cROMc version %d is a development version that is not read any "
+          "more.",
+          concentrateFileVersion);
+      return false;
+    }
+
+    // The colorization's text, in the current version.
+    size_t textField = 0;
+    if (concentrateFileVersion > SERUM_CONCENTRATE_VERSION_STABLE) {
+      uint32_t littleTextSize = 0;
+      if (size < 4 + sizeof(uint16_t) + sizeof(uint32_t)) {
+        Log("File too small");
+        return false;
+      }
+      memcpy(&littleTextSize, data + 4 + sizeof(uint16_t), sizeof(uint32_t));
+      const uint32_t textBytes = FromLittleEndian32(littleTextSize);
+      if (textBytes > kMaxColorizationTextBytes ||
+          size < 4 + sizeof(uint16_t) + 2 * sizeof(uint32_t) + textBytes) {
+        Log("File too small");
+        return false;
+      }
+      colorizationText.assign(reinterpret_cast<const char *>(data) + 4 +
+                                  sizeof(uint16_t) + sizeof(uint32_t),
+                              textBytes);
+      textField = sizeof(uint32_t) + textBytes;
+    }
+
     uint32_t littleEndianSize;
-    memcpy(&littleEndianSize, data + 4 + sizeof(uint16_t), sizeof(uint32_t));
+    memcpy(&littleEndianSize, data + 4 + sizeof(uint16_t) + textField,
+           sizeof(uint32_t));
     const uint32_t originalSize = FromLittleEndian32(littleEndianSize);
     Log("cROMc size %u", originalSize);
 
-    const size_t headerSize = 4 + sizeof(uint16_t) + sizeof(uint32_t);
+    const size_t headerSize =
+        4 + sizeof(uint16_t) + textField + sizeof(uint32_t);
+    // A signed cROMc ends with its signature (SerumSigning.h).
+    if (concentrateFileVersion > SERUM_CONCENTRATE_VERSION_STABLE &&
+        size >= serum_signing::kTrailerTailBytes &&
+        memcmp(data + size - 4, "SSIG", 4) == 0) {
+      uint32_t littleTrailer = 0;
+      memcpy(&littleTrailer, data + size - 8, sizeof(uint32_t));
+      const uint32_t trailer = FromLittleEndian32(littleTrailer);
+      if (trailer <= size - headerSize) size -= trailer;
+    }
     if (size <= headerSize) {
       Log("File too small");
       return false;

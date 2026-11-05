@@ -101,6 +101,15 @@ SERUM_API bool Serum_ConcentrateFromSourceSigned(
  */
 SERUM_API bool Serum_GetAuthenticity(Serum_Authenticity* authenticity);
 
+/** @brief The colorization's text: its author, license and terms of use
+ *
+ * As the authoring tool wrote it into the cROMc (UTF-8, lines ending with
+ * '\n'); empty when it has none. A cROMc of the current version keeps it
+ * uncompressed in its header, readable without libserum. Valid until the next
+ * load.
+ */
+SERUM_API const char* Serum_GetColorizationText(void);
+
 /** @brief Check the signature of a cROMc without loading it */
 SERUM_API bool Serum_CheckConcentrateSignature(
     const char* const cromcPath, Serum_Authenticity* authenticity);
