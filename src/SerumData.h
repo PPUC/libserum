@@ -321,6 +321,18 @@ class SerumData {
         [](const SerumDofFrame &f, uint32_t id) { return f.frameId < id; });
     return it != dofFrames.end() && it->frameId == frameId ? &*it : nullptr;
   }
+  // The signing notice: a frame of the colorization that libserum shows,
+  // instead of the frames it identifies, when the cROMc was modified after its
+  // author signed it (see "Signed colorizations" in AGENTS.md). It is never
+  // identified from a ROM frame. kNoNoticeFrame for none. noticeOriginal is
+  // the ROM frame it is colorized from (NativeFramePixels() bytes). Persisted
+  // from concentrate version 19.
+  static constexpr uint32_t kNoNoticeFrame = 0xffffffffu;
+  uint32_t noticeFrameId = kNoNoticeFrame;
+  std::vector<uint8_t> noticeOriginal;
+  bool IsNoticeFrame(uint32_t frameId) const {
+    return frameId == noticeFrameId;
+  }
   // The sprite offsets of slots that have one, sorted by frame ID and slot
   // (persisted from concentrate version 17).
   std::vector<SerumSpriteOffset> spriteOffsets;
@@ -857,6 +869,9 @@ class SerumData {
         throw std::runtime_error(
             "frames stored as differences need concentrate version 18");
       }
+      if (concentrateFileVersion >= 19) {
+        ar(noticeFrameId, noticeOriginal);
+      }
     } else {
       if (concentrateFileVersion >= 8) {
         ar(scalingAlgorithm, shadowOffsetMode);
@@ -930,6 +945,15 @@ class SerumData {
         ar(bases, basesExtra);
         cframes_v2.setDifferenceBases(bases);
         cframes_v2_extra.setDifferenceBases(basesExtra);
+      }
+      if (concentrateFileVersion >= 19) {
+        ar(noticeFrameId, noticeOriginal);
+        if (noticeFrameId != kNoNoticeFrame && noticeFrameId >= nframes) {
+          throw std::runtime_error("Invalid notice frame in cROMc");
+        }
+      } else {
+        noticeFrameId = kNoNoticeFrame;
+        noticeOriginal.clear();
       }
     }
   }

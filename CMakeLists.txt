@@ -112,6 +112,7 @@ set(SERUM_SOURCES
    src/serum-decode.cpp
    src/SerumData.cpp
    src/SceneGenerator.cpp
+   src/SerumSigning.cpp
    third-party/include/miniz/miniz.c
    third-party/include/lz4/lz4.c
    third-party/include/lz4/lz4hc.c
@@ -283,6 +284,7 @@ if(BUILD_SHARED)
       target_sources(serum_unit_tests PRIVATE
          src/SerumData.cpp
          src/SceneGenerator.cpp
+         src/SerumSigning.cpp
          third-party/include/lz4/lz4.c
          third-party/include/lz4/lz4hc.c
          third-party/include/miniz/miniz.c
@@ -295,6 +297,13 @@ if(BUILD_SHARED)
          target_compile_definitions(serum_unit_tests PRIVATE ${SERUM_ACCEL_COMPILE_DEFINITIONS})
       endif()
       add_test(NAME serum_unit_tests COMMAND serum_unit_tests)
+
+      # Keys and certificates for signed colorizations (tools/serum-signing.cpp).
+      add_executable(serum-signing
+         tools/serum-signing.cpp
+         src/SerumSigning.cpp
+      )
+      target_include_directories(serum-signing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
    endif()
 endif()
 

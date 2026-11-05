@@ -73,6 +73,54 @@ SERUM_API Serum_Frame_Struc* Serum_LoadFromSource(
 SERUM_API bool Serum_ConcentrateFromSource(
     const Serum_Colorization_Source* source, const char* const cromcPath);
 
+/** @brief Write the cROMc of a source, signed by its author
+ *
+ * As Serum_ConcentrateFromSource(), then appends the signature of the file
+ * made with the author's key (see Serum_Signing_Key). key NULL writes an
+ * unsigned cROMc.
+ *
+ * @return false with Serum_GetLastErrorMessage() when it fails, also for a
+ * certificate that is not one of the key.
+ */
+SERUM_API bool Serum_ConcentrateFromSourceSigned(
+    const Serum_Colorization_Source* source, const char* const cromcPath,
+    const Serum_Signing_Key* key);
+
+/** @brief What the signature of the colorization loaded last says
+ *
+ * Set by Serum_Load(): SERUM_AUTHENTICITY_UNSIGNED for a cROMc without a
+ * signature, SERUM_AUTHENTICITY_SIGNED with the author's identity and name for
+ * one that is unchanged since its author signed it, SERUM_AUTHENTICITY_MODIFIED
+ * with the reason for one changed since, or whose signature no trusted key
+ * vouches for. Such a colorization is loaded and colorized all the same, with
+ * a notice on the display at the start and from time to time. A colorization
+ * of Serum_LoadFromSource() is unsigned.
+ *
+ * @param authenticity: its size set to sizeof(Serum_Authenticity)
+ * @return false for a missing or too small structure
+ */
+SERUM_API bool Serum_GetAuthenticity(Serum_Authenticity* authenticity);
+
+/** @brief Check the signature of a cROMc without loading it */
+SERUM_API bool Serum_CheckConcentrateSignature(
+    const char* const cromcPath, Serum_Authenticity* authenticity);
+
+/** @brief The public key of a signing key's 32-byte seed */
+SERUM_API bool Serum_Signing_PublicKey(const uint8_t seed[32],
+                                       uint8_t publicKey[32]);
+
+/** @brief Check an author's certificate (its text form)
+ *
+ * Fills authenticity with the identity and name the certificate names, and,
+ * when it is not trusted, the reason (status SERUM_AUTHENTICITY_MODIFIED).
+ *
+ * @param publicKey: the key the certificate has to be for, or NULL
+ * @return true for a certificate a trusted key vouches for
+ */
+SERUM_API bool Serum_Signing_CheckCertificate(const char* const certificate,
+                                              const uint8_t publicKey[32],
+                                              Serum_Authenticity* authenticity);
+
 /** @brief Set timeout for skipping unknown frames
  *
  * Unknown frames are ignored until this timeout elapses and a full lookup is

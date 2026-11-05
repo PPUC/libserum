@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "DecompressingIStream.h"
+#include "SerumSigning.h"
 #include "miniz/miniz.h"
 #include "serum-accel.h"
 #include "serum-version.h"
@@ -170,6 +171,8 @@ void SerumData::Clear() {
   sceneFrames.clear();
   dofFrames.clear();
   spriteOffsets.clear();
+  noticeFrameId = kNoNoticeFrame;
+  noticeOriginal.clear();
   hashcodes.clear();
   shapecompmode.clear();
   compmaskID.clear();
@@ -259,7 +262,8 @@ void SerumData::BuildCriticalTriggerLookup() {
   }
 
   for (uint32_t frameId = 0; frameId < nframes; ++frameId) {
-    if (frameId < frameIsScene.size() && frameIsScene[frameId] != 0) {
+    if ((frameId < frameIsScene.size() && frameIsScene[frameId] != 0) ||
+        IsNoticeFrame(frameId)) {
       continue;
     }
 
@@ -1141,6 +1145,11 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
       return false;
     }
     uint32_t totalSize = (uint32_t)totalSizeLong;
+    // A signed cROMc ends with its signature (SerumSigning.h), which is no
+    // part of the compressed data.
+    if (concentrateFileVersion >= 19) {
+      totalSize -= (uint32_t)serum_signing::TrailerBytes(fp, totalSize);
+    }
 
     // Adjust for magic(4) + version bytes(2) + size bytes(4)
     uint32_t headerSize = 4 + sizeof(uint16_t) + sizeof(uint32_t);

@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "SerumData.h"
+#include "SerumSigning.h"
 #include "TimeUtils.h"
 #include "serum-accel.h"
 #include "serum-version.h"
@@ -597,6 +598,10 @@ static bool IsFullBlackFrame(const uint8_t* frame, uint32_t size);
 static void ConfigureSceneEndHold(uint16_t sceneId, bool interruptable,
                                   uint8_t sceneOptions);
 static void ForceNormalFrameRefreshAfterSceneEnd(void);
+static void ResetNotice(void);
+// What the signature of the loaded cROMc says (see "Signed colorizations").
+static serum_signing::CheckResult g_authenticity;
+static void LogAuthenticity(void);
 static bool ValidateLoadedGeometry(bool isV2, const char* sourceTag);
 uint32_t Identify_Frame(uint8_t* frame, bool sceneFrameRequested);
 
@@ -1896,6 +1901,7 @@ void Serum_free(void) {
   extraPlaneIsDerived = false;
   g_sceneResumeState.clear();
   g_criticalTriggerMaskShapes.clear();
+  ResetNotice();
   ClearLastErrorMessage();
 
   g_serumData.sceneGenerator->Reset();
@@ -1996,6 +2002,10 @@ uint32_t calc_crc32(uint8_t* source, uint8_t mask, uint32_t n, uint8_t Shape) {
 //            0, int16 x, int16 y (10 bytes; not both 0), by ascending frame ID
 //            and slot: the sprite found through that slot is drawn moved by
 //            the offset (see SerumSpriteOffset).
+//   notice frame: uint32 frame ID, then its ROM frame (the frame size of the
+//            colorization, a byte per pixel): the frame libserum shows when
+//            the cROMc was modified after it was signed (see
+//            SerumData::noticeFrameId). It is never identified.
 // Bytes after these are ignored, so fields can be appended to the payload.
 static constexpr uint32_t kCromSettingsMagic = 0x31584353;  // "SCX1"
 static constexpr uint32_t kCromSettingsScenes = 1;
@@ -2009,6 +2019,7 @@ static constexpr uint32_t kCromSettingsDofEventBytes = 16;
 static constexpr uint32_t kCromSettingsFrameTriggers = 64;
 static constexpr uint32_t kCromSettingsSceneVariants = 128;
 static constexpr uint32_t kCromSettingsSpriteOffsets = 256;
+static constexpr uint32_t kCromSettingsNoticeFrame = 512;
 static constexpr uint32_t kCromSettingsSpriteOffsetBytes = 10;
 static constexpr uint32_t kCromSettingsLightEffectBytes = 24;
 static constexpr uint32_t kCromSettingsLightActionBytes = 8;
@@ -2257,6 +2268,17 @@ static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
       offsets.push_back(entry);
     }
     g_serumData.spriteOffsets = std::move(offsets);
+  }
+  if (contents & kCromSettingsNoticeFrame) {
+    uint32_t frameId = 0;
+    const uint32_t pixels = NativeFramePixels();
+    if (!take(&frameId, 4) || frameId >= g_serumData.nframes ||
+        pixels > payload.size() - offset)
+      return false;
+    g_serumData.noticeFrameId = frameId;
+    g_serumData.noticeOriginal.assign(payload.begin() + offset,
+                                      payload.begin() + offset + pixels);
+    offset += pixels;
   }
   return true;
 }
@@ -4291,6 +4313,8 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   if (result) {
     FinishColorizationLoad(loadedFromConcentrate, false, loadTotalStart, 0.0,
                            cromcLoadMs, 0.0, 0.0);
+    g_authenticity = serum_signing::CheckFile(pFoundFile->c_str());
+    LogAuthenticity();
     Log("Upscaling algorithm: %s (source=%s, extra plane: %s)",
         ScalingAlgorithmName(),
         g_serumData.concentrateFileVersion >= 8 ? "cROMc header" : "default",
@@ -4464,9 +4488,18 @@ SERUM_API Serum_Frame_Struc* Serum_LoadFromSource(
   SERUM_API_GUARD_END("Serum_LoadFromSource", nullptr)
 }
 
+static bool SignConcentrate(const char* const cromcPath,
+                            const Serum_Signing_Key& key);
+
 SERUM_API bool Serum_ConcentrateFromSource(
     const Serum_Colorization_Source* source, const char* const cromcPath) {
-  SERUM_API_GUARD_START("Serum_ConcentrateFromSource")
+  return Serum_ConcentrateFromSourceSigned(source, cromcPath, nullptr);
+}
+
+SERUM_API bool Serum_ConcentrateFromSourceSigned(
+    const Serum_Colorization_Source* source, const char* const cromcPath,
+    const Serum_Signing_Key* key) {
+  SERUM_API_GUARD_START("Serum_ConcentrateFromSourceSigned")
   if (!source || !source->fill || !cromcPath || cromcPath[0] == '\0') {
     SetLastErrorMessage("Serum_ConcentrateFromSource: no source or path");
     return false;
@@ -4482,7 +4515,8 @@ SERUM_API bool Serum_ConcentrateFromSource(
   bool saved = false;
   try {
     saved = LoadV2FromSource(*source, loadFlags, runtimeFlags) != NULL &&
-            SaveConcentrateTo(cromcPath);
+            SaveConcentrateTo(cromcPath) &&
+            (!key || SignConcentrate(cromcPath, *key));
   } catch (const std::exception& e) {
     SetLastErrorMessage("Serum_ConcentrateFromSource: %s", e.what());
     saved = false;
@@ -4494,7 +4528,7 @@ SERUM_API bool Serum_ConcentrateFromSource(
         "Serum_ConcentrateFromSource: the cROMc was not written");
   }
   return saved;
-  SERUM_API_GUARD_END("Serum_ConcentrateFromSource", false)
+  SERUM_API_GUARD_END("Serum_ConcentrateFromSourceSigned", false)
 }
 
 // Start of every load, after Serum_free().
@@ -4688,7 +4722,8 @@ static void BuildFrameLookupVectors(void) {
     // generated, and no frame becomes one because its original matches one.
     for (const SerumSceneFrame& sceneFrame : g_serumData.sceneFrames) {
       const uint32_t frameId = sceneFrame.frameId;
-      if (frameId >= g_serumData.nframes || g_serumData.frameIsScene[frameId])
+      if (frameId >= g_serumData.nframes || g_serumData.frameIsScene[frameId] ||
+          g_serumData.IsNoticeFrame(frameId))
         continue;
       g_serumData.frameIsScene[frameId] = 1;
       // The search Serum_RenderScene() falls back to for a step without a
@@ -4759,8 +4794,9 @@ static void BuildFrameLookupVectors(void) {
       const uint8_t mask = g_serumData.compmaskID[frameId][0];
       const uint8_t shape = g_serumData.shapecompmode[frameId][0];
       const uint32_t hash = g_serumData.hashcodes[frameId][0];
-      if (sceneSignatures.find(MakeFrameSignature(mask, shape, hash)) !=
-          sceneSignatures.end()) {
+      if (!g_serumData.IsNoticeFrame(frameId) &&
+          sceneSignatures.find(MakeFrameSignature(mask, shape, hash)) !=
+              sceneSignatures.end()) {
         g_serumData.frameIsScene[frameId] = 1;
         g_serumData
             .sceneFramesBySignature[MakeFrameSignature(mask, shape, hash)]
@@ -4821,7 +4857,9 @@ static void BuildFrameLookupVectors(void) {
   }
 
   for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
-    if (g_serumData.frameIsScene[frameId] != 0) {
+    // The notice frame is shown by libserum itself, never identified.
+    if (g_serumData.frameIsScene[frameId] != 0 ||
+        g_serumData.IsNoticeFrame(frameId)) {
       continue;
     }
     const uint8_t mask = g_serumData.compmaskID[frameId][0];
@@ -4858,7 +4896,8 @@ static void BuildFrameLookupVectors(void) {
 
   lastfound_normal = 0;
   for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
-    if (!g_serumData.frameIsScene[frameId]) {
+    if (!g_serumData.frameIsScene[frameId] &&
+        !g_serumData.IsNoticeFrame(frameId)) {
       lastfound_normal = frameId;
       break;
     }
@@ -4898,7 +4937,8 @@ static void InitFrameLookupRuntimeStateFromStoredData(void) {
 
   lastfound_normal = 0;
   for (uint32_t frameId = 0; frameId < g_serumData.nframes; ++frameId) {
-    if (!g_serumData.frameIsScene[frameId]) {
+    if (!g_serumData.frameIsScene[frameId] &&
+        !g_serumData.IsNoticeFrame(frameId)) {
       lastfound_normal = frameId;
       break;
     }
@@ -7551,12 +7591,423 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   return IDENTIFY_NO_FRAME;  // no new frame, client has to update rotations!
 }
 
+// ---- Signed colorizations (SerumSigning.h)
+//
+// What the signature of the loaded cROMc says. A colorization changed after
+// its author signed it is still loaded and colorized, but libserum shows a
+// notice for kNoticeAtStartMs from the first frame on, and for
+// kNoticeReminderMs every kNoticeReminderMinGapMs to kNoticeReminderMaxGapMs
+// after: the colorization's notice frame (SerumData::noticeFrameId), in place
+// of the frames it identifies, or, for a colorization without one or whose
+// notice frame is gone, the words "COLORIZATION MODIFIED" over every frame.
+
+static constexpr uint32_t kNoticeAtStartMs = 10000;
+static constexpr uint32_t kNoticeReminderMs = 5000;
+static constexpr uint32_t kNoticeReminderMinGapMs = 5 * 60 * 1000;
+static constexpr uint32_t kNoticeReminderMaxGapMs = 10 * 60 * 1000;
+
+// What showing the notice frame changes and its end gives back: the frames
+// that came while it showed are not seen.
+struct NoticeSavedIdentification {
+  uint32_t lastfound = 0;
+  uint32_t lastfoundNormal = 0;
+  bool firstMatchNormal = true;
+  uint32_t lastFrameId = 0;
+  uint32_t lastTriggerId = 0xffffffff;
+  uint32_t lastTriggerTimestamp = 0;
+  uint32_t lastPupTriggerId = 0xffffffff;
+  uint32_t lastPupTriggerTimestamp = 0;
+  bool monochromeMode = false;
+  bool monochromePaletteMode = false;
+  std::vector<uint8_t> lastFrame;
+};
+
+struct NoticeState {
+  // The first frame came: the notice at the start was shown or is showing.
+  bool started = false;
+  bool showing = false;
+  // The notice frame was rendered for this showing.
+  bool rendered = false;
+  uint32_t untilMs = 0;
+  uint32_t nextAtMs = 0;
+  // The colorize calls nested in one from the host (scenes render through
+  // them); only the outermost one is a ROM frame of the host.
+  int colorizeDepth = 0;
+  NoticeSavedIdentification saved;
+  std::minstd_rand random{std::random_device{}()};
+};
+static NoticeState g_notice;
+
+static void ResetNotice(void) {
+  const int depth = g_notice.colorizeDepth;
+  g_notice = NoticeState{};
+  g_notice.colorizeDepth = depth;
+  g_authenticity = serum_signing::CheckResult{};
+}
+
+static bool NoticeWanted(void) {
+  return cromloaded && enabled &&
+         g_authenticity.authenticity == serum_signing::Authenticity::Modified;
+}
+
+static bool HasNoticeFrame(void) {
+  return g_serumData.noticeFrameId < g_serumData.nframes &&
+         g_serumData.noticeOriginal.size() == NativeFramePixels();
+}
+
+static bool NoticeTimeReached(uint32_t now, uint32_t at) {
+  return (int32_t)(now - at) >= 0;
+}
+
+// Ends a running scene, as a frame that starts none does.
+static void StopSceneForNotice(void) {
+  sceneFrameCount = 0;
+  sceneCurrentFrame = 0;
+  sceneIsLastForegroundFrame = false;
+  sceneIsLastBackgroundFrame = false;
+  sceneEndHoldUntilMs = 0;
+  sceneEndHoldDurationMs = 0;
+  sceneNextFrameAtMs = 0;
+  mySerum.rotationtimer = 0;
+}
+
+static void BeginNotice(uint32_t now, uint32_t durationMs) {
+  g_notice.showing = true;
+  g_notice.rendered = false;
+  g_notice.untilMs = now + durationMs;
+  if (HasNoticeFrame()) {
+    NoticeSavedIdentification& saved = g_notice.saved;
+    saved.lastfound = lastfound;
+    saved.lastfoundNormal = lastfound_normal;
+    saved.firstMatchNormal = first_match_normal;
+    saved.lastFrameId = lastFrameId;
+    saved.lastTriggerId = lastTriggerID;
+    saved.lastTriggerTimestamp = lasttriggerTimestamp;
+    saved.lastPupTriggerId = lastPupTriggerID;
+    saved.lastPupTriggerTimestamp = lastPupTriggerTimestamp;
+    saved.monochromeMode = monochromeMode;
+    saved.monochromePaletteMode = monochromePaletteMode;
+    saved.lastFrame.assign(lastFrame, lastFrame + NativeFramePixels());
+  }
+  // The frame on display shows the notice only once it is rendered again.
+  ForceNormalFrameRefreshAfterSceneEnd();
+  ReportedOutputNoLongerOnDisplay();
+}
+
+static void EndNotice(uint32_t now) {
+  g_notice.showing = false;
+  const uint32_t gap =
+      kNoticeReminderMinGapMs +
+      (uint32_t)(g_notice.random() %
+                 (kNoticeReminderMaxGapMs - kNoticeReminderMinGapMs + 1));
+  g_notice.nextAtMs = now + gap;
+  if (g_notice.rendered) {
+    StopSceneForNotice();
+    StopV2ColorRotations();
+    const NoticeSavedIdentification& saved = g_notice.saved;
+    lastfound = saved.lastfound;
+    lastfound_normal = saved.lastfoundNormal;
+    first_match_normal = saved.firstMatchNormal;
+    lastFrameId = saved.lastFrameId;
+    lastTriggerID = saved.lastTriggerId;
+    lasttriggerTimestamp = saved.lastTriggerTimestamp;
+    lastPupTriggerID = saved.lastPupTriggerId;
+    lastPupTriggerTimestamp = saved.lastPupTriggerTimestamp;
+    monochromeMode = saved.monochromeMode;
+    monochromePaletteMode = saved.monochromePaletteMode;
+    if (saved.lastFrame.size() == NativeFramePixels())
+      memcpy(lastFrame, saved.lastFrame.data(), saved.lastFrame.size());
+  }
+  g_notice.rendered = false;
+  // The ROM frame that comes next is shown, even if it is the one shown
+  // before the notice.
+  ForceNormalFrameRefreshAfterSceneEnd();
+  ReportedOutputNoLongerOnDisplay();
+}
+
+static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
+                                                     bool sceneFrameRequested,
+                                                     uint32_t knownFrameId);
+
+// The notice frame, colorized as if its ROM frame had come: with its
+// background, sprites, dynamic content, color rotations and the scene its
+// trigger starts. It reports no PUP trigger.
+static uint32_t RenderNoticeFrame(void) {
+  StopSceneForNotice();
+  const uint32_t result = Serum_ColorizeWithMetadatav2Internal(
+      g_serumData.noticeOriginal.data(), false, g_serumData.noticeFrameId);
+  mySerum.triggerID = 0xffffffff;
+  return result;
+}
+
+// Starts, keeps or ends the notice for a ROM frame of the host. True when the
+// notice frame answers the call (result).
+static bool NoticeTakesFrame(uint32_t& result) {
+  if (!NoticeWanted()) return false;
+  const uint32_t now = GetMonotonicTimeMs();
+  if (!g_notice.started) {
+    g_notice.started = true;
+    BeginNotice(now, kNoticeAtStartMs);
+  } else if (!g_notice.showing && NoticeTimeReached(now, g_notice.nextAtMs)) {
+    BeginNotice(now, kNoticeReminderMs);
+  } else if (g_notice.showing && NoticeTimeReached(now, g_notice.untilMs)) {
+    EndNotice(now);
+  }
+  if (!g_notice.showing || !HasNoticeFrame()) return false;
+  if (g_notice.rendered) {
+    result = IDENTIFY_SAME_FRAME;
+    return true;
+  }
+  g_notice.rendered = true;
+  result = RenderNoticeFrame();
+  return true;
+}
+
+// 5x7 capitals, a row per byte, bit 4 the leftmost pixel.
+static const uint8_t kNoticeFont[26][7] = {
+    {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11},  // A
+    {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E},  // B
+    {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E},  // C
+    {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E},  // D
+    {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F},  // E
+    {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10},  // F
+    {0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F},  // G
+    {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11},  // H
+    {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E},  // I
+    {0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C},  // J
+    {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11},  // K
+    {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F},  // L
+    {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11},  // M
+    {0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11},  // N
+    {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E},  // O
+    {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10},  // P
+    {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D},  // Q
+    {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11},  // R
+    {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E},  // S
+    {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04},  // T
+    {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E},  // U
+    {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04},  // V
+    {0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A},  // W
+    {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11},  // X
+    {0x11, 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04},  // Y
+    {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F},  // Z
+};
+static constexpr char kNoticeText[] = "COLORIZATION MODIFIED";
+static constexpr uint16_t kNoticeTextColor = 0xffff;
+
+// The words over one plane: white capitals on a black band across the middle,
+// twice as large on a plane that has room for it. Their pixels take part in
+// no color rotation.
+static void DrawNoticeText(uint16_t* plane, uint16_t* rotationsInFrame,
+                           uint32_t width, uint32_t height) {
+  if (!plane || width == 0 || height == 0) return;
+  const uint32_t textWidth = (uint32_t)(sizeof(kNoticeText) - 1) * 6 - 1;
+  uint32_t scale = height / 32;
+  while (scale > 1 && textWidth * scale > width) --scale;
+  if (scale == 0) scale = 1;
+  const uint32_t bandHeight = 9 * scale;
+  if (bandHeight > height) return;
+  const uint32_t bandTop = (height - bandHeight) / 2;
+  const int32_t left = ((int32_t)width - (int32_t)(textWidth * scale)) / 2;
+  for (uint32_t y = bandTop; y < bandTop + bandHeight; ++y) {
+    for (uint32_t x = 0; x < width; ++x) {
+      const uint32_t i = y * width + x;
+      uint16_t color = 0;
+      const int32_t tx = ((int32_t)x - left) / (int32_t)scale;
+      const int32_t ty = (int32_t)((y - bandTop) / scale) - 1;
+      if ((int32_t)x >= left && tx < (int32_t)textWidth && ty >= 0 && ty < 7) {
+        const char c = kNoticeText[tx / 6];
+        const int32_t column = tx % 6;
+        if (c >= 'A' && c <= 'Z' && column < 5 &&
+            (kNoticeFont[c - 'A'][ty] >> (4 - column)) & 1)
+          color = kNoticeTextColor;
+      }
+      plane[i] = color;
+      if (rotationsInFrame) {
+        rotationsInFrame[i * 2] = 0xffff;
+        rotationsInFrame[i * 2 + 1] = 0xffff;
+      }
+    }
+  }
+}
+
+// The words over every plane of the output, while the notice shows for a
+// colorization without a notice frame.
+static void DrawNoticeTextIfShowing(void) {
+  if (!NoticeWanted() || !g_notice.showing || HasNoticeFrame()) return;
+  if ((mySerum.flags & FLAG_RETURNED_32P_FRAME_OK) && mySerum.width32)
+    DrawNoticeText(mySerum.frame32, mySerum.rotationsinframe32, mySerum.width32,
+                   32);
+  if ((mySerum.flags & FLAG_RETURNED_64P_FRAME_OK) && mySerum.width64)
+    DrawNoticeText(mySerum.frame64, mySerum.rotationsinframe64, mySerum.width64,
+                   64);
+}
+
+// Logs what the signature of a loaded cROMc says.
+static void LogAuthenticity(void) {
+  switch (g_authenticity.authenticity) {
+    case serum_signing::Authenticity::Unsigned:
+      Log("The colorization is not signed: its author cannot be confirmed");
+      break;
+    case serum_signing::Authenticity::Signed:
+      Log("The colorization is signed by %s (%s)", g_authenticity.name.c_str(),
+          g_authenticity.identity.c_str());
+      break;
+    case serum_signing::Authenticity::Modified:
+      if (g_authenticity.name.empty()) {
+        Log("The colorization was modified: %s", g_authenticity.reason.c_str());
+      } else {
+        Log("The colorization was modified: %s (the signature names %s, "
+            "%s)",
+            g_authenticity.reason.c_str(), g_authenticity.name.c_str(),
+            g_authenticity.identity.c_str());
+      }
+      break;
+  }
+}
+
+static void CopyAuthenticity(const serum_signing::CheckResult& result,
+                             Serum_Authenticity* out) {
+  const uint32_t size = out->size;
+  memset(out, 0, sizeof(*out));
+  out->size = size;
+  switch (result.authenticity) {
+    case serum_signing::Authenticity::Unsigned:
+      out->status = SERUM_AUTHENTICITY_UNSIGNED;
+      break;
+    case serum_signing::Authenticity::Signed:
+      out->status = SERUM_AUTHENTICITY_SIGNED;
+      break;
+    case serum_signing::Authenticity::Modified:
+      out->status = SERUM_AUTHENTICITY_MODIFIED;
+      break;
+  }
+  strcpy_s(out->identity, sizeof(out->identity), result.identity.c_str());
+  strcpy_s(out->name, sizeof(out->name), result.name.c_str());
+  strcpy_s(out->reason, sizeof(out->reason), result.reason.c_str());
+}
+
+SERUM_API bool Serum_GetAuthenticity(Serum_Authenticity* authenticity) {
+  SERUM_API_GUARD_START("Serum_GetAuthenticity")
+  if (!authenticity || authenticity->size < sizeof(Serum_Authenticity))
+    return false;
+  CopyAuthenticity(g_authenticity, authenticity);
+  return true;
+  SERUM_API_GUARD_END("Serum_GetAuthenticity", false)
+}
+
+SERUM_API bool Serum_CheckConcentrateSignature(
+    const char* const cromcPath, Serum_Authenticity* authenticity) {
+  SERUM_API_GUARD_START("Serum_CheckConcentrateSignature")
+  if (!cromcPath || !authenticity ||
+      authenticity->size < sizeof(Serum_Authenticity))
+    return false;
+  CopyAuthenticity(serum_signing::CheckFile(cromcPath), authenticity);
+  return true;
+  SERUM_API_GUARD_END("Serum_CheckConcentrateSignature", false)
+}
+
+SERUM_API bool Serum_Signing_PublicKey(const uint8_t seed[32],
+                                       uint8_t publicKey[32]) {
+  SERUM_API_GUARD_START("Serum_Signing_PublicKey")
+  if (!seed || !publicKey) return false;
+  serum_signing::Seed s;
+  memcpy(s.data(), seed, s.size());
+  const serum_signing::PublicKey key = serum_signing::PublicKeyFromSeed(s);
+  memcpy(publicKey, key.data(), key.size());
+  return true;
+  SERUM_API_GUARD_END("Serum_Signing_PublicKey", false)
+}
+
+SERUM_API bool Serum_Signing_CheckCertificate(
+    const char* const certificate, const uint8_t publicKey[32],
+    Serum_Authenticity* authenticity) {
+  SERUM_API_GUARD_START("Serum_Signing_CheckCertificate")
+  if (!certificate || !authenticity ||
+      authenticity->size < sizeof(Serum_Authenticity))
+    return false;
+  serum_signing::CheckResult result;
+  result.authenticity = serum_signing::Authenticity::Modified;
+  std::vector<uint8_t> bytes;
+  std::vector<serum_signing::Certificate> chain;
+  if (!serum_signing::ChainFromText(certificate, bytes) ||
+      !serum_signing::ParseChain(bytes.data(), bytes.size(), chain)) {
+    result.reason = "no certificate";
+  } else {
+    result.identity = chain.front().identity;
+    result.name = chain.front().name;
+    if (!serum_signing::CheckChain(chain, result.reason)) {
+      // reason says why
+    } else if (publicKey &&
+               memcmp(chain.front().key.data(), publicKey, 32) != 0) {
+      result.reason = "the certificate is for another key";
+    } else {
+      result.authenticity = serum_signing::Authenticity::Signed;
+    }
+  }
+  CopyAuthenticity(result, authenticity);
+  return result.authenticity == serum_signing::Authenticity::Signed;
+  SERUM_API_GUARD_END("Serum_Signing_CheckCertificate", false)
+}
+
+// Appends the signature block to the cROMc just written.
+static bool SignConcentrate(const char* const cromcPath,
+                            const Serum_Signing_Key& key) {
+  std::vector<uint8_t> chain;
+  std::vector<serum_signing::Certificate> certificates;
+  if (!key.seed || !key.certificate ||
+      !serum_signing::ChainFromText(key.certificate, chain) ||
+      !serum_signing::ParseChain(chain.data(), chain.size(), certificates)) {
+    SetLastErrorMessage("Serum_ConcentrateFromSourceSigned: no certificate");
+    return false;
+  }
+  serum_signing::Seed seed;
+  memcpy(seed.data(), key.seed, seed.size());
+  if (certificates.front().key != serum_signing::PublicKeyFromSeed(seed)) {
+    SetLastErrorMessage(
+        "Serum_ConcentrateFromSourceSigned: the certificate is for another "
+        "key");
+    return false;
+  }
+  std::vector<uint8_t> content;
+  {
+    std::ifstream in(cromcPath, std::ios::binary);
+    content.assign(std::istreambuf_iterator<char>(in),
+                   std::istreambuf_iterator<char>());
+    if (!in && !in.eof()) return false;
+  }
+  const std::vector<uint8_t> trailer = serum_signing::BuildTrailer(
+      serum_signing::Sha512Of(content.data(), content.size()), chain, seed);
+  std::ofstream out(cromcPath, std::ios::binary | std::ios::app);
+  out.write(reinterpret_cast<const char*>(trailer.data()),
+            (std::streamsize)trailer.size());
+  out.close();
+  if (!out) {
+    SetLastErrorMessage(
+        "Serum_ConcentrateFromSourceSigned: the signature was not written");
+    return false;
+  }
+  return true;
+}
+
 SERUM_API uint32_t
 Serum_ColorizeWithMetadatav2(uint8_t* frame, bool sceneFrameRequested = false) {
   SERUM_API_GUARD_START("Serum_ColorizeWithMetadatav2")
   BeginProfileFrameOperation();
-  const uint32_t result = Serum_ColorizeWithMetadatav2Internal(
-      frame, sceneFrameRequested, IDENTIFY_NO_FRAME);
+  uint32_t result = IDENTIFY_NO_FRAME;
+  const bool fromHost = g_notice.colorizeDepth == 0 && !sceneFrameRequested;
+  ++g_notice.colorizeDepth;
+  try {
+    if (!fromHost || !NoticeTakesFrame(result)) {
+      result = Serum_ColorizeWithMetadatav2Internal(frame, sceneFrameRequested,
+                                                    IDENTIFY_NO_FRAME);
+      if (fromHost) DrawNoticeTextIfShowing();
+    }
+  } catch (...) {
+    --g_notice.colorizeDepth;
+    throw;
+  }
+  --g_notice.colorizeDepth;
   EndProfileFrameOperation();
   MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
   return result;
@@ -7969,7 +8420,18 @@ uint32_t Serum_ApplyRotationsv2(void) {
 SERUM_API uint32_t Serum_Rotate(void) {
   SERUM_API_GUARD_START("Serum_Rotate")
   if (g_serumData.SerumVersion == SERUM_V2) {
-    return Serum_ApplyRotationsv2();
+    ++g_notice.colorizeDepth;
+    uint32_t result = 0;
+    try {
+      result = Serum_ApplyRotationsv2();
+    } catch (...) {
+      --g_notice.colorizeDepth;
+      throw;
+    }
+    --g_notice.colorizeDepth;
+    // A scene step renders the frame again.
+    DrawNoticeTextIfShowing();
+    return result;
   }
   return 0;
   SERUM_API_GUARD_END("Serum_Rotate", 0)

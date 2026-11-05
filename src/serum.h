@@ -220,6 +220,31 @@ enum  // runtime metadata feature flags
   SERUM_RUNTIME_FEATURE_MONOCHROME_FALLBACK = 1 << 9,
 };
 
+// What the signature of a cROMc says (Serum_GetAuthenticity()).
+enum {
+  SERUM_AUTHENTICITY_UNSIGNED = 0,
+  SERUM_AUTHENTICITY_SIGNED = 1,
+  SERUM_AUTHENTICITY_MODIFIED = 2,
+};
+
+typedef struct _Serum_Authenticity {
+  uint32_t size;  // sizeof(Serum_Authenticity), set by the caller
+  uint32_t status;
+  // Of the author the signature names: an ID such as "github:1234567", and
+  // the name to show.
+  char identity[128];
+  char name[128];
+  // Why a colorization is SERUM_AUTHENTICITY_MODIFIED.
+  char reason[256];
+} Serum_Authenticity;
+
+// An author's signing key: the secret key (a 32-byte seed) and the
+// certificate for its public key, in its text form ("SERUM-CERTIFICATE-1:...").
+typedef struct _Serum_Signing_Key {
+  const uint8_t* seed;
+  const char* certificate;
+} Serum_Signing_Key;
+
 typedef struct _Serum_Runtime_Metadata {
   uint32_t size;
   uint32_t serumVersion;

@@ -24,6 +24,12 @@ fixture file. The ROM frame handed to `Serum_Colorize()` is a
 heap buffer of exactly one frame, so a read past it is something the sanitizer
 build names.
 
+The `signing/` tests trust a root key of their own
+(`serum_signing::SetRootPublicKeysForTesting()`, reset when `signing::TestKeys`
+goes), certify an author through an issuer, and sign the n256 cROMc with it. A
+modified file is made by changing a byte of its signature, so that the
+colorization still loads.
+
 ## Running
 
     cmake --build <build dir> --target serum_unit_tests

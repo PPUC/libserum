@@ -5170,7 +5170,7 @@ static void Test_ConcentrateStoresSceneFramesAsDifferences(void) {
   Serum_Dispose();
   CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
                    n256::kBothPlanes) != NULL);
-  CHECK_EQ(g_serumData.concentrateFileVersion, 18);
+  CHECK_EQ(g_serumData.concentrateFileVersion, SERUM_CONCENTRATE_VERSION);
   for (const auto* plane :
        {&g_serumData.cframes_v2, &g_serumData.cframes_v2_extra}) {
     CHECK(plane->isStoredAsDifference(n256::kScene));
@@ -5660,6 +5660,338 @@ struct TestCase {
   void (*fn)(void);
 };
 
+// ---- Signed colorizations
+
+namespace signing {
+
+static std::vector<uint8_t> Hex(const char* text) {
+  std::vector<uint8_t> out;
+  for (; text[0] && text[1]; text += 2) {
+    unsigned value = 0;
+    sscanf(text, "%2x", &value);
+    out.push_back((uint8_t)value);
+  }
+  return out;
+}
+
+static serum_signing::Seed SeedOf(uint8_t fill) {
+  serum_signing::Seed seed;
+  for (size_t i = 0; i < seed.size(); ++i) seed[i] = (uint8_t)(fill + i * 7);
+  return seed;
+}
+
+// A root key for the tests, trusted in place of the built-in ones while the
+// scope lives, and an author certified by it through an issuer.
+struct TestKeys {
+  serum_signing::Seed root = SeedOf(1), issuer = SeedOf(2), author = SeedOf(3);
+  std::string certificate;
+  TestKeys() {
+    serum_signing::SetRootPublicKeysForTesting(
+        {serum_signing::PublicKeyFromSeed(root)});
+    const auto issuerCertificate =
+        serum_signing::Certify(serum_signing::CertificateRole::Issuer,
+                               serum_signing::PublicKeyFromSeed(issuer), 1,
+                               "test:issuer", "Test issuer", root);
+    const auto authorCertificate =
+        serum_signing::Certify(serum_signing::CertificateRole::Author,
+                               serum_signing::PublicKeyFromSeed(author), 2,
+                               "github:42", "author42", issuer);
+    certificate = serum_signing::ChainToText(
+        serum_signing::SerializeChain({authorCertificate, issuerCertificate}));
+  }
+  ~TestKeys() { serum_signing::SetRootPublicKeysForTesting({}); }
+  Serum_Signing_Key Key() const { return {author.data(), certificate.c_str()}; }
+};
+
+static std::filesystem::path CromcPath() {
+  return n256::Dir() / n256::kRom / (std::string(n256::kRom) + ".cROMc");
+}
+
+// Writes the cROMc of the cROM, signed with the key unless it is NULL.
+static bool Write(const std::vector<uint8_t>& crom,
+                  const Serum_Signing_Key* key) {
+  std::error_code ec;
+  std::filesystem::remove_all(n256::Dir(), ec);
+  std::filesystem::create_directories(n256::Dir() / n256::kRom);
+  source::CromSource source;
+  source.crom = crom;
+  if (!source.Parse()) return false;
+  return Serum_ConcentrateFromSourceSigned(&source.source,
+                                           CromcPath().string().c_str(), key);
+}
+
+static uint32_t Status(void) {
+  Serum_Authenticity authenticity{};
+  authenticity.size = sizeof(authenticity);
+  if (!Serum_GetAuthenticity(&authenticity)) return 0xffffffffu;
+  return authenticity.status;
+}
+
+static uint32_t FileStatus(void) {
+  Serum_Authenticity authenticity{};
+  authenticity.size = sizeof(authenticity);
+  if (!Serum_CheckConcentrateSignature(CromcPath().string().c_str(),
+                                       &authenticity))
+    return 0xffffffffu;
+  return authenticity.status;
+}
+
+// Changes a byte of the signature itself: the colorization still loads, and
+// no longer matches its signature.
+static void DamageSignature(void) {
+  std::fstream file(CromcPath(),
+                    std::ios::in | std::ios::out | std::ios::binary);
+  file.seekg(-20, std::ios::end);
+  char c = 0;
+  file.read(&c, 1);
+  c ^= 0x10;
+  file.seekp(-20, std::ios::end);
+  file.write(&c, 1);
+}
+
+// The cROM with a settings block that makes the frame the notice frame.
+static std::vector<uint8_t> WithNoticeFrame(const n256::Synth& s,
+                                            uint32_t frameId) {
+  std::vector<uint8_t> payload;
+  const auto put = [&payload](const void* data, size_t bytes) {
+    const uint8_t* p = (const uint8_t*)data;
+    payload.insert(payload.end(), p, p + bytes);
+  };
+  const uint32_t contents = kCromSettingsNoticeFrame;
+  put(&contents, 4);
+  put(&frameId, 4);
+  put(s.Native(frameId), n256::kNPx);
+  std::vector<uint8_t> crom = s.Serialize();
+  const uint32_t magic = kCromSettingsMagic;
+  const uint32_t size = (uint32_t)payload.size();
+  crom.insert(crom.end(), (const uint8_t*)&magic, (const uint8_t*)&magic + 4);
+  crom.insert(crom.end(), (const uint8_t*)&size, (const uint8_t*)&size + 4);
+  crom.insert(crom.end(), payload.begin(), payload.end());
+  return crom;
+}
+
+static Serum_Frame_Struc* Load(void) {
+  Serum_SetMaximumUnknownFramesToSkip(0);
+  Serum_SetIgnoreUnknownFramesTimeout(0);
+  return Serum_Load(n256::Dir().string().c_str(), n256::kRom,
+                    n256::kBothPlanes);
+}
+
+static uint32_t Colorize(const n256::Synth& s, uint32_t frameId) {
+  std::vector<uint8_t> frame = s.Frame(frameId);
+  return Serum_Colorize(frame.data());
+}
+
+// The pixels of the notice text's band in the 256x64 plane that are not
+// black.
+static uint32_t LitBandPixels(void) {
+  uint32_t lit = 0;
+  for (uint32_t y = 23; y < 41; ++y)
+    for (uint32_t x = 0; x < 256; ++x)
+      if (mySerum.frame64[y * 256 + x] != 0) ++lit;
+  return lit;
+}
+
+}  // namespace signing
+
+// SHA-512 and Ed25519 give the values of FIPS 180-4 and RFC 8032.
+static void Test_SigningPrimitives(void) {
+  const serum_signing::Digest abc = serum_signing::Sha512Of("abc", 3);
+  CHECK(std::vector<uint8_t>(abc.begin(), abc.end()) ==
+        signing::Hex("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee6"
+                     "4b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e"
+                     "2a9ac94fa54ca49f"));
+  const std::vector<uint8_t> seedBytes = signing::Hex(
+      "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb");
+  serum_signing::Seed seed;
+  std::copy(seedBytes.begin(), seedBytes.end(), seed.begin());
+  const serum_signing::PublicKey key = serum_signing::PublicKeyFromSeed(seed);
+  CHECK(std::vector<uint8_t>(key.begin(), key.end()) ==
+        signing::Hex("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f1"
+                     "2af4660c"));
+  const uint8_t message = 0x72;
+  serum_signing::Signature signature = serum_signing::Sign(seed, &message, 1);
+  CHECK(std::vector<uint8_t>(signature.begin(), signature.end()) ==
+        signing::Hex("92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223"
+                     "ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aee"
+                     "b00d291612bb0c00"));
+  CHECK(serum_signing::Verify(key, &message, 1, signature));
+  const uint8_t other = 0x73;
+  CHECK(!serum_signing::Verify(key, &other, 1, signature));
+  signature[40] ^= 1;
+  CHECK(!serum_signing::Verify(key, &message, 1, signature));
+}
+
+// A certificate chain leads to a trusted root key through an issuer, or
+// directly; one a stranger signed, or that was changed, does not. Its text
+// form reads back.
+static void Test_SigningCertificates(void) {
+  const signing::TestKeys keys;
+  std::vector<uint8_t> bytes;
+  CHECK(serum_signing::ChainFromText(keys.certificate, bytes));
+  std::vector<serum_signing::Certificate> chain;
+  CHECK(serum_signing::ParseChain(bytes.data(), bytes.size(), chain));
+  CHECK_EQ(chain.size(), 2u);
+  CHECK(chain[0].identity == "github:42" && chain[0].name == "author42");
+  std::string reason;
+  CHECK(serum_signing::CheckChain(chain, reason));
+
+  const auto direct =
+      serum_signing::Certify(serum_signing::CertificateRole::Author,
+                             serum_signing::PublicKeyFromSeed(keys.author), 3,
+                             "github:43", "x", keys.root);
+  CHECK(serum_signing::CheckChain({direct}, reason));
+
+  const auto stranger =
+      serum_signing::Certify(serum_signing::CertificateRole::Author,
+                             serum_signing::PublicKeyFromSeed(keys.author), 3,
+                             "github:44", "y", signing::SeedOf(9));
+  CHECK(!serum_signing::CheckChain({stranger}, reason));
+
+  // An author certificate cannot certify another author.
+  const auto byAuthor = serum_signing::Certify(
+      serum_signing::CertificateRole::Author,
+      serum_signing::PublicKeyFromSeed(signing::SeedOf(9)), 3, "github:45", "z",
+      keys.author);
+  CHECK(!serum_signing::CheckChain({byAuthor, chain[0]}, reason));
+
+  std::vector<serum_signing::Certificate> renamed = chain;
+  renamed[0].name = "someone else";
+  CHECK(!serum_signing::CheckChain(renamed, reason));
+
+  Serum_Authenticity authenticity{};
+  authenticity.size = sizeof(authenticity);
+  const serum_signing::PublicKey authorKey =
+      serum_signing::PublicKeyFromSeed(keys.author);
+  CHECK(Serum_Signing_CheckCertificate(keys.certificate.c_str(),
+                                       authorKey.data(), &authenticity));
+  CHECK(std::string(authenticity.name) == "author42");
+  const serum_signing::PublicKey otherKey =
+      serum_signing::PublicKeyFromSeed(signing::SeedOf(9));
+  CHECK(!Serum_Signing_CheckCertificate(keys.certificate.c_str(),
+                                        otherKey.data(), &authenticity));
+  CHECK(!Serum_Signing_CheckCertificate("SERUM-CERTIFICATE-1:AAAA", NULL,
+                                        &authenticity));
+}
+
+// A signed cROMc loads as before and says who signed it; a changed signature
+// makes it modified; an unsigned one is unsigned. A certificate for another
+// key signs nothing.
+static void Test_SigningCromc(void) {
+  const signing::TestKeys keys;
+  n256::Synth s;
+  const Serum_Signing_Key key = keys.Key();
+  CHECK(signing::Write(s.Serialize(), &key));
+  CHECK_EQ(signing::FileStatus(), (uint32_t)SERUM_AUTHENTICITY_SIGNED);
+  CHECK(signing::Load() != NULL);
+  CHECK_EQ(signing::Status(), (uint32_t)SERUM_AUTHENTICITY_SIGNED);
+  Serum_Authenticity authenticity{};
+  authenticity.size = sizeof(authenticity);
+  CHECK(Serum_GetAuthenticity(&authenticity));
+  CHECK(std::string(authenticity.identity) == "github:42");
+  signing::Colorize(s, n256::kStatic);
+  CHECK_EQ(mySerum.frameID, (uint32_t)n256::kStatic);
+  Serum_Dispose();
+  CHECK_EQ(signing::Status(), (uint32_t)SERUM_AUTHENTICITY_UNSIGNED);
+
+  signing::DamageSignature();
+  CHECK_EQ(signing::FileStatus(), (uint32_t)SERUM_AUTHENTICITY_MODIFIED);
+  CHECK(signing::Load() != NULL);
+  CHECK_EQ(signing::Status(), (uint32_t)SERUM_AUTHENTICITY_MODIFIED);
+  Serum_Dispose();
+
+  CHECK(signing::Write(s.Serialize(), NULL));
+  CHECK_EQ(signing::FileStatus(), (uint32_t)SERUM_AUTHENTICITY_UNSIGNED);
+  CHECK(signing::Load() != NULL);
+  CHECK_EQ(signing::Status(), (uint32_t)SERUM_AUTHENTICITY_UNSIGNED);
+  Serum_Dispose();
+
+  const serum_signing::Seed other = signing::SeedOf(9);
+  const Serum_Signing_Key wrong{other.data(), keys.certificate.c_str()};
+  CHECK(!signing::Write(s.Serialize(), &wrong));
+
+  // Without the trusted root key the same signature vouches for nothing.
+  CHECK(signing::Write(s.Serialize(), &key));
+  serum_signing::SetRootPublicKeysForTesting({other});
+  CHECK_EQ(signing::FileStatus(), (uint32_t)SERUM_AUTHENTICITY_MODIFIED);
+  n256::Unload();
+}
+
+// The notice frame is never identified. In a modified colorization it is shown
+// in place of the frames that come for the first seconds, then the frames are
+// identified as before, the frame shown before the notice too; a reminder
+// follows minutes later.
+static void Test_SigningNoticeFrame(void) {
+  const signing::TestKeys keys;
+  n256::Synth s;
+  const std::vector<uint8_t> crom =
+      signing::WithNoticeFrame(s, n256::kRotation);
+  const Serum_Signing_Key key = keys.Key();
+
+  CHECK(signing::Write(crom, &key));
+  CHECK(signing::Load() != NULL);
+  CHECK_EQ(g_serumData.noticeFrameId, (uint32_t)n256::kRotation);
+  signing::Colorize(s, n256::kRotation);
+  CHECK(mySerum.frameID != (uint32_t)n256::kRotation);
+  signing::Colorize(s, n256::kStatic);
+  CHECK_EQ(mySerum.frameID, (uint32_t)n256::kStatic);
+  Serum_Dispose();
+
+  signing::DamageSignature();
+  CHECK(signing::Load() != NULL);
+  CHECK(signing::Colorize(s, n256::kStatic) != IDENTIFY_NO_FRAME);
+  CHECK_EQ(mySerum.frameID, (uint32_t)n256::kRotation);
+  CHECK(g_notice.showing);
+  // It stays while frames come.
+  CHECK_EQ(signing::Colorize(s, n256::kDynamic), IDENTIFY_SAME_FRAME);
+  // Its time is up: the next frame is identified, as the frame before the
+  // notice is.
+  g_notice.untilMs = GetMonotonicTimeMs() - 1;
+  CHECK(signing::Colorize(s, n256::kStatic) != IDENTIFY_SAME_FRAME);
+  CHECK_EQ(mySerum.frameID, (uint32_t)n256::kStatic);
+  CHECK(!g_notice.showing);
+  const uint32_t gap = g_notice.nextAtMs - GetMonotonicTimeMs();
+  CHECK(gap >= kNoticeReminderMinGapMs - 1000 &&
+        gap <= kNoticeReminderMaxGapMs);
+  g_notice.nextAtMs = GetMonotonicTimeMs() - 1;
+  signing::Colorize(s, n256::kDynamic);
+  CHECK_EQ(mySerum.frameID, (uint32_t)n256::kRotation);
+  CHECK(g_notice.untilMs - GetMonotonicTimeMs() <= kNoticeReminderMs);
+  Serum_Dispose();
+
+  // Signed and unchanged: no notice.
+  CHECK(signing::Write(crom, &key));
+  CHECK(signing::Load() != NULL);
+  signing::Colorize(s, n256::kStatic);
+  CHECK_EQ(mySerum.frameID, (uint32_t)n256::kStatic);
+  CHECK(!g_notice.showing);
+  n256::Unload();
+}
+
+// A modified colorization without a notice frame is colorized with the words
+// over it for the first seconds.
+static void Test_SigningNoticeText(void) {
+  const signing::TestKeys keys;
+  n256::Synth s;
+  const Serum_Signing_Key key = keys.Key();
+  CHECK(signing::Write(s.Serialize(), &key));
+  signing::DamageSignature();
+  CHECK(signing::Load() != NULL);
+  signing::Colorize(s, n256::kStatic);
+  CHECK_EQ(mySerum.frameID, (uint32_t)n256::kStatic);
+  CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+  const uint32_t lit = signing::LitBandPixels();
+  CHECK(lit > 100 && lit < 256 * 18 / 2);
+  for (uint32_t x = 0; x < 256; ++x) CHECK_EQ(mySerum.frame64[23 * 256 + x], 0);
+  CHECK(mySerum.frame64[10 * 256 + 10] != 0 ||
+        mySerum.frame64[50 * 256 + 50] != 0);
+  g_notice.untilMs = GetMonotonicTimeMs() - 1;
+  signing::Colorize(s, n256::kStatic);
+  CHECK_EQ(mySerum.frameID, (uint32_t)n256::kStatic);
+  CHECK(mySerum.frame64[23 * 256 + 5] != 0);
+  n256::Unload();
+}
+
 static const TestCase kTests[] = {
     {"preserve/thin_arm_under_lit_band", Test_ThinArmUnderLitBandIsKept},
     {"preserve/lit_band_scales_as_artwork", Test_LitBandStillScalesAsArtwork},
@@ -5791,6 +6123,11 @@ static const TestCase kTests[] = {
     {"source/writes_no_file", Test_SourceLoadWritesNoFile},
     {"source/failures_are_clean", Test_SourceLoadFailuresAreClean},
     {"load/refuses_raw_files", Test_LoadRefusesRawFiles},
+    {"signing/primitives", Test_SigningPrimitives},
+    {"signing/certificates", Test_SigningCertificates},
+    {"signing/cromc", Test_SigningCromc},
+    {"signing/notice_frame", Test_SigningNoticeFrame},
+    {"signing/notice_text", Test_SigningNoticeText},
 };
 
 int main(int argc, char** argv) {

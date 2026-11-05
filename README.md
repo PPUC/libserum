@@ -92,6 +92,24 @@ An editor hands its colorization over without writing a file:
 Both return `NULL`/`false` on failure, with the reason in
 `Serum_GetLastErrorMessage()`.
 
+## Signed Colorizations
+
+An author's editor can sign the `*.cROMc` it exports
+(`Serum_ConcentrateFromSourceSigned()`). The signature says who released the
+file and whether it was changed since; it protects nothing. libserum checks it
+offline against the root keys it carries and logs the result, which
+`Serum_GetAuthenticity()` also returns:
+
+- **signed**: the file is unchanged since its author signed it;
+- **not signed**: nothing is shown, the log says so;
+- **modified**: the file is loaded and colorized all the same, with a notice
+  on the display for the first 10 seconds and for 5 seconds every 5 to 10
+  minutes. The notice is a frame the author designed for it, or, when there is
+  none, the words "COLORIZATION MODIFIED" over the colorized frames.
+
+`tools/serum-signing` creates keys and certificates for the people who issue
+them.
+
 ## Monochrome Triggers
 
 `libserum` supports two dedicated trigger IDs:

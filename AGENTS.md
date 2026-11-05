@@ -55,6 +55,9 @@ Core files:
 - `src/serum.h`: Public constants/flags/structs.
 - `src/serum-decode.h`: Public C API declarations.
 - `src/serum-version.h`: Library and concentrate format versions.
+- `src/SerumSigning.h/.cpp`: SHA-512, Ed25519, certificates and the signature
+  block of signed cROMc files (see "Signed colorizations").
+- `tools/serum-signing.cpp`: the command-line tool for keys and certificates.
 
 Internal helper interface (`src/serum-accel.h`):
 - The decoder calls a small set of internal helpers through `src/serum-accel.h`.
@@ -349,6 +352,9 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
   Then come the scene variants (`kCromSettingsSceneVariants`, 128): pairs of a
   scene and its base, both scenes of the block, the base no variant. Last come
   the sprite offsets (`kCromSettingsSpriteOffsets`, 256; see "Sprite offsets").
+  The notice frame (`kCromSettingsNoticeFrame`, 512; see "Signed
+  colorizations") comes last: a frame ID and the ROM frame it is colorized
+  from; a frame beyond the frames fails the load.
   A block that is cut short or malformed fails the load.
 - Scenes from the block set `scenesFromColorization`, scaling settings set
   `scalingFromColorization` (also when the block holds zero scenes). Either
@@ -1410,8 +1416,65 @@ Finished-scene default behavior:
   rendering is used only as `FLAG_REQUEST_FALLBACK` fallback when the extra
   scene frame is incomplete/unavailable.
 
+## Signed colorizations
+An author's editor signs the cROMc it exports, so that a player can tell
+whether the file is still the one its author released. Nothing is protected:
+a changed file is loaded and colorized as before, and the signature can be
+removed. `src/SerumSigning.h` documents the formats.
+
+- Keys are Ed25519. A certificate binds a public key to an identity that does
+  not change (such as `github:<id>`) and a display name, and is signed by an
+  issuing key or a root key. An issuing key's certificate is signed by a root
+  key. libserum knows only the public root keys (`kBuiltInRootKeys` in
+  `SerumSigning.cpp`) and the revoked keys (`RevokedKeys()`); the check needs
+  no connection. A root key is only ever added, so that a new one can stand
+  beside the old.
+- `Serum_ConcentrateFromSourceSigned()` writes the cROMc as
+  `Serum_ConcentrateFromSource()` does and appends the signature block: the
+  certificate chain and the author key's signature of `"SERUM-CROMC-1"`
+  followed by the SHA-512 of every byte before the block.
+- `Serum_Load()` checks the file after loading it (`CheckFile()`, a second
+  read of the file) and logs the result: not signed, signed by whom, or
+  modified and why. `Serum_GetAuthenticity()` returns it.
+  `Serum_CheckConcentrateSignature()` checks a file without loading it,
+  `Serum_Signing_CheckCertificate()` an author's certificate.
+- A file whose signature does not match it, whose certificates are damaged,
+  or whose chain leads to no trusted root key or contains a revoked key is
+  **modified**. libserum then shows a notice: for `kNoticeAtStartMs` (10 s)
+  from the first ROM frame on, and for `kNoticeReminderMs` (5 s) every 5 to
+  10 minutes (at random) after. An unsigned file shows nothing; the log says
+  that it is not signed.
+- The notice is the colorization's notice frame when it has one
+  (`SerumData::noticeFrameId`, from the settings block). That frame is never
+  identified: `BuildFrameLookupVectors()` and `BuildCriticalTriggerLookup()`
+  leave it out, and it is no frame of a scene. While the notice shows,
+  `Serum_ColorizeWithMetadatav2()` does not look at the ROM frames of the host:
+  the first call renders the notice frame from its stored ROM frame
+  (`RenderNoticeFrame()`, through the frame-ID path of the internal colorize,
+  so with its background, sprites, dynamic content, color rotations and the
+  scene its trigger starts, but without a PUP trigger), later calls answer
+  `IDENTIFY_SAME_FRAME`, and `Serum_Rotate()` drives its rotations and scene.
+  A running scene is stopped first. When its time is up, the identification
+  state from before the notice is put back (`NoticeSavedIdentification`) and
+  the next ROM frame is identified and shown as if the notice had not been
+  there, even when it is the frame shown before.
+- Without a notice frame the colorization is colorized as usual and the words
+  "COLORIZATION MODIFIED" are drawn over every plane of every output, white on
+  a black band, also after `Serum_Rotate()` (`DrawNoticeTextIfShowing()`);
+  their pixels take part in no rotation.
+- The notice starts and ends only with a call from the host: the outermost
+  `Serum_ColorizeWithMetadatav2()` call that is not a scene frame
+  (`NoticeState::colorizeDepth`; scenes render through nested calls).
+- `tools/serum-signing` makes keys and certificates: `keygen`, `public`,
+  `certify` (a root key certifies an issuer or an author, an issuer an
+  author), `show` and `check`.
+
 ## cROMc persistence
-Current concentrate version: **18**. Version 18 adds, after the sprite
+Current concentrate version: **19**. Version 19 adds, after the frames stored
+as differences, the notice frame (`noticeFrameId`, `noticeOriginal`; see
+"Signed colorizations"); a signed cROMc of version 19 on ends with its
+signature block, which `LoadFromFile()` leaves out of the compressed data.
+Version 18 adds, after the sprite
 offsets, the frames of `cframes_v2` and of `cframes_v2_extra` stored as the
 difference to another frame, as (frame ID, base frame ID) pairs per plane (see
 "SparseVector storage and compression"). Version 17 adds the sprite offsets after
