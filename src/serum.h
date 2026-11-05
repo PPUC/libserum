@@ -10,12 +10,6 @@
 #include <stdarg.h>
 #include <stddef.h>
 
-// Serum_LoadFromCallback(): puts up to `size` bytes of the cROM into `buffer`
-// and returns how many (at least 1), or 0 when it cannot deliver more.
-typedef size_t(SERUM_CALLBACK* Serum_ReadCallback)(void* userData,
-                                                   uint8_t* buffer,
-                                                   size_t size);
-
 // Serum_LoadFromSource(): the blocks of a colorization, in the order a v2
 // cROM stores them. Each element of a block is one record of its kind (a
 // frame, comparison mask, sprite or background); the comment gives the type
@@ -382,14 +376,6 @@ typedef void (*Serum_EnableColorizationFunc)(void);
 typedef void (*Serum_DisablePupTriggersFunc)(void);
 typedef void (*Serum_EnablePupTrigersFunc)(void);
 typedef bool (*Serum_GetRuntimeMetadataFunc)(Serum_Runtime_Metadata* metadata);
-typedef bool (*Serum_CRZ_ReadFunc)(const char* crzPath, uint8_t** data,
-                                   size_t* size);
-typedef void (*Serum_CRZ_FreeFunc)(uint8_t* data);
-typedef bool (*Serum_CRZ_GetEntryNameFunc)(const char* crzPath, char* name,
-                                           size_t nameSize);
-typedef bool (*Serum_CRZ_WriteFromFileFunc)(const char* crzPath,
-                                            const char* entryName,
-                                            const char* cromPath);
 typedef bool (*Serum_Scene_ParseCSVFunc)(const char* const csv_filename);
 typedef bool (*Serum_Scene_GenerateDumpFunc)(const char* const dump_filename,
                                              int id);

@@ -238,17 +238,13 @@ Requested-output mode:
    - do not fall back to `*.cROM` or `*.cRZ`
 3. On non-real-machine/runtime-update flows:
    - look for optional `*.pup.csv`
-   - prefer loading `*.cROMc` unless `skip-cromc.txt` exists.
+   - load `*.cROMc`.
    - If `*.cROMc` starts with `CROM` magic, load via `SerumData::LoadFromFile`.
    - Otherwise, try encrypted in-memory load (`vault::read` + `SerumData::LoadFromBuffer`).
-4. If cROMc load fails or is absent on non-real-machine/runtime-update flows,
-   load `*.cROM`/`*.cRZ`.
-   - Raw source loads are authoring/update inputs and may be re-saved as
-     `*.cROMc` when runtime generation is not disabled through
-     `Serum_SetGenerateCRomC(false)`.
-   - When such a raw source load produces a new `*.cROMc`, libserum reloads
-     that generated `*.cROMc` in the same load cycle so first-run behavior
-     matches the next boot.
+4. Without a loadable `*.cROMc` nothing is loaded. A `*.cROM` or `*.cRZ` is
+   never loaded (since 2.99.14, towards 3.0): `Serum_Load()` logs that one
+   is there, so that a user learns why nothing is colorized. Colorizations of
+   Serum v1 are refused, also as a cROMc.
 5. If CSV exists and format is v2, parse scenes via `SceneGenerator::parseCSV`,
    unless the colorization carries its scenes (`scenesFromColorization`, see
    "cROM settings block"); then the CSV is not read. `scaling.txt` likewise
@@ -295,107 +291,47 @@ Important:
     `BuildPackingSidecarsAndNormalize()` or rebuild missing sprite runtime
     sidecars on load.
 
-## Loading from memory
-Entry points: `Serum_LoadFromMemory(crom, size, flags)`,
-`Serum_LoadFromMemoryWithScenes(crom, size, csvPath, flags)` and
-`Serum_LoadFromCallback(read, userData, size, csvPath, flags)`. All run the
-internal template `LoadFromReader()`: the first two with a
-`MemoryCRomReader` over the caller's buffer (the first passes no `csvPath`),
-the third with a `CallbackCRomReader`, which pulls the `size` bytes of the cROM
-from `read()` through a 1 MB buffer (larger reads go straight to the
-destination) and never asks for more than `size` bytes in all. A caller can
-therefore serialize a cROM into the load without holding it; a `read()` that
-returns 0 early fails the load as truncated data does.
-
-These loads pack sparse vectors with LZ4's fast mode instead of LZ4 HC
-(`SparseVectorFastPacking()`, set by a scope in `LoadFromReader()` and reset
-after it, also on failure). No cROMc is written from them, the values read back
-are the same, and the HC levels of `Serum_Load()` and of the real machine are
-untouched. A `Serum_SaveConcentrate()` after such a load writes a valid cROMc
-whose packed payloads differ in bytes from one `Serum_Load()` makes.
-
-It takes the bytes of a `cROM` file in a buffer the caller owns. It does not
-go through `Serum_Load()`. The two share three helpers, which hold code moved
-out of `Serum_Load()` unchanged:
-- `BeginColorizationLoad()`: the profile and output-pointer resets after
-  `Serum_free()`.
-- `RequestBothPlanesByDefault()`: both planes when the caller requested none.
-- `FinishColorizationLoad()`: steps 7 to 9 of the load flow and the scaling
-  setup.
-
-Between them `Serum_LoadFromMemory()` widens the load flags to both planes
-unless `FLAG_REQUEST_FORCE` is set and reads the buffer with
-`Serum_LoadFilev1Stream()`, as `Serum_Load()` does for a raw file. The result
-equals `Serum_Load()` of the same bytes as a `.cROM` file with
-`Serum_SetGenerateCRomC(false)`.
-
-What differs from `Serum_Load()`:
-- No file is looked up or written: no `cROMc` (neither loaded nor generated),
-  no `*.pup.csv`, no `scaling.txt`, no `skip-cromc.txt`. `scalingAlgorithm` /
-  `shadowOffsetMode` keep their defaults. Scenes are empty, unless
-  `Serum_LoadFromMemoryWithScenes()` names a `pup.csv`: for a v2 colorization
-  it is parsed after the cROM is read and before `FinishColorizationLoad()`
-  (whose `sceneDataUpdatedFromCsv` it sets), and the scene depth is set from the
-  colour count, in the order `Serum_Load()` uses for a `pup.csv` beside a raw
-  cROM. `BuildFrameLookupVectors()` therefore sees the scenes, and the result
-  equals `Serum_Load()` of the cROM with that `pup.csv` beside it and
-  `Serum_SetGenerateCRomC(false)`. A `NULL` or empty path, or a file that does
-  not parse, loads without scenes. This is an authoring-time path (an editor
-  holding its project in memory); it has no real-machine branch.
-  A cROM with a settings block that carries scenes keeps them: the `pup.csv`
-  is not read.
-- Only a raw `cROM` is accepted, not a `cROMc` or a `cRZ`.
-- It has no platform branch of its own: the request flags are used as passed,
-  and nothing of `Serum_Load()`'s per-platform load policy is applied. The
-  shared helpers and the renderer behave as they do after `Serum_Load()`.
-- The buffer is read through `MemoryCRomReader` with `throwOnShortData` set.
-  Short data throws instead of reaching `exit(1)` in
-  `SparseVector::readFromCRomReader()`, and `CountFitsSource()` refuses a v2
-  header whose element counts exceed the bytes that follow. Both apply to this
-  entry point only; file and `cRZ` loads read as before.
-- On failure it calls `Serum_free()`, returns `NULL` and stores the reason for
-  `Serum_GetLastErrorMessage()`. Nothing is loaded afterwards.
-- `NULL` or empty input releases the loaded colorization and fails.
-
-The buffer is not kept after the call. Dispose with `Serum_Dispose()`.
-
 ## Building a colorization from an authoring tool
 `Serum_LoadFromSource()` (`serum-decode.h`) loads a colorization that an
-authoring tool hands over instead of a cROM: a `Serum_Colorization_Source`
-(`serum.h`) with what a cROM header holds, a `fill()` callback and the payload
-of the settings block. libserum asks for every element of every block
-(`Serum_Block`, in cROM order, one call per frame, mask, sprite or background)
-and stores it exactly as the cROM reader stores what it reads:
+authoring tool hands over: a `Serum_Colorization_Source` (`serum.h`) with what
+a cROM header held, a `fill()` callback and the payload of the settings block.
+libserum asks for every element of every block (`Serum_Block`, in the order of
+the blocks, one call per frame, mask, sprite or background). This is the only
+way a colorization comes into libserum other than a cROMc; libserum has no
+reader for raw cROM or cRZ files any more.
 
-- `LoadFilev2Stream()` is split into `PrepareV2Planes()` (planes and buffers),
-  `ReadV2Blocks()` (the blocks, from a `CromBlockInput` or a
-  `SourceBlockInput`), the settings (`ReadCromSettings()` or
-  `ApplyCromSettings()`) and `FinishV2Load()` (packing sidecars, triggers,
-  finish). Both inputs store through `SparseVector::beginElements()` and
-  `storeElement()`, which `readFromCRomReader()` uses too.
-- A source is a cROM of header revision 21 and format version 1: 16-bit sprite
-  IDs in `spritesPerFrame` slots, every block present.
-- `LoadThrough()` is the frame of all memory loads (free, plane requests, fast
-  packing, a pup.csv, `FinishColorizationLoad()`); `LoadFromReader()` and
-  `Serum_LoadFromSource()` differ only in what they read.
-- `Serum_ConcentrateFromSource()` writes the cROMc of a source to a path: built
-  as `Serum_Load()` builds a raw cROM before it writes the cROMc (both planes,
-  the packing of a machine, written right after reading; `SaveConcentrateTo()`),
-  so it is the cROMc `Serum_Load()` generates for a cROM of the same data. No
-  sidecars: scenes and scaling come from the settings payload.
-- Test `source/builds_the_croms_colorization`: a source serving a cROM's blocks
-  gives the same cROMc as loading the cROM, for format 0 and 1, with a settings
-  block; `Serum_ConcentrateFromSource()` gives the cROMc `Serum_Load()`
-  generates; and for a real cRZ given in `SERUM_TEST_CRZ` (checked on `afm_113b` and
-  `trn_174h`).
-
-This is the first step towards libserum 3.0, which will load cROMc only: an
-editor then builds the cROMc through the source and no cROM reader is needed.
+- The load is `PrepareV2Planes()` (planes and buffers), `ReadV2Blocks()` (the
+  blocks, from a `SourceBlockInput`), `ApplyCromSettings()` (the settings
+  payload) and `FinishV2Load()` (packing sidecars, triggers, finish). The input
+  stores through `SparseVector::beginElements()` and `storeElement()`.
+- A source has the values of a cROM of header revision 21 and format version
+  1: 16-bit sprite IDs in `spritesPerFrame` slots, every block present.
+- `LoadThrough()` is the frame of the load (free, plane requests, fast
+  packing, a pup.csv, `FinishColorizationLoad()`). It packs sparse vectors
+  with LZ4's fast mode (`SparseVectorFastPacking()`, set by a scope and reset
+  after it, also on failure); the values read back are the same.
+- A `pup.csv` named by `csvPath` is parsed for a v2 colorization after the
+  blocks are read and before `FinishColorizationLoad()` (whose
+  `sceneDataUpdatedFromCsv` it sets), and the scene depth is set from the
+  colour count, in the order `Serum_Load()` uses for a `pup.csv` beside a
+  cROMc. A colorization whose settings carry scenes keeps them: the `pup.csv`
+  is not read. No other file is read or written. This is an authoring-time
+  path; it has no real-machine branch.
+- On failure it calls `Serum_free()`, returns `NULL` and stores the reason for
+  `Serum_GetLastErrorMessage()`. Nothing is loaded afterwards.
+- The three helpers `BeginColorizationLoad()`, `RequestBothPlanesByDefault()`
+  and `FinishColorizationLoad()` (steps 7 to 9 of the load flow and the
+  scaling setup) are shared with `Serum_Load()`.
+- `Serum_ConcentrateFromSource()` writes the cROMc of a source to a path: both
+  planes, the packing of a machine, written right after reading
+  (`SaveConcentrateTo()`). No sidecars: scenes and scaling come from the
+  settings payload. This is how an editor exports the file `Serum_Load()`
+  loads.
 
 ## cROM settings block
-A v2 cROM may end with an optional block after its last data block
-(`ReadCromSettings()` / `ApplyCromSettings()` in `serum-decode.cpp`, which
-document the layout): magic `SCX1`, a payload size, then a contents mask
+A v2 cROM could end with an optional block after its last data block; an
+authoring tool now hands its payload over as the source's settings
+(`ApplyCromSettings()` in `serum-decode.cpp`, which documents the layout): magic `SCX1`, a payload size, then a contents mask
 (`kCromSettingsScenes`, `kCromSettingsScaling`), the scenes (the fields of a
 `pup.csv` line, 13 bytes each) and the scaling algorithm and shadow offset
 mode. An editor that keeps scenes and scaling settings with the project
@@ -422,9 +358,9 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
   A block that is cut short or malformed fails the load.
 - Scenes from the block set `scenesFromColorization`, scaling settings set
   `scalingFromColorization` (also when the block holds zero scenes). Either
-  makes the matching sidecar (`<rom>.pup.csv`, `scaling.txt`) ignored, in the
-  raw load, in the cROMc made from it, and in `Serum_LoadFromMemoryWithScenes()`.
-  A cROM without the block, or a block that does not set a part, keeps the
+  makes the matching sidecar (`<rom>.pup.csv`, `scaling.txt`) ignored, in
+  `Serum_LoadFromSource()` and in the cROMc made from the source. A source
+  without the payload, or a payload that does not set a part, keeps the
   sidecar behaviour for that part.
 - Both flags are stored in the cROMc from concentrate version 9; older cROMcs
   load with both false and behave as before.
@@ -674,8 +610,7 @@ frame fires its PUP and scene triggers only if it turns the display monochrome
 itself; a frame without its own monochrome trigger (a black frame kept in
 monochrome) fires none, as before. A scene that starts at once (immediate or
 background) is rendered within the same call, which resets `triggerID`; the
-frame's PUP trigger is put back, so a host gets it along with the scene. A
-Serum v1 colorization keeps its one trigger per frame in `triggerIDs`.
+frame's PUP trigger is put back, so a host gets it along with the scene.
 
 ## Colorization flow (v2)
 Entry point: `Serum_ColorizeWithMetadatav2(frame, sceneFrameRequested=false)`.
@@ -968,7 +903,7 @@ scene lookups (`frameIsScene`, `sceneFramesBySignature`,
 depend on it — they are built at save time with the padded marker described
 above. A cROMc written from an `is256x64` project **with scenes** by a libserum
 older than this rule holds scene lookups hashed past the end of a `128x32`
-buffer, i.e. garbage; it has to be regenerated from the cROM/cRZ. Nothing in
+buffer, i.e. garbage; it has to be exported again from the project. Nothing in
 the file says which libserum wrote it, and the concentrate version was not
 raised for this.
 
@@ -1339,8 +1274,7 @@ are stored in the `cROMc` header from concentrate version 8, can come with the
 cROM's settings block (then nothing overrides them), and are otherwise
 overridable per colorization through `altcolor/<romname>/scaling.txt`
 (`read_scaling_sidecar()`), which is **not** read on a real machine — the stored
-values are authoritative there, matching how `pup.csv` and `skip-cromc.txt` are
-treated.
+values are authoritative there, matching how `pup.csv` is treated.
 
 `SERUM_SCALING_SCALE2X` (value `2`) is the default and one of only two
 selectable algorithms, the other being `SERUM_SCALING_LINE_DOUBLING`. It is
@@ -1509,9 +1443,9 @@ colorization (see "cROM format version, sprites per frame and sprite IDs").
 Version 9 adds `scenesFromColorization` and `scalingFromColorization` after
 the scaling settings of version 8 (see "cROM settings block").
 
-`cROMc` stores the full Serum model and supports both Serum v1 and Serum v2
-content. Real-machine policy may still restrict which source formats are
-accepted at load time, but the persisted `cROMc` format itself is not v2-only.
+`cROMc` stores the full Serum model. The format still has the fields of Serum
+v1 content, but a v1 cROMc is refused at load time: libserum plays Serum v2
+only.
 
 Stored in v6:
 - Full Serum model payload.
@@ -1606,58 +1540,6 @@ v6 snapshot policy:
     compatibility shims merely to keep older `v6` development snapshots
     loading.
 
-## cRZ archive API
-A `cRZ` is a zip archive holding one cROM. The authoring tools write it next to
-the `cROM`, and it is what gets passed around. Four public functions in
-`serum-decode.h` let a host handle it without bringing its own zip code:
-
-- `bool Serum_CRZ_Read(const char* crzPath, uint8_t** data, size_t* size)` —
-  the cROM bytes, in a buffer owned by libserum.
-- `void Serum_CRZ_Free(uint8_t* data)` — releases that buffer, so the caller
-  does not need libserum's allocator. `NULL` is accepted.
-- `bool Serum_CRZ_GetEntryName(const char* crzPath, char* name, size_t nameSize)`
-  — the name of the entry `Serum_CRZ_Read()` returns. Too small a buffer is an
-  error, not a truncation.
-- `bool Serum_CRZ_WriteFromFile(const char* crzPath, const char* entryName,
-  const char* cromPath)` — creates the archive from a cROM on disk.
-
-Rules that hold for all of them:
-- **One extraction.** `Serum_CRZ_Read()` and the loader both go through
-  `ExtractCRZEntryToHeap()`; `ExtractCRZEntryToMemory()` is the loader's
-  `std::vector` wrapper around it. Which entry counts as the cROM is decided in
-  one place, `FindCRZEntry()`: the first entry that is a regular, supported,
-  unencrypted file. The entry name is never interpreted and nothing is ever
-  extracted to a path — the archive is untrusted input.
-- **No runtime state.** They work on files only, neither need nor change a
-  loaded colorization, and may run while another thread colorizes. They
-  therefore do **not** hold the API mutex for their duration (deflating a
-  450 MB cROM takes seconds); only the shared error buffer is written under it.
-  They are also not gated on `is_real_machine()`: they do nothing unless a host
-  calls them, and the load path's own real-machine policy is untouched.
-- **Errors.** A failure returns `false` and stores a message for
-  `Serum_GetLastErrorMessage()`; every call clears the message first.
-- **Paths** are what miniz takes: UTF-8 on Windows (MSVC and MinGW-w64),
-  native bytes elsewhere.
-
-What `Serum_CRZ_WriteFromFile()` writes:
-- one entry, deflated at miniz's default level, streamed from the source file
-  through miniz's 64 KiB buffer, so the cROM is never held in memory;
-- sizes and CRC in the local header, no trailing data descriptor
-  (`MZ_ZIP_FLAG_WRITE_HEADER_SET_SIZE`), and no UTF-8 flag on an ASCII name —
-  the layout the ColorizingDMD Win32 editor's LiteZip produces, minus its `UT`
-  timestamp extra field;
-- zip64 only when miniz needs it, i.e. for a source of 4 GiB or more;
-- the source file's modification time as the entry time, so the archive bytes
-  are not a pure function of the cROM bytes.
-- The entry name has to be a plain file name; `/`, `\` and `:` anywhere in it,
-  and `.`/`..`, are refused before anything is written. miniz itself only
-  refuses a leading `/`, and an archive whose entry reads as a path is a hazard
-  for whatever extracts it by name.
-- An existing `crzPath` is replaced. The source is checked first, so a missing
-  cROM does not cost the caller the archive already there; if writing fails
-  after the archive was created, the incomplete file is removed. It does not
-  write beside the target and rename — a caller that needs that does it.
-
 ## Logging
 - Central callback configured by `Serum_SetLogCallback`.
 - `serum-decode.cpp` and `SceneGenerator.cpp` both use callback-based `Log(...)`.
@@ -1666,9 +1548,9 @@ What `Serum_CRZ_WriteFromFile()` writes:
     exceptions and Windows structured exceptions (`SEH`) at the DLL boundary.
   - Fatal API-boundary failures are recorded in a process-global message buffer
     exposed through `Serum_GetLastErrorMessage()`.
-  - The same buffer carries the reason a `Serum_CRZ_*` call returned `false`
-    or `Serum_LoadFromMemory()` / `Serum_LoadFromMemoryWithScenes()` returned
-    `NULL`, on every platform.
+  - The same buffer carries the reason `Serum_LoadFromSource()` returned
+    `NULL` or `Serum_ConcentrateFromSource()` returned `false`, on every
+    platform.
   - Those fatal diagnostics are emitted through the configured log callback and
     also mirrored to `stderr` and `OutputDebugStringA`, so crash reasons remain
     visible even when the host does not install a log callback.
@@ -1744,8 +1626,7 @@ What `Serum_CRZ_WriteFromFile()` writes:
 Minimum validation:
 1. Build: `cmake --build build -j4`
 2. Load scenarios:
-   - cROM/cRZ without CSV
-   - cROM/cRZ with CSV
+   - a source (`Serum_LoadFromSource()`) without and with CSV
    - cROMc v5 with CSV update
    - cROMc v6 without CSV update
 3. Verify log line:

@@ -96,7 +96,7 @@ static void SetUpFrame(uint32_t w = kW, uint32_t h = kH) {
   // colorization set any or not -- an element that was never set reads back as
   // the no-data buffer, and that buffer is only as long as it was reserved.
   // Without this the fixture is shorter than a real load and the shadow pass
-  // reads past it; see the reserve() calls in Serum_LoadFilev2Stream().
+  // reads past it; see the reserve() calls in ReadV2Blocks().
   g_serumData.dynashadowsdir.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
   g_serumData.dynashadowscol.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
   g_serumData.dynashadowsdir_extra.reserve(MAX_DYNA_SETS_PER_FRAME_V2);
@@ -1643,190 +1643,13 @@ static void Test_FinishedFrameAlreadyOnDisplay(void) {
 }
 
 // ---------------------------------------------------------------------------
-// cRZ archives
+// Test files
 // ---------------------------------------------------------------------------
-
-static std::filesystem::path CrzTestDir(void) {
-  const std::filesystem::path dir =
-      std::filesystem::temp_directory_path() / "libserum_tests" / "crz";
-  std::filesystem::remove_all(dir);
-  std::filesystem::create_directories(dir);
-  return dir;
-}
-
-// Compressible, but not one repeated byte: a cROM is mostly runs, with detail.
-static std::vector<uint8_t> CrzTestPayload(size_t size) {
-  std::vector<uint8_t> bytes(size);
-  uint32_t state = 12345;
-  for (size_t i = 0; i < size; ++i) {
-    state = state * 1664525u + 1013904223u;
-    bytes[i] = (i / 97) % 3 ? (uint8_t)(i / 97) : (uint8_t)(state >> 24);
-  }
-  return bytes;
-}
 
 static void WriteTestFile(const std::filesystem::path& path,
                           const std::vector<uint8_t>& bytes) {
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   out.write((const char*)bytes.data(), (std::streamsize)bytes.size());
-}
-
-// The editor writes a cRZ next to every cROM and libserum has to load it, so
-// what goes in must come out byte for byte, under the name it was given. The
-// payload is larger than miniz's 64 KiB I/O buffer, so the streamed path loops.
-static void Test_CrzWriteThenReadRoundTrips(void) {
-  const std::filesystem::path dir = CrzTestDir();
-  const std::string crom = (dir / "source.cROM").string();
-  const std::string crz = (dir / "test_rom.cRZ").string();
-  const std::vector<uint8_t> payload = CrzTestPayload(300000);
-  WriteTestFile(crom, payload);
-
-  CHECK(Serum_CRZ_WriteFromFile(crz.c_str(), "test_rom.cRom", crom.c_str()));
-  CHECK_EQ(strlen(Serum_GetLastErrorMessage()), 0);
-  CHECK(std::filesystem::file_size(crz) < payload.size());
-
-  uint8_t* data = NULL;
-  size_t size = 0;
-  CHECK(Serum_CRZ_Read(crz.c_str(), &data, &size));
-  CHECK_EQ(size, payload.size());
-  CHECK(data && size == payload.size() &&
-        memcmp(data, payload.data(), size) == 0);
-  Serum_CRZ_Free(data);
-
-  char name[64] = "untouched";
-  CHECK(Serum_CRZ_GetEntryName(crz.c_str(), name, sizeof(name)));
-  CHECK(strcmp(name, "test_rom.cRom") == 0);
-
-  // The loader's own extraction sees the same bytes.
-  std::vector<uint8_t> viaLoader;
-  CHECK(ExtractCRZEntryToMemory(crz.c_str(), viaLoader));
-  CHECK(viaLoader == payload);
-
-  std::filesystem::remove_all(dir);
-}
-
-// A small cROM does not need zip64, and a reader that predates it -- the
-// Win32 editor's -- must not be handed one. The sizes sit in the local header
-// with no data descriptor, as that editor writes them.
-static void Test_CrzIsAPlainDeflatedZip(void) {
-  const std::filesystem::path dir = CrzTestDir();
-  const std::string crom = (dir / "source.cROM").string();
-  const std::string crz = (dir / "plain.cRZ").string();
-  WriteTestFile(crom, CrzTestPayload(5000));
-  CHECK(Serum_CRZ_WriteFromFile(crz.c_str(), "plain.cRom", crom.c_str()));
-
-  mz_zip_archive zip = {0};
-  CHECK(mz_zip_reader_init_file(&zip, crz.c_str(), 0));
-  CHECK_EQ(mz_zip_reader_get_num_files(&zip), 1);
-  CHECK(!mz_zip_is_zip64(&zip));
-  mz_zip_archive_file_stat stat;
-  CHECK(mz_zip_reader_file_stat(&zip, 0, &stat));
-  CHECK_EQ(stat.m_method, MZ_DEFLATED);
-  CHECK_EQ(stat.m_bit_flag & (1 << 3), 0);   // no data descriptor
-  CHECK_EQ(stat.m_bit_flag & (1 << 11), 0);  // name not flagged as UTF-8
-  CHECK_EQ(stat.m_uncomp_size, 5000);
-  mz_zip_reader_end(&zip);
-
-  std::filesystem::remove_all(dir);
-}
-
-// A failed read hands back nothing to free and says why; a failed write does
-// not leave half an archive where a good one may have been expected.
-static void Test_CrzFailuresAreClean(void) {
-  const std::filesystem::path dir = CrzTestDir();
-  const std::string missing = (dir / "missing.cRZ").string();
-  const std::string garbage = (dir / "garbage.cRZ").string();
-  WriteTestFile(garbage, CrzTestPayload(4096));
-
-  uint8_t* data = (uint8_t*)&dir;
-  size_t size = 99;
-  CHECK(!Serum_CRZ_Read(missing.c_str(), &data, &size));
-  CHECK(data == NULL);
-  CHECK_EQ(size, 0);
-  CHECK(strstr(Serum_GetLastErrorMessage(), "Serum_CRZ_Read") != NULL);
-
-  data = (uint8_t*)&dir;
-  size = 99;
-  CHECK(!Serum_CRZ_Read(garbage.c_str(), &data, &size));
-  CHECK(data == NULL);
-  CHECK_EQ(size, 0);
-  CHECK(!Serum_CRZ_Read(NULL, &data, &size));
-  CHECK(!Serum_CRZ_Read(garbage.c_str(), NULL, &size));
-  Serum_CRZ_Free(NULL);
-
-  char name[8] = "x";
-  CHECK(!Serum_CRZ_GetEntryName(garbage.c_str(), name, sizeof(name)));
-  CHECK_EQ(name[0], 0);
-
-  // A missing source must not cost the caller the archive it already has.
-  const std::string crz = (dir / "kept.cRZ").string();
-  const std::string crom = (dir / "source.cROM").string();
-  WriteTestFile(crom, CrzTestPayload(2000));
-  CHECK(Serum_CRZ_WriteFromFile(crz.c_str(), "kept.cRom", crom.c_str()));
-  const auto keptSize = std::filesystem::file_size(crz);
-  CHECK(!Serum_CRZ_WriteFromFile(crz.c_str(), "kept.cRom",
-                                 (dir / "no_such.cROM").string().c_str()));
-  CHECK(strstr(Serum_GetLastErrorMessage(), "Serum_CRZ_WriteFromFile") != NULL);
-  CHECK(std::filesystem::exists(crz) &&
-        std::filesystem::file_size(crz) == keptSize);
-  CHECK(!Serum_CRZ_WriteFromFile(crom.c_str(), "kept.cRom", crom.c_str()));
-  CHECK_EQ(std::filesystem::file_size(crom), 2000);
-
-  // An entry name that reads as a path is refused, and nothing is created.
-  const std::string refused = (dir / "refused.cRZ").string();
-  for (const char* bad :
-       {"/abs.cRom", "dir/x.cRom", "..\\x.cRom", "c:x.cRom", "..", ""}) {
-    CHECK(!Serum_CRZ_WriteFromFile(refused.c_str(), bad, crom.c_str()));
-    CHECK(!std::filesystem::exists(refused));
-  }
-  CHECK(!Serum_CRZ_WriteFromFile((dir / "no_dir" / "x.cRZ").string().c_str(),
-                                 "x.cRom", crom.c_str()));
-
-  // Too small a name buffer is an error, not a truncated name.
-  CHECK(!Serum_CRZ_GetEntryName(crz.c_str(), name, sizeof(name)));
-  CHECK_EQ(name[0], 0);
-
-  // A success clears the message of the failure before it.
-  CHECK(Serum_CRZ_Read(crz.c_str(), &data, &size));
-  CHECK_EQ(strlen(Serum_GetLastErrorMessage()), 0);
-  Serum_CRZ_Free(data);
-
-  std::filesystem::remove_all(dir);
-}
-
-// Optional: SERUM_TEST_CRZ names a real cRZ, such as one written by the Win32
-// editor. No colorization is kept in the repository, so without it this checks
-// nothing. With it, the archive must read and survive being written again.
-static void Test_CrzRealArchive(void) {
-  const char* real = std::getenv("SERUM_TEST_CRZ");
-  if (!real || !real[0]) return;
-
-  uint8_t* data = NULL;
-  size_t size = 0;
-  CHECK(Serum_CRZ_Read(real, &data, &size));
-  CHECK(size > 0);
-  char name[512] = "";
-  CHECK(Serum_CRZ_GetEntryName(real, name, sizeof(name)));
-  if (!data) return;
-
-  const std::filesystem::path dir = CrzTestDir();
-  const std::string crom = (dir / "real.cROM").string();
-  const std::string crz = (dir / "real.cRZ").string();
-  {
-    std::ofstream out(crom, std::ios::binary | std::ios::trunc);
-    out.write((const char*)data, (std::streamsize)size);
-  }
-  CHECK(Serum_CRZ_WriteFromFile(crz.c_str(), name, crom.c_str()));
-  uint8_t* again = NULL;
-  size_t againSize = 0;
-  CHECK(Serum_CRZ_Read(crz.c_str(), &again, &againSize));
-  CHECK_EQ(againSize, size);
-  CHECK(again && againSize == size && memcmp(again, data, size) == 0);
-  printf("       %s: entry %s, %zu bytes, rewritten as %llu bytes\n", real,
-         name, size, (unsigned long long)std::filesystem::file_size(crz));
-  Serum_CRZ_Free(again);
-  Serum_CRZ_Free(data);
-  std::filesystem::remove_all(dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -2404,6 +2227,193 @@ static void Test_DynamicContentAndItsShadowDoNotRotateBoth(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Loading a synthetic colorization
+//
+// The tests build their colorizations as the bytes of a cROM, the layout the
+// editor's source data had. libserum loads cROMc files only, so these are
+// handed to it through a Serum_Colorization_Source: Serum_LoadFromSource() for
+// a load, Serum_ConcentrateFromSource() for the cROMc that Serum_Load() reads.
+// ---------------------------------------------------------------------------
+
+namespace source {
+
+// A Serum_Colorization_Source that serves the blocks of a cROM held in memory
+// (header revision 20 or later), as an authoring tool would serve its own
+// data.
+struct CromSource {
+  struct Block {
+    size_t offset = 0;
+    size_t elementBytes = 0;
+    // Format version 0: 8-bit sprite IDs, handed out widened.
+    bool narrowSprites = false;
+  };
+
+  std::vector<uint8_t> crom;
+  Serum_Colorization_Source source{};
+  Block blocks[SERUM_BLOCK_COUNT];
+  std::vector<uint8_t> settings;
+
+  template <typename T>
+  T At(size_t offset) const {
+    T value;
+    memcpy(&value, crom.data() + offset, sizeof(T));
+    return value;
+  }
+
+  bool Parse() {
+    size_t pos = 0;
+    memcpy(source.romName, crom.data(), 64);
+    pos += 64;
+    const uint32_t sizeheader = At<uint32_t>(pos);
+    pos += 4;
+    if (sizeheader < 20 * sizeof(uint32_t)) return false;
+    source.width = At<uint32_t>(pos);
+    source.height = At<uint32_t>(pos + 4);
+    source.widthExtra = At<uint32_t>(pos + 8);
+    source.heightExtra = At<uint32_t>(pos + 12);
+    source.frames = At<uint32_t>(pos + 16);
+    source.colors = At<uint32_t>(pos + 20);
+    source.comparisonMasks = At<uint32_t>(pos + 24);
+    source.sprites = At<uint32_t>(pos + 28);
+    source.backgrounds = At<uint16_t>(pos + 32);
+    pos += 34;
+    source.is256x64 = At<int32_t>(pos) != 0;
+    pos += 4;
+    uint32_t formatVersion = 0;
+    source.spritesPerFrame = LEGACY_SPRITES_PER_FRAME;
+    if (sizeheader >= 21 * sizeof(uint32_t)) {
+      formatVersion = At<uint32_t>(pos);
+      pos += 4;
+      if (formatVersion >= 1) {
+        source.spritesPerFrame = At<uint32_t>(pos);
+        pos += 4;
+      }
+    }
+    const size_t plane = (size_t)source.width * source.height;
+    const size_t extra = (size_t)source.widthExtra * source.heightExtra;
+    const size_t native = source.is256x64 ? extra : plane;
+    const size_t sprite = (size_t)MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
+    const size_t c = source.colors;
+    const size_t s = source.spritesPerFrame;
+    const uint32_t F = source.frames, M = source.comparisonMasks,
+                   S = source.sprites, B = source.backgrounds;
+    struct Entry {
+      Serum_Block block;
+      size_t bytes;
+      uint32_t count;
+    };
+    const Entry entries[] = {
+        {SERUM_BLOCK_FRAME_HASH, 4, F},
+        {SERUM_BLOCK_FRAME_SHAPE_MODE, 1, F},
+        {SERUM_BLOCK_FRAME_MASK_ID, 1, F},
+        {SERUM_BLOCK_COMPARISON_MASK, native, M},
+        {SERUM_BLOCK_FRAME_HAS_EXTRA, 1, F},
+        {SERUM_BLOCK_FRAME_COLORS, 2 * plane, F},
+        {SERUM_BLOCK_FRAME_COLORS_EXTRA, 2 * extra, F},
+        {SERUM_BLOCK_FRAME_DYNAMIC_MASK, plane, F},
+        {SERUM_BLOCK_FRAME_DYNAMIC_MASK_EXTRA, extra, F},
+        {SERUM_BLOCK_FRAME_DYNAMIC_COLORS, 2 * 32 * c, F},
+        {SERUM_BLOCK_FRAME_DYNAMIC_COLORS_EXTRA, 2 * 32 * c, F},
+        {SERUM_BLOCK_SPRITE_HAS_EXTRA, 1, S},
+        {SERUM_BLOCK_FRAME_SPRITES, formatVersion >= 1 ? 2 * s : s, F},
+        {SERUM_BLOCK_SPRITE_ORIGINAL, sprite, S},
+        {SERUM_BLOCK_SPRITE_COLORS, 2 * sprite, S},
+        {SERUM_BLOCK_SPRITE_MASK_EXTRA, sprite, S},
+        {SERUM_BLOCK_SPRITE_COLORS_EXTRA, 2 * sprite, S},
+        {SERUM_BLOCK_FRAME_ACTIVE, 1, F},
+        {SERUM_BLOCK_FRAME_ROTATIONS, 2 * 64 * 4, F},
+        {SERUM_BLOCK_FRAME_ROTATIONS_EXTRA, 2 * 64 * 4, F},
+        {SERUM_BLOCK_SPRITE_DETECTION_DWORDS, 4 * 4, S},
+        {SERUM_BLOCK_SPRITE_DETECTION_POSITIONS, 2 * 4, S},
+        {SERUM_BLOCK_SPRITE_DETECTION_AREAS, 2 * 4 * 4, S},
+        {SERUM_BLOCK_FRAME_TRIGGER, 4, F},
+        {SERUM_BLOCK_FRAME_SPRITE_BOUNDS, 2 * s * 4, F},
+        {SERUM_BLOCK_BACKGROUND_HAS_EXTRA, 1, B},
+        {SERUM_BLOCK_BACKGROUND_COLORS, 2 * plane, B},
+        {SERUM_BLOCK_BACKGROUND_COLORS_EXTRA, 2 * extra, B},
+        {SERUM_BLOCK_FRAME_BACKGROUND_ID, 2, F},
+        {SERUM_BLOCK_FRAME_BACKGROUND_MASK, plane, F},
+        {SERUM_BLOCK_FRAME_BACKGROUND_MASK_EXTRA, extra, F},
+        {SERUM_BLOCK_FRAME_SHADOW_DIRECTIONS, 32, F},
+        {SERUM_BLOCK_FRAME_SHADOW_COLORS, 2 * 32, F},
+        {SERUM_BLOCK_FRAME_SHADOW_DIRECTIONS_EXTRA, 32, F},
+        {SERUM_BLOCK_FRAME_SHADOW_COLORS_EXTRA, 2 * 32, F},
+        {SERUM_BLOCK_SPRITE_DYNAMIC_COLORS, 2 * 9 * c, S},
+        {SERUM_BLOCK_SPRITE_DYNAMIC_COLORS_EXTRA, 2 * 9 * c, S},
+        {SERUM_BLOCK_SPRITE_DYNAMIC_MASK, sprite, S},
+        {SERUM_BLOCK_SPRITE_DYNAMIC_MASK_EXTRA, sprite, S},
+        {SERUM_BLOCK_SPRITE_SHAPE_MODE, 1, S},
+    };
+    for (const Entry& entry : entries) {
+      Block& block = blocks[entry.block];
+      block.offset = pos;
+      block.elementBytes = entry.bytes;
+      block.narrowSprites =
+          entry.block == SERUM_BLOCK_FRAME_SPRITES && formatVersion == 0;
+      pos += entry.bytes * entry.count;
+      if (pos > crom.size()) return false;
+    }
+    if (crom.size() - pos >= 8 && At<uint32_t>(pos) == kCromSettingsMagic) {
+      // A payload cut short is handed over as far as it goes, for libserum
+      // to refuse.
+      const size_t size =
+          std::min<size_t>(At<uint32_t>(pos + 4), crom.size() - pos - 8);
+      settings.assign(crom.begin() + pos + 8, crom.begin() + pos + 8 + size);
+    }
+    source.settings = settings.empty() ? nullptr : settings.data();
+    source.settingsSize = settings.size();
+    source.userData = this;
+    source.fill = &Fill;
+    return true;
+  }
+
+  static void SERUM_CALLBACK Fill(void* userData, Serum_Block block,
+                                  uint32_t index, void* out, size_t size) {
+    const CromSource& self = *static_cast<CromSource*>(userData);
+    const Block& b = self.blocks[block];
+    const uint8_t* element =
+        self.crom.data() + b.offset + index * b.elementBytes;
+    if (b.narrowSprites) {
+      uint16_t* wide = static_cast<uint16_t*>(out);
+      for (size_t i = 0; i < size / 2; ++i)
+        wide[i] = element[i] == 255 ? SERUM_NO_SPRITE : element[i];
+      return;
+    }
+    CHECK_EQ(size, b.elementBytes);
+    memcpy(out, element, size);
+  }
+};
+
+// Loads the colorization of the cROM bytes through Serum_LoadFromSource(),
+// with the scenes of the pup.csv at csvPath when one is given. NULL also when
+// the bytes are not a cROM CromSource can parse.
+static Serum_Frame_Struc* LoadCrom(const std::vector<uint8_t>& crom,
+                                   uint8_t flags, const char* csvPath = NULL) {
+  CromSource source;
+  source.crom = crom;
+  if (!source.Parse()) {
+    Serum_Dispose();
+    return NULL;
+  }
+  return Serum_LoadFromSource(&source.source, csvPath, flags);
+}
+
+// Writes the cROMc of the cROM bytes through Serum_ConcentrateFromSource() to
+// <dir>/<rom>/<rom>.cROMc, where Serum_Load(dir, rom, ...) finds it.
+static bool WriteCromc(const std::vector<uint8_t>& crom,
+                       const std::filesystem::path& dir, const char* rom) {
+  CromSource source;
+  source.crom = crom;
+  if (!source.Parse()) return false;
+  std::filesystem::create_directories(dir / rom);
+  const std::filesystem::path target =
+      dir / rom / (std::string(rom) + ".cROMc");
+  return Serum_ConcentrateFromSource(&source.source, target.string().c_str());
+}
+
+}  // namespace source
+
+// ---------------------------------------------------------------------------
 // is256x64 projects
 //
 // A cROM whose ROM frame is 256x64 while its header describes a 128x32
@@ -2411,9 +2421,10 @@ static void Test_DynamicContentAndItsShadowDoNotRotateBoth(void) {
 // only; what the file stores for the 128x32 one is loaded and never used, and
 // the synthetic project gives it colours of its own (0x08xx, 0x2xxx, 0xDxxx,
 // 0xE0xx, 0x01xx, 0xF000) so that any of it reaching the output shows.
-// These go through Serum_Load() on a cROM written to a
-// temporary directory, so they cover the stream loader, the concentrate round
-// trip and the public colorize call rather than a hand-built g_serumData.
+// These go through Serum_LoadFromSource(), and through Serum_Load() on the
+// cROMc Serum_ConcentrateFromSource() writes to a temporary directory, so they
+// cover the block loader, the concentrate round trip and the public colorize
+// call rather than a hand-built g_serumData.
 // ---------------------------------------------------------------------------
 
 namespace n256 {
@@ -2834,22 +2845,27 @@ static Serum_Frame_Struc* LoadUnchecked(const Synth& s, uint8_t flags,
   const std::filesystem::path dir = Dir();
   std::filesystem::remove_all(dir);
   std::filesystem::create_directories(dir / kRom);
-  WriteTestFile(dir / kRom / (std::string(kRom) + ".cROM"), s.Serialize());
+  const std::filesystem::path csvPath =
+      dir / kRom / (std::string(kRom) + ".pup.csv");
   if (csv) {
-    std::ofstream out(dir / kRom / (std::string(kRom) + ".pup.csv"));
+    std::ofstream out(csvPath);
     out << csv;
   }
-  Serum_SetGenerateCRomC(viaConcentrate);
   Serum_SetMaximumUnknownFramesToSkip(0);
   Serum_SetIgnoreUnknownFramesTimeout(0);
-  Serum_Frame_Struc* loaded = Serum_Load(dir.string().c_str(), kRom, flags);
-  Serum_SetGenerateCRomC(true);
-  return loaded;
+  if (!viaConcentrate)
+    return source::LoadCrom(s.Serialize(), flags,
+                            csv ? csvPath.string().c_str() : NULL);
+  if (!source::WriteCromc(s.Serialize(), dir, kRom)) {
+    Serum_Dispose();
+    return NULL;
+  }
+  return Serum_Load(dir.string().c_str(), kRom, flags);
 }
 
-// Load the project through the public call. With `viaConcentrate` the raw
-// cROM is converted and the generated cROMc is what ends up loaded, which is
-// the path a player takes from its second start on.
+// Load the project through the public calls. Without `viaConcentrate` the
+// source is loaded as an authoring tool loads it; with it, the cROMc written
+// from the source is loaded through Serum_Load(), the path a player takes.
 static bool Load(const Synth& s, uint8_t flags, bool viaConcentrate,
                  const char* csv = NULL) {
   const std::filesystem::path dir = Dir();
@@ -2860,15 +2876,13 @@ static bool Load(const Synth& s, uint8_t flags, bool viaConcentrate,
   return loaded != NULL;
 }
 
-// Load the cROMc a previous Load(..., true) left behind, directly and with
-// exactly these flags: the path a player takes from its second start on, where
-// nothing widens the request the way a conversion from the cROM does.
+// Load the cROMc a previous Load(..., true) left behind again, with exactly
+// these flags.
 static bool Reload(uint8_t flags) {
   Serum_Dispose();
   Serum_SetMaximumUnknownFramesToSkip(0);
   Serum_SetIgnoreUnknownFramesTimeout(0);
   const std::filesystem::path dir = Dir();
-  std::filesystem::remove(dir / kRom / (std::string(kRom) + ".cROM"));
   Serum_Frame_Struc* loaded = Serum_Load(dir.string().c_str(), kRom, flags);
   CHECK(loaded != NULL);
   lastTriggerID = 0xffffffff;
@@ -2941,190 +2955,9 @@ static const uint8_t kBothPlanes =
 
 }  // namespace n256
 
-namespace source {
-
-// A Serum_Colorization_Source that serves the blocks of a cROM held in memory
-// (header revision 20 or later), as an authoring tool would serve its own
-// data: what Serum_LoadFromSource() builds from it has to be what
-// Serum_LoadFromMemory() loads from the cROM.
-struct CromSource {
-  struct Block {
-    size_t offset = 0;
-    size_t elementBytes = 0;
-    // Format version 0: 8-bit sprite IDs, handed out widened.
-    bool narrowSprites = false;
-  };
-
-  std::vector<uint8_t> crom;
-  Serum_Colorization_Source source{};
-  Block blocks[SERUM_BLOCK_COUNT];
-  std::vector<uint8_t> settings;
-
-  template <typename T>
-  T At(size_t offset) const {
-    T value;
-    memcpy(&value, crom.data() + offset, sizeof(T));
-    return value;
-  }
-
-  bool Parse() {
-    size_t pos = 0;
-    memcpy(source.romName, crom.data(), 64);
-    pos += 64;
-    const uint32_t sizeheader = At<uint32_t>(pos);
-    pos += 4;
-    if (sizeheader < 20 * sizeof(uint32_t)) return false;
-    source.width = At<uint32_t>(pos);
-    source.height = At<uint32_t>(pos + 4);
-    source.widthExtra = At<uint32_t>(pos + 8);
-    source.heightExtra = At<uint32_t>(pos + 12);
-    source.frames = At<uint32_t>(pos + 16);
-    source.colors = At<uint32_t>(pos + 20);
-    source.comparisonMasks = At<uint32_t>(pos + 24);
-    source.sprites = At<uint32_t>(pos + 28);
-    source.backgrounds = At<uint16_t>(pos + 32);
-    pos += 34;
-    source.is256x64 = At<int32_t>(pos) != 0;
-    pos += 4;
-    uint32_t formatVersion = 0;
-    source.spritesPerFrame = LEGACY_SPRITES_PER_FRAME;
-    if (sizeheader >= 21 * sizeof(uint32_t)) {
-      formatVersion = At<uint32_t>(pos);
-      pos += 4;
-      if (formatVersion >= 1) {
-        source.spritesPerFrame = At<uint32_t>(pos);
-        pos += 4;
-      }
-    }
-    const size_t plane = (size_t)source.width * source.height;
-    const size_t extra = (size_t)source.widthExtra * source.heightExtra;
-    const size_t native = source.is256x64 ? extra : plane;
-    const size_t sprite = (size_t)MAX_SPRITE_WIDTH * MAX_SPRITE_HEIGHT;
-    const size_t c = source.colors;
-    const size_t s = source.spritesPerFrame;
-    const uint32_t F = source.frames, M = source.comparisonMasks,
-                   S = source.sprites, B = source.backgrounds;
-    struct Entry {
-      Serum_Block block;
-      size_t bytes;
-      uint32_t count;
-    };
-    const Entry entries[] = {
-        {SERUM_BLOCK_FRAME_HASH, 4, F},
-        {SERUM_BLOCK_FRAME_SHAPE_MODE, 1, F},
-        {SERUM_BLOCK_FRAME_MASK_ID, 1, F},
-        {SERUM_BLOCK_COMPARISON_MASK, native, M},
-        {SERUM_BLOCK_FRAME_HAS_EXTRA, 1, F},
-        {SERUM_BLOCK_FRAME_COLORS, 2 * plane, F},
-        {SERUM_BLOCK_FRAME_COLORS_EXTRA, 2 * extra, F},
-        {SERUM_BLOCK_FRAME_DYNAMIC_MASK, plane, F},
-        {SERUM_BLOCK_FRAME_DYNAMIC_MASK_EXTRA, extra, F},
-        {SERUM_BLOCK_FRAME_DYNAMIC_COLORS, 2 * 32 * c, F},
-        {SERUM_BLOCK_FRAME_DYNAMIC_COLORS_EXTRA, 2 * 32 * c, F},
-        {SERUM_BLOCK_SPRITE_HAS_EXTRA, 1, S},
-        {SERUM_BLOCK_FRAME_SPRITES, formatVersion >= 1 ? 2 * s : s, F},
-        {SERUM_BLOCK_SPRITE_ORIGINAL, sprite, S},
-        {SERUM_BLOCK_SPRITE_COLORS, 2 * sprite, S},
-        {SERUM_BLOCK_SPRITE_MASK_EXTRA, sprite, S},
-        {SERUM_BLOCK_SPRITE_COLORS_EXTRA, 2 * sprite, S},
-        {SERUM_BLOCK_FRAME_ACTIVE, 1, F},
-        {SERUM_BLOCK_FRAME_ROTATIONS, 2 * 64 * 4, F},
-        {SERUM_BLOCK_FRAME_ROTATIONS_EXTRA, 2 * 64 * 4, F},
-        {SERUM_BLOCK_SPRITE_DETECTION_DWORDS, 4 * 4, S},
-        {SERUM_BLOCK_SPRITE_DETECTION_POSITIONS, 2 * 4, S},
-        {SERUM_BLOCK_SPRITE_DETECTION_AREAS, 2 * 4 * 4, S},
-        {SERUM_BLOCK_FRAME_TRIGGER, 4, F},
-        {SERUM_BLOCK_FRAME_SPRITE_BOUNDS, 2 * s * 4, F},
-        {SERUM_BLOCK_BACKGROUND_HAS_EXTRA, 1, B},
-        {SERUM_BLOCK_BACKGROUND_COLORS, 2 * plane, B},
-        {SERUM_BLOCK_BACKGROUND_COLORS_EXTRA, 2 * extra, B},
-        {SERUM_BLOCK_FRAME_BACKGROUND_ID, 2, F},
-        {SERUM_BLOCK_FRAME_BACKGROUND_MASK, plane, F},
-        {SERUM_BLOCK_FRAME_BACKGROUND_MASK_EXTRA, extra, F},
-        {SERUM_BLOCK_FRAME_SHADOW_DIRECTIONS, 32, F},
-        {SERUM_BLOCK_FRAME_SHADOW_COLORS, 2 * 32, F},
-        {SERUM_BLOCK_FRAME_SHADOW_DIRECTIONS_EXTRA, 32, F},
-        {SERUM_BLOCK_FRAME_SHADOW_COLORS_EXTRA, 2 * 32, F},
-        {SERUM_BLOCK_SPRITE_DYNAMIC_COLORS, 2 * 9 * c, S},
-        {SERUM_BLOCK_SPRITE_DYNAMIC_COLORS_EXTRA, 2 * 9 * c, S},
-        {SERUM_BLOCK_SPRITE_DYNAMIC_MASK, sprite, S},
-        {SERUM_BLOCK_SPRITE_DYNAMIC_MASK_EXTRA, sprite, S},
-        {SERUM_BLOCK_SPRITE_SHAPE_MODE, 1, S},
-    };
-    for (const Entry& entry : entries) {
-      Block& block = blocks[entry.block];
-      block.offset = pos;
-      block.elementBytes = entry.bytes;
-      block.narrowSprites =
-          entry.block == SERUM_BLOCK_FRAME_SPRITES && formatVersion == 0;
-      pos += entry.bytes * entry.count;
-      if (pos > crom.size()) return false;
-    }
-    if (crom.size() - pos >= 8 && At<uint32_t>(pos) == kCromSettingsMagic) {
-      const uint32_t size = At<uint32_t>(pos + 4);
-      settings.assign(crom.begin() + pos + 8, crom.begin() + pos + 8 + size);
-    }
-    source.settings = settings.empty() ? nullptr : settings.data();
-    source.settingsSize = settings.size();
-    source.userData = this;
-    source.fill = &Fill;
-    return true;
-  }
-
-  static void SERUM_CALLBACK Fill(void* userData, Serum_Block block,
-                                  uint32_t index, void* out, size_t size) {
-    const CromSource& self = *static_cast<CromSource*>(userData);
-    const Block& b = self.blocks[block];
-    const uint8_t* element =
-        self.crom.data() + b.offset + index * b.elementBytes;
-    if (b.narrowSprites) {
-      uint16_t* wide = static_cast<uint16_t*>(out);
-      for (size_t i = 0; i < size / 2; ++i)
-        wide[i] = element[i] == 255 ? SERUM_NO_SPRITE : element[i];
-      return;
-    }
-    CHECK_EQ(size, b.elementBytes);
-    memcpy(out, element, size);
-  }
-};
-
-// The cROMc a loaded colorization writes, as bytes.
-static std::vector<uint8_t> Concentrate(const char* name) {
-  const std::filesystem::path dir = n256::Dir();
-  std::filesystem::create_directories(dir);
-  const std::filesystem::path crom = dir / (std::string(name) + ".cROM");
-  CHECK(Serum_SaveConcentrate(crom.string().c_str()));
-  std::ifstream in(dir / (std::string(name) + ".cROMc"), std::ios::binary);
-  return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
-}
-
-// Builds the cROM's colorization through a source and through the cROM, and
-// compares the cROMc both write.
-static void ExpectSameAsCrom(const std::vector<uint8_t>& crom,
-                             const char* what) {
-  CromSource source;
-  source.crom = crom;
-  CHECK(source.Parse());
-  CHECK(Serum_LoadFromMemory(crom.data(), crom.size(), n256::kBothPlanes) !=
-        NULL);
-  const std::vector<uint8_t> fromCrom = Concentrate("from_crom");
-  Serum_Dispose();
-  CHECK(Serum_LoadFromSource(&source.source, NULL, n256::kBothPlanes) != NULL);
-  const std::vector<uint8_t> fromSource = Concentrate("from_source");
-  Serum_Dispose();
-  if (fromCrom.empty() || fromCrom != fromSource) {
-    Fail(__FILE__, __LINE__,
-         "%s: the cROMc from the source differs (%zu, %zu bytes)", what,
-         fromCrom.size(), fromSource.size());
-  }
-}
-
-}  // namespace source
-
 // The flag survives both load paths and leaves one plane: 256x64. There is no
 // 128x32 plane, not even an allocated one. It must not outlive the
-// colorization it came with -- a cROM with an older header, or a v1 one, never
-// mentions it.
+// colorization it came with.
 static void Test_N256LoadsAndForgets(void) {
   const n256::Synth s;
   for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
@@ -3477,8 +3310,9 @@ static void Test_N256Request32pOnly(void) {
 // nothing to fall back to and the flag changes nothing.
 static void Test_N256RequestFallback(void) {
   const n256::Synth s;
-  // FLAG_REQUEST_FORCE keeps a load from the cROM from widening the request,
-  // so there the stream loader has to keep the extra-plane data on its own.
+  // FLAG_REQUEST_FORCE keeps a load from the source from widening the
+  // request, so there the block loader has to keep the extra-plane data on its
+  // own.
   const uint8_t requests[4] = {
       FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_FALLBACK,
       FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_FALLBACK | FLAG_REQUEST_FORCE,
@@ -4056,7 +3890,7 @@ static void Test_ScaledSpriteBlocksReuse(void) {
   }
 }
 
-// The same through the public calls, on a cROM and on the cROMc made from it:
+// The same through the public calls, from the source and from its cROMc:
 // a 128x32 project, a frame with no HD content of its own, and a sprite that
 // moves inside its bounding box and then goes away while the frame stays the
 // same one. Every colour is unique, so nothing is rounded and each 128x32
@@ -4512,10 +4346,10 @@ static void Test_MonochromeFrameBlocksReuse(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Serum_LoadFromMemory()
+// Loaded state and output
 //
-// The same cROM bytes, once as a file through Serum_Load() and once as a
-// buffer, have to give the same loaded state and the same output.
+// What a caller can see of a loaded colorization, to compare two loads of the
+// same data.
 
 namespace memload {
 
@@ -4616,50 +4450,6 @@ static n256::Synth Plain128x32(void) {
 
 }  // namespace memload
 
-static void Test_MemoryLoadMatchesFileLoad(void) {
-  const uint8_t requests[] = {
-      0,
-      FLAG_REQUEST_32P_FRAMES,
-      FLAG_REQUEST_64P_FRAMES,
-      n256::kBothPlanes,
-      FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_FALLBACK,
-      FLAG_REQUEST_64P_FRAMES | FLAG_REQUEST_FALLBACK,
-      (uint8_t)(n256::kBothPlanes | FLAG_REQUEST_FILL_MODIFIED_ELEMENTS),
-  };
-  const n256::Synth projects[] = {n256::Synth(), memload::Plain128x32()};
-  for (const n256::Synth& s : projects) {
-    const uint32_t framePixels = s.is256x64 ? n256::kNPx : n256::kOPx;
-    const std::vector<uint8_t> crom = s.Serialize();
-    for (uint8_t flags : requests) {
-      if (!n256::Load(s, flags, false)) continue;
-      const memload::Capture fromFile = memload::Run(s, framePixels);
-      n256::Unload();
-
-      // A copy of exactly the cROM's size, released right after the call.
-      uint8_t* buffer = (uint8_t*)malloc(crom.size());
-      memcpy(buffer, crom.data(), crom.size());
-      Serum_SetMaximumUnknownFramesToSkip(0);
-      Serum_SetIgnoreUnknownFramesTimeout(0);
-      Serum_Frame_Struc* loaded =
-          Serum_LoadFromMemory(buffer, crom.size(), flags);
-      free(buffer);
-      CHECK(loaded == &mySerum);
-      CHECK_EQ(Serum_GetLastErrorMessage()[0], '\0');
-      if (loaded) {
-        CHECK_EQ(g_serumData.is256x64, s.is256x64);
-        CHECK(!g_serumData.sceneGenerator->isActive());
-        const memload::Capture fromMemory = memload::Run(s, framePixels);
-        CHECK(fromMemory == fromFile);
-        CHECK(!fromMemory.output.empty() ||
-              (s.is256x64 && flags == FLAG_REQUEST_32P_FRAMES));
-      }
-      Serum_Dispose();
-      CHECK(!cromloaded);
-    }
-  }
-  Serum_SetMaximumUnknownFramesToSkip(0);
-}
-
 // Scenes set from stored data, as a cROMc load does, start a scene after
 // inactivity and hold a last frame as the pup.csv they came from does.
 static void Test_SceneDataKeepsAutoStartAndEndHold(void) {
@@ -4724,30 +4514,34 @@ static std::vector<uint8_t> Block(uint32_t contents, uint8_t algorithm,
   return block;
 }
 
-// Writes the cROM with the block appended, a pup.csv naming another scene and a
-// scaling.txt asking for the other settings, and loads it.
+// Writes a pup.csv naming another scene and a scaling.txt asking for the other
+// settings, and loads the cROM with its block appended: through
+// Serum_LoadFromSource() with that pup.csv, or through Serum_Load() on the
+// cROMc written from it, with both sidecars beside the cROMc.
 static Serum_Frame_Struc* Load(const std::vector<uint8_t>& crom,
                                bool viaConcentrate) {
   const std::filesystem::path dir = n256::Dir();
   std::filesystem::remove_all(dir);
   std::filesystem::create_directories(dir / n256::kRom);
-  WriteTestFile(dir / n256::kRom / (std::string(n256::kRom) + ".cROM"), crom);
+  const std::filesystem::path csvPath =
+      dir / n256::kRom / (std::string(n256::kRom) + ".pup.csv");
   {
-    std::ofstream out(dir / n256::kRom /
-                      (std::string(n256::kRom) + ".pup.csv"));
+    std::ofstream out(csvPath);
     out << "9,2,100\n";
   }
   {
     std::ofstream out(dir / n256::kRom / "scaling.txt");
     out << "scale2x\nshadow-offset: native\n";
   }
-  Serum_SetGenerateCRomC(viaConcentrate);
   Serum_SetMaximumUnknownFramesToSkip(0);
   Serum_SetIgnoreUnknownFramesTimeout(0);
-  Serum_Frame_Struc* loaded =
-      Serum_Load(dir.string().c_str(), n256::kRom, n256::kBothPlanes);
-  Serum_SetGenerateCRomC(true);
-  return loaded;
+  if (!viaConcentrate)
+    return source::LoadCrom(crom, n256::kBothPlanes, csvPath.string().c_str());
+  if (!source::WriteCromc(crom, dir, n256::kRom)) {
+    Serum_Dispose();
+    return NULL;
+  }
+  return Serum_Load(dir.string().c_str(), n256::kRom, n256::kBothPlanes);
 }
 
 static bool HasScene(uint16_t sceneId) {
@@ -4762,8 +4556,8 @@ static bool HasScene(uint16_t sceneId) {
 
 // cROM format version 1: up to MAX_SPRITES_PER_FRAME slots per frame, the
 // count in the header, and 16-bit sprite IDs. A sprite with an ID beyond the
-// old 8-bit range in a slot beyond the old 32 is found, from the cROM and from
-// the cROMc made from it.
+// old 8-bit range in a slot beyond the old 32 is found, from the source and
+// from the cROMc made from it.
 static void Test_CromFormat1Sprites(void) {
   n256::Synth s;
   s.SetFormat(1, MAX_SPRITES_PER_FRAME);
@@ -4801,11 +4595,6 @@ static void Test_CromFormat1Sprites(void) {
     CHECK_EQ(g_serumData.SpritesPerFrame(), (uint32_t)LEGACY_SPRITES_PER_FRAME);
   }
   n256::Unload();
-  // A newer format than the library reads is refused, not misread.
-  n256::Synth newer;
-  newer.SetFormat(SERUM_CROM_FORMAT_VERSION + 1, MAX_SPRITES_PER_FRAME);
-  CHECK(n256::LoadUnchecked(newer, n256::kBothPlanes, false, NULL) == NULL);
-  n256::Unload();
 }
 
 // A cROMc before concentrate version 10 has 8-bit sprite IDs and 32 slots per
@@ -4820,7 +4609,6 @@ static void Test_ConcentrateVersion9Sprites(void) {
   g_serumData.concentrateFileVersion = 9;
   CHECK(g_serumData.SaveToFile(cromc.c_str()));
   Serum_Dispose();
-  std::filesystem::remove(dir / (std::string(n256::kRom) + ".cROM"));
   Serum_SetGenerateCRomC(false);
   CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
                    n256::kBothPlanes) != NULL);
@@ -4841,9 +4629,9 @@ static void Test_ConcentrateVersion9Sprites(void) {
 }
 
 // The scenes and scaling settings of a cROM's settings block are the
-// colorization's own: a pup.csv or scaling.txt beside it changes neither, in
-// the cROM, in the cROMc made from it, in that cROMc loaded again, or in a
-// load from memory. Without the block, both sidecars apply as before.
+// colorization's own: a pup.csv or scaling.txt beside it changes neither,
+// loaded from the source with that pup.csv, in the cROMc made from it, or in
+// that cROMc loaded again. Without the block, the pup.csv applies as before.
 static void Test_CromSettingsBlock(void) {
   n256::Synth s;
   {
@@ -4885,39 +4673,35 @@ static void Test_CromSettingsBlock(void) {
       CHECK_EQ(g_serumData.concentrateFileVersion, SERUM_CONCENTRATE_VERSION);
       // The cROMc alone, with both sidecars still beside it.
       Serum_Dispose();
-      std::filesystem::remove(n256::Dir() / n256::kRom /
-                              (std::string(n256::kRom) + ".cROM"));
       CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
                        n256::kBothPlanes) != NULL);
       expectBlock();
     }
     Serum_Dispose();
   }
-  const std::string csvPath =
-      (n256::Dir() / n256::kRom / (std::string(n256::kRom) + ".pup.csv"))
-          .string();
-  CHECK(Serum_LoadFromMemoryWithScenes(crom.data(), crom.size(),
-                                       csvPath.c_str(),
-                                       n256::kBothPlanes) != NULL);
-  expectBlock();
-  Serum_Dispose();
 
-  // A block that sets nothing leaves both sidecars in charge.
+  // A block that sets nothing leaves the pup.csv in charge, and beside a
+  // cROMc the scaling.txt as well.
   std::vector<uint8_t> empty = s.Serialize();
   const std::vector<uint8_t> nothing = settings::Block(0, 0, 0);
   empty.insert(empty.end(), nothing.begin(), nothing.end());
-  CHECK(settings::Load(empty, false) != NULL);
-  CHECK(!g_serumData.scenesFromColorization);
-  CHECK(!g_serumData.scalingFromColorization);
-  CHECK(settings::HasScene(9));
-  CHECK(!settings::HasScene(7));
-  Serum_Dispose();
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    CHECK(settings::Load(empty, viaConcentrate != 0) != NULL);
+    CHECK(!g_serumData.scenesFromColorization);
+    CHECK(!g_serumData.scalingFromColorization);
+    CHECK(settings::HasScene(9));
+    CHECK(!settings::HasScene(7));
+    if (viaConcentrate) {
+      CHECK_EQ(g_serumData.scalingAlgorithm, SERUM_SCALING_SCALE2X);
+      CHECK_EQ(g_serumData.shadowOffsetMode, SERUM_SHADOW_OFFSET_NATIVE);
+    }
+    Serum_Dispose();
+  }
 
   // A block cut short fails the load.
   std::vector<uint8_t> cut = crom;
   cut.resize(cut.size() - 3);
-  CHECK(Serum_LoadFromMemory(cut.data(), cut.size(), n256::kBothPlanes) ==
-        NULL);
+  CHECK(source::LoadCrom(cut, n256::kBothPlanes) == NULL);
   n256::Unload();
 }
 
@@ -4989,8 +4773,6 @@ static void Test_CromSettingsLights(void) {
     if (viaConcentrate) {
       // The cROMc alone.
       Serum_Dispose();
-      std::filesystem::remove(n256::Dir() / n256::kRom /
-                              (std::string(n256::kRom) + ".cROM"));
       CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
                        n256::kBothPlanes) != NULL);
     }
@@ -5028,8 +4810,7 @@ static void Test_CromSettingsLights(void) {
   }
 
   // Without lights: no defaults.
-  CHECK(Serum_LoadFromMemory(s.Serialize().data(), s.Serialize().size(),
-                             n256::kBothPlanes) != NULL);
+  CHECK(source::LoadCrom(s.Serialize(), n256::kBothPlanes) != NULL);
   Serum_Light_Effect none[SERUM_LIGHT_CHANNELS] = {};
   CHECK_EQ(Serum_GetDefaultLightEffects(none), 0u);
   Serum_Dispose();
@@ -5040,8 +4821,7 @@ static void Test_CromSettingsLights(void) {
   // The default of channel 0: kind at payload offset 4 + 4 + 2 * 24.
   badBlock[8 + 4 + 4 + 2 * 24 + 2] = 7;
   broken.insert(broken.end(), badBlock.begin(), badBlock.end());
-  CHECK(Serum_LoadFromMemory(broken.data(), broken.size(), n256::kBothPlanes) ==
-        NULL);
+  CHECK(source::LoadCrom(broken, n256::kBothPlanes) == NULL);
   n256::Unload();
 }
 
@@ -5119,8 +4899,6 @@ static void Test_CromSettingsDofEvents(void) {
     CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
     if (viaConcentrate) {
       Serum_Dispose();
-      std::filesystem::remove(n256::Dir() / n256::kRom /
-                              (std::string(n256::kRom) + ".cROM"));
       CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
                        n256::kBothPlanes) != NULL);
     }
@@ -5157,8 +4935,7 @@ static void Test_CromSettingsDofEvents(void) {
   CHECK(settings::Load(crom, false) != NULL);
   n256::Colorize(s.Frame(n256::kStatic));
   Serum_Dispose();
-  CHECK(Serum_LoadFromMemory(s.Serialize().data(), s.Serialize().size(),
-                             n256::kBothPlanes) != NULL);
+  CHECK(source::LoadCrom(s.Serialize(), n256::kBothPlanes) != NULL);
   CHECK(dof::Fetch() == std::string());
   n256::Colorize(s.Frame(n256::kBackground));
   CHECK(dof::Fetch() == std::string());
@@ -5172,8 +4949,7 @@ static void Test_CromSettingsDofEvents(void) {
         dof::Block({{n256::kFrameCount, {{'L', 1, 1, false, 0}}}})}) {
     std::vector<uint8_t> broken = s.Serialize();
     broken.insert(broken.end(), bad.begin(), bad.end());
-    CHECK(Serum_LoadFromMemory(broken.data(), broken.size(),
-                               n256::kBothPlanes) == NULL);
+    CHECK(source::LoadCrom(broken, n256::kBothPlanes) == NULL);
   }
   n256::Unload();
 }
@@ -5191,8 +4967,7 @@ static void Test_CromSettingsFrameTriggers(void) {
     s.triggers[n256::kStatic] = 123;
     s.triggers[n256::kDynamic] = 50010;
     const std::vector<uint8_t> crom = s.Serialize();
-    CHECK(Serum_LoadFromMemory(crom.data(), crom.size(), n256::kBothPlanes) !=
-          NULL);
+    CHECK(source::LoadCrom(crom, n256::kBothPlanes) != NULL);
     CHECK_EQ(g_serumData.pupTriggerIDs[n256::kStatic][0], 123u);
     CHECK_EQ(g_serumData.triggerIDs[n256::kStatic][0], 123u);
     CHECK_EQ(g_serumData.pupTriggerIDs[n256::kDynamic][0], none);
@@ -5269,8 +5044,6 @@ static void Test_CromSettingsFrameTriggers(void) {
     CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
     if (viaConcentrate) {
       Serum_Dispose();
-      std::filesystem::remove(n256::Dir() / n256::kRom /
-                              (std::string(n256::kRom) + ".cROM"));
       CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
                        n256::kBothPlanes) != NULL);
     }
@@ -5296,8 +5069,7 @@ static void Test_CromSettingsFrameTriggers(void) {
         block({{n256::kFrameCount, 1, none, none}})}) {
     std::vector<uint8_t> broken = s.Serialize();
     broken.insert(broken.end(), bad.begin(), bad.end());
-    CHECK(Serum_LoadFromMemory(broken.data(), broken.size(),
-                               n256::kBothPlanes) == NULL);
+    CHECK(source::LoadCrom(broken, n256::kBothPlanes) == NULL);
   }
   n256::Unload();
 }
@@ -5367,8 +5139,6 @@ static void Test_CromSettingsSceneVariants(void) {
     CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
     if (viaConcentrate) {
       Serum_Dispose();
-      std::filesystem::remove(n256::Dir() / n256::kRom /
-                              (std::string(n256::kRom) + ".cROM"));
       CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
                        n256::kBothPlanes) != NULL);
     }
@@ -5385,8 +5155,7 @@ static void Test_CromSettingsSceneVariants(void) {
        {block({{8, 6}}), block({{8, 8}}), block({{8, 7}, {9, 8}})}) {
     std::vector<uint8_t> broken = s.Serialize();
     broken.insert(broken.end(), bad.begin(), bad.end());
-    CHECK(Serum_LoadFromMemory(broken.data(), broken.size(),
-                               n256::kBothPlanes) == NULL);
+    CHECK(source::LoadCrom(broken, n256::kBothPlanes) == NULL);
   }
   n256::Unload();
 }
@@ -5471,8 +5240,6 @@ static void Test_ConcentrateStoresSceneFramesAsDifferences(void) {
 
   CHECK(settings::Load(crom, true) != NULL);
   Serum_Dispose();
-  std::filesystem::remove(n256::Dir() / n256::kRom /
-                          (std::string(n256::kRom) + ".cROM"));
   CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
                    n256::kBothPlanes) != NULL);
   CHECK_EQ(g_serumData.concentrateFileVersion, 18);
@@ -5542,8 +5309,6 @@ static void Test_CromSettingsSpriteOffsets(void) {
       CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
       if (viaConcentrate) {
         Serum_Dispose();
-        std::filesystem::remove(n256::Dir() / n256::kRom /
-                                (std::string(n256::kRom) + ".cROM"));
         CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
                          FLAG_REQUEST_64P_FRAMES) != NULL);
       }
@@ -5564,8 +5329,7 @@ static void Test_CromSettingsSpriteOffsets(void) {
         block({{1000000, 0, 4, 0}})}) {
     std::vector<uint8_t> broken = s.Serialize();
     broken.insert(broken.end(), bad.begin(), bad.end());
-    CHECK(Serum_LoadFromMemory(broken.data(), broken.size(),
-                               n256::kBothPlanes) == NULL);
+    CHECK(source::LoadCrom(broken, n256::kBothPlanes) == NULL);
   }
   n256::Unload();
 }
@@ -5604,8 +5368,6 @@ static void Test_CromSettingsOriginalOnlySets(void) {
     CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
     if (viaConcentrate) {
       Serum_Dispose();
-      std::filesystem::remove(n256::Dir() / n256::kRom /
-                              (std::string(n256::kRom) + ".cROM"));
       CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
                        n256::kBothPlanes) != NULL);
     }
@@ -5614,16 +5376,14 @@ static void Test_CromSettingsOriginalOnlySets(void) {
     CHECK_EQ(g_serumData.OriginalOnlySets(n256::kBackground), 0u);
     Serum_Dispose();
   }
-  CHECK(Serum_LoadFromMemory(s.Serialize().data(), s.Serialize().size(),
-                             n256::kBothPlanes) != NULL);
+  CHECK(source::LoadCrom(s.Serialize(), n256::kBothPlanes) != NULL);
   CHECK(g_serumData.originalOnlySets.empty());
   Serum_Dispose();
   for (const auto& bad : {block({{n256::kStatic, 0u}}),
                           block({{n256::kDynamic, 1u}, {n256::kStatic, 1u}})}) {
     std::vector<uint8_t> broken = s.Serialize();
     broken.insert(broken.end(), bad.begin(), bad.end());
-    CHECK(Serum_LoadFromMemory(broken.data(), broken.size(),
-                               n256::kBothPlanes) == NULL);
+    CHECK(source::LoadCrom(broken, n256::kBothPlanes) == NULL);
   }
   n256::Unload();
 }
@@ -5697,8 +5457,6 @@ static void Test_CromSettingsSceneFrames(void) {
     CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
     if (viaConcentrate) {
       Serum_Dispose();
-      std::filesystem::remove(n256::Dir() / n256::kRom /
-                              (std::string(n256::kRom) + ".cROM"));
       CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
                        n256::kBothPlanes) != NULL);
     }
@@ -5720,8 +5478,7 @@ static void Test_CromSettingsSceneFrames(void) {
   std::vector<uint8_t> none = s.Serialize();
   const std::vector<uint8_t> empty = block({});
   none.insert(none.end(), empty.begin(), empty.end());
-  CHECK(Serum_LoadFromMemory(none.data(), none.size(), n256::kBothPlanes) !=
-        NULL);
+  CHECK(source::LoadCrom(none, n256::kBothPlanes) != NULL);
   CHECK(g_serumData.sceneFramesFromColorization);
   CHECK(std::none_of(g_serumData.frameIsScene.begin(),
                      g_serumData.frameIsScene.end(),
@@ -5734,8 +5491,7 @@ static void Test_CromSettingsSceneFrames(void) {
   const std::vector<uint8_t> scenesOnly =
       settings::Block(kCromSettingsScenes, 0, 0);
   markers.insert(markers.end(), scenesOnly.begin(), scenesOnly.end());
-  CHECK(Serum_LoadFromMemory(markers.data(), markers.size(),
-                             n256::kBothPlanes) != NULL);
+  CHECK(source::LoadCrom(markers, n256::kBothPlanes) != NULL);
   CHECK(!g_serumData.sceneFramesFromColorization);
   if (g_serumData.frameIsScene.size() == n256::kFrameCount)
     CHECK_EQ(g_serumData.frameIsScene[n256::kScene], 1);
@@ -5749,77 +5505,71 @@ static void Test_CromSettingsSceneFrames(void) {
         block({{n256::kStatic, 7, 0, 0}})}) {
     std::vector<uint8_t> broken = s.Serialize();
     broken.insert(broken.end(), bad.begin(), bad.end());
-    CHECK(Serum_LoadFromMemory(broken.data(), broken.size(),
-                               n256::kBothPlanes) == NULL);
+    CHECK(source::LoadCrom(broken, n256::kBothPlanes) == NULL);
   }
   n256::Unload();
 }
 
-// Serum_LoadFromSource() builds the colorization a cROM of the same data
-// loads: the same cROMc, for 8- and 16-bit sprite IDs and with a settings
-// block.
+// The colorization of the cROM bytes, loaded through Serum_LoadFromSource()
+// and through Serum_Load() on the cROMc Serum_ConcentrateFromSource() writes
+// from the same source: the same loaded state and the same output.
+static void ExpectConcentrateLoadsAsSource(const n256::Synth& s,
+                                           const std::vector<uint8_t>& crom,
+                                           const char* what) {
+  const uint32_t framePixels = s.is256x64 ? n256::kNPx : n256::kOPx;
+  Serum_SetMaximumUnknownFramesToSkip(0);
+  Serum_SetIgnoreUnknownFramesTimeout(0);
+  CHECK(source::LoadCrom(crom, n256::kBothPlanes) == &mySerum);
+  const memload::Capture fromSource = memload::Run(s, framePixels);
+  Serum_Dispose();
+  const std::filesystem::path dir = n256::Dir() / "export";
+  std::filesystem::remove_all(dir);
+  CHECK(source::WriteCromc(crom, dir, n256::kRom));
+  CHECK(Serum_Load(dir.string().c_str(), n256::kRom, n256::kBothPlanes) ==
+        &mySerum);
+  const memload::Capture fromCromc = memload::Run(s, framePixels);
+  Serum_Dispose();
+  if (fromSource.output.empty() || !(fromSource == fromCromc))
+    Fail(__FILE__, __LINE__, "%s: the cROMc does not load as the source does",
+         what);
+}
+
+// Serum_ConcentrateFromSource() writes the cROMc of the colorization
+// Serum_LoadFromSource() builds: for 8- and 16-bit sprite IDs and with a
+// settings block.
 static void Test_SourceBuildsTheCromsColorization(void) {
   n256::Synth s;
-  source::ExpectSameAsCrom(s.Serialize(), "format 0");
+  ExpectConcentrateLoadsAsSource(s, s.Serialize(), "format 0");
+  ExpectConcentrateLoadsAsSource(memload::Plain128x32(),
+                                 memload::Plain128x32().Serialize(),
+                                 "format 0, 128x32");
   s.SetFormat(1, 40);
   std::vector<uint8_t> crom = s.Serialize();
-  source::ExpectSameAsCrom(crom, "format 1, 40 slots");
+  ExpectConcentrateLoadsAsSource(s, crom, "format 1, 40 slots");
   const std::vector<uint8_t> block = lights::Block();
   crom.insert(crom.end(), block.begin(), block.end());
-  source::ExpectSameAsCrom(crom, "with a settings block");
+  ExpectConcentrateLoadsAsSource(s, crom, "with a settings block");
 
-  // The cROMc of an export: Serum_ConcentrateFromSource() writes what
-  // Serum_Load() generates beside the cROM, byte for byte.
-  {
-    const std::filesystem::path dir = n256::Dir() / "export";
-    std::filesystem::remove_all(dir);
-    std::filesystem::create_directories(dir / n256::kRom);
-    WriteTestFile(dir / n256::kRom / (std::string(n256::kRom) + ".cROM"), crom);
-    Serum_SetGenerateCRomC(true);
-    CHECK(Serum_Load(dir.string().c_str(), n256::kRom, 0) != NULL);
-    Serum_Dispose();
-    std::ifstream generated(
-        dir / n256::kRom / (std::string(n256::kRom) + ".cROMc"),
-        std::ios::binary);
-    const std::vector<uint8_t> fromLoad(
-        (std::istreambuf_iterator<char>(generated)), {});
-    source::CromSource exported;
-    exported.crom = crom;
-    CHECK(exported.Parse());
-    const std::filesystem::path target = dir / "exported.cROMc";
-    CHECK(
-        Serum_ConcentrateFromSource(&exported.source, target.string().c_str()));
-    std::ifstream written(target, std::ios::binary);
-    const std::vector<uint8_t> fromSource(
-        (std::istreambuf_iterator<char>(written)), {});
-    CHECK(!fromLoad.empty());
-    CHECK(fromLoad == fromSource);
-    CHECK(!Serum_ConcentrateFromSource(&exported.source, ""));
-  }
+  // No path, no cROMc.
+  source::CromSource exported;
+  exported.crom = crom;
+  CHECK(exported.Parse());
+  CHECK(!Serum_ConcentrateFromSource(&exported.source, ""));
+  CHECK(!Serum_ConcentrateFromSource(&exported.source, NULL));
+  CHECK(Serum_GetLastErrorMessage()[0] != '\0');
 
   // A source without fill() is refused.
   Serum_Colorization_Source empty{};
   CHECK(Serum_LoadFromSource(&empty, NULL, n256::kBothPlanes) == NULL);
   CHECK(Serum_LoadFromSource(NULL, NULL, n256::kBothPlanes) == NULL);
-
-  // Optional: a real colorization, SERUM_TEST_CRZ as for crz/real_archive.
-  const char* real = std::getenv("SERUM_TEST_CRZ");
-  if (real && real[0]) {
-    uint8_t* data = NULL;
-    size_t size = 0;
-    CHECK(Serum_CRZ_Read(real, &data, &size));
-    if (data) {
-      source::ExpectSameAsCrom(std::vector<uint8_t>(data, data + size), real);
-      Serum_CRZ_Free(data);
-    }
-  }
+  CHECK(!Serum_ConcentrateFromSource(&empty, "x.cROMc"));
   n256::Unload();
 }
 
-// Serum_LoadFromMemoryWithScenes(): the scenes of a pup.csv, parsed before the
-// lookups are built, give the state and output of Serum_Load() with the same
-// pup.csv beside the cROM; without a path it is Serum_LoadFromMemory().
-static void Test_MemoryLoadWithScenes(void) {
+// Serum_LoadFromSource() with a pup.csv: its scenes, parsed before the lookups
+// are built, give the state and output of Serum_Load() with the same pup.csv
+// beside the cROMc; without a path there are no scenes.
+static void Test_SourceLoadWithScenes(void) {
   const char* const csv = "7,2,100\n";
   n256::Synth s;
   {
@@ -5840,20 +5590,19 @@ static void Test_MemoryLoadWithScenes(void) {
   }
   const uint32_t framePixels = s.is256x64 ? n256::kNPx : n256::kOPx;
   const std::vector<uint8_t> crom = s.Serialize();
-  if (!n256::Load(s, n256::kBothPlanes, false, csv)) return;
+  if (!n256::Load(s, n256::kBothPlanes, true, csv)) return;
   CHECK(g_serumData.sceneGenerator->isActive());
   const memload::Capture fromFile = memload::Run(s, framePixels);
   Serum_Dispose();
 
-  // The pup.csv stays in the test folder; the cROM comes from memory.
+  // The pup.csv stays in the test folder; the colorization comes from the
+  // source.
   const std::string csvPath =
       (n256::Dir() / n256::kRom / (std::string(n256::kRom) + ".pup.csv"))
           .string();
   Serum_SetMaximumUnknownFramesToSkip(0);
   Serum_SetIgnoreUnknownFramesTimeout(0);
-  CHECK(Serum_LoadFromMemoryWithScenes(crom.data(), crom.size(),
-                                       csvPath.c_str(),
-                                       n256::kBothPlanes) == &mySerum);
+  CHECK(source::LoadCrom(crom, n256::kBothPlanes, csvPath.c_str()) == &mySerum);
   lastTriggerID = 0xffffffff;
   CHECK(g_serumData.sceneGenerator->isActive());
   CHECK_EQ(g_serumData.frameIsScene.size(), n256::kFrameCount);
@@ -5862,85 +5611,14 @@ static void Test_MemoryLoadWithScenes(void) {
   CHECK(memload::Run(s, framePixels) == fromFile);
   Serum_Dispose();
 
-  // No path: as Serum_LoadFromMemory(), without scenes.
-  CHECK(Serum_LoadFromMemoryWithScenes(crom.data(), crom.size(), NULL,
-                                       n256::kBothPlanes) == &mySerum);
+  // No path: no scenes.
+  CHECK(source::LoadCrom(crom, n256::kBothPlanes) == &mySerum);
   CHECK(!g_serumData.sceneGenerator->isActive());
   n256::Unload();
 }
 
-namespace callbackload {
-
-// Hands out the bytes in pieces of at most `piece`, and ends early at `end`.
-struct Source {
-  const std::vector<uint8_t>* bytes = nullptr;
-  size_t offset = 0;
-  size_t piece = 0;
-  size_t end = 0;
-  size_t largestRequest = 0;
-};
-
-static size_t SERUM_CALLBACK Read(void* userData, uint8_t* buffer,
-                                  size_t size) {
-  Source& source = *static_cast<Source*>(userData);
-  source.largestRequest = std::max(source.largestRequest, size);
-  const size_t count =
-      std::min({size, source.piece, source.end - source.offset});
-  memcpy(buffer, source.bytes->data() + source.offset, count);
-  source.offset += count;
-  return count;
-}
-
-}  // namespace callbackload
-
-// Serum_LoadFromCallback(): the same colorization as from memory, however the
-// callback cuts the bytes, without asking for more than the cROM has; one that
-// ends early fails as a truncated cROM does, and leaves nothing loaded.
-static void Test_CallbackLoadMatchesMemoryLoad(void) {
-  const n256::Synth projects[] = {n256::Synth(), memload::Plain128x32()};
-  for (const n256::Synth& s : projects) {
-    const uint32_t framePixels = s.is256x64 ? n256::kNPx : n256::kOPx;
-    const std::vector<uint8_t> crom = s.Serialize();
-    Serum_SetMaximumUnknownFramesToSkip(0);
-    Serum_SetIgnoreUnknownFramesTimeout(0);
-    CHECK(Serum_LoadFromMemory(crom.data(), crom.size(), n256::kBothPlanes) ==
-          &mySerum);
-    lastTriggerID = 0xffffffff;
-    const memload::Capture fromMemory = memload::Run(s, framePixels);
-    Serum_Dispose();
-    CHECK(!SparseVectorFastPacking());
-
-    for (size_t piece : {(size_t)1 << 30, (size_t)4097, (size_t)7}) {
-      callbackload::Source source{&crom, 0, piece, crom.size(), 0};
-      Serum_SetMaximumUnknownFramesToSkip(0);
-      Serum_SetIgnoreUnknownFramesTimeout(0);
-      CHECK(Serum_LoadFromCallback(callbackload::Read, &source, crom.size(),
-                                   NULL, n256::kBothPlanes) == &mySerum);
-      CHECK_EQ(source.offset, crom.size());
-      CHECK(source.largestRequest <= crom.size());
-      lastTriggerID = 0xffffffff;
-      CHECK(memload::Run(s, framePixels) == fromMemory);
-      Serum_Dispose();
-    }
-
-    callbackload::Source cut{&crom, 0, 4096, crom.size() / 2, 0};
-    CHECK(Serum_LoadFromCallback(callbackload::Read, &cut, crom.size(), NULL,
-                                 n256::kBothPlanes) == NULL);
-    CHECK(!cromloaded);
-    CHECK(Serum_GetLastErrorMessage()[0] != '\0');
-    CHECK(!SparseVectorFastPacking());
-    callbackload::Source whole{&crom, 0, 4096, crom.size(), 0};
-    CHECK(Serum_LoadFromCallback(callbackload::Read, &whole, crom.size() / 2,
-                                 NULL, n256::kBothPlanes) == NULL);
-    CHECK(whole.offset <= crom.size() / 2);
-    CHECK(Serum_LoadFromCallback(NULL, NULL, crom.size(), NULL,
-                                 n256::kBothPlanes) == NULL);
-  }
-  n256::Unload();
-}
-
-// A buffer has no directory: nothing is written, whatever the cROMc setting.
-static void Test_MemoryLoadWritesNoFile(void) {
+// A source has no directory: nothing is written, whatever the cROMc setting.
+static void Test_SourceLoadWritesNoFile(void) {
   const n256::Synth s;
   const std::vector<uint8_t> crom = s.Serialize();
   const std::filesystem::path dir = n256::Dir();
@@ -5949,14 +5627,13 @@ static void Test_MemoryLoadWritesNoFile(void) {
   const std::filesystem::path before = std::filesystem::current_path();
   std::filesystem::current_path(dir);
   Serum_SetGenerateCRomC(true);
-  CHECK(Serum_LoadFromMemory(crom.data(), crom.size(), n256::kBothPlanes) !=
-        NULL);
+  CHECK(source::LoadCrom(crom, n256::kBothPlanes) != NULL);
   CHECK(std::filesystem::is_empty(dir));
   std::filesystem::current_path(before);
   n256::Unload();
 }
 
-static void Test_MemoryLoadFailuresAreClean(void) {
+static void Test_SourceLoadFailuresAreClean(void) {
   const n256::Synth s;
   const std::vector<uint8_t> crom = s.Serialize();
   const auto expectNothingLoaded = [](void) {
@@ -5967,52 +5644,33 @@ static void Test_MemoryLoadFailuresAreClean(void) {
     CHECK(framechecked == NULL);
     CHECK(Serum_GetLastErrorMessage()[0] != '\0');
   };
-  const auto expectFailure = [&](const std::vector<uint8_t>& data) {
-    // An exact-size heap copy, so a read past the end is a sanitizer report.
-    uint8_t* buffer = (uint8_t*)malloc(data.empty() ? 1 : data.size());
-    if (!data.empty()) memcpy(buffer, data.data(), data.size());
-    CHECK(Serum_LoadFromMemory(buffer, data.size(), n256::kBothPlanes) == NULL);
-    free(buffer);
-    expectNothingLoaded();
-  };
 
   // A failed call also releases what was loaded before it.
-  CHECK(Serum_LoadFromMemory(crom.data(), crom.size(), n256::kBothPlanes) !=
-        NULL);
-  CHECK(Serum_LoadFromMemory(NULL, 100, n256::kBothPlanes) == NULL);
+  CHECK(source::LoadCrom(crom, n256::kBothPlanes) != NULL);
+  CHECK(Serum_LoadFromSource(NULL, NULL, n256::kBothPlanes) == NULL);
   expectNothingLoaded();
-  CHECK(Serum_LoadFromMemory(crom.data(), crom.size(), n256::kBothPlanes) !=
-        NULL);
-  expectFailure({});
 
-  // Truncated anywhere: in the name, the header, and every block after it.
-  std::vector<size_t> cuts = {1, 63, 64, 67, 68, 72, 84, 100, 104, 108};
-  for (size_t cut = 200; cut < crom.size(); cut += crom.size() / 37 + 1)
-    cuts.push_back(cut);
-  cuts.push_back(crom.size() - 1);
-  for (size_t cut : cuts)
-    expectFailure(std::vector<uint8_t>(crom.begin(), crom.begin() + cut));
-
-  // Counts the data cannot hold: frames, masks, sprites.
-  for (size_t offset : {(size_t)84, (size_t)92, (size_t)96}) {
-    std::vector<uint8_t> bad = crom;
-    const uint32_t huge = 0xfffffff0u;
-    memcpy(&bad[offset], &huge, sizeof(huge));
-    expectFailure(bad);
-  }
-  // A geometry the loader refuses, and bytes that are no cROM at all.
-  {
-    std::vector<uint8_t> bad = crom;
-    const uint32_t width = 192;
-    memcpy(&bad[68], &width, sizeof(width));
-    expectFailure(bad);
-    expectFailure(std::vector<uint8_t>(4096, 0xa5));
-    expectFailure(std::vector<uint8_t>(4096, 0));
-  }
+  // A geometry the loader refuses, and header values it cannot use.
+  const auto expectFailure = [&](void (*change)(source::CromSource&)) {
+    CHECK(source::LoadCrom(crom, n256::kBothPlanes) != NULL);
+    source::CromSource bad;
+    bad.crom = crom;
+    CHECK(bad.Parse());
+    change(bad);
+    CHECK(Serum_LoadFromSource(&bad.source, NULL, n256::kBothPlanes) == NULL);
+    expectNothingLoaded();
+  };
+  expectFailure([](source::CromSource& bad) { bad.source.width = 192; });
+  expectFailure([](source::CromSource& bad) { bad.source.frames = 0; });
+  expectFailure([](source::CromSource& bad) { bad.source.colors = 0; });
+  expectFailure(
+      [](source::CromSource& bad) { bad.source.spritesPerFrame = 0; });
+  expectFailure([](source::CromSource& bad) {
+    bad.source.spritesPerFrame = MAX_SPRITES_PER_FRAME + 1;
+  });
 
   // The next valid load is not affected by any of it.
-  CHECK(Serum_LoadFromMemory(crom.data(), crom.size(),
-                             FLAG_REQUEST_64P_FRAMES) != NULL);
+  CHECK(source::LoadCrom(crom, FLAG_REQUEST_64P_FRAMES) != NULL);
   CHECK(g_serumData.is256x64);
   n256::Colorize(s.Frame(n256::kStatic));
   CHECK_EQ(mySerum.frameID, n256::kStatic);
@@ -6020,6 +5678,48 @@ static void Test_MemoryLoadFailuresAreClean(void) {
   EXPECT_PLANE64([](uint32_t x, uint32_t y) {
     return n256::C64(n256::kStatic, y * n256::kNW + x);
   });
+  n256::Unload();
+}
+
+// Serum_Load() loads a cROMc only. A cROM or a cRZ where the cROMc would be is
+// not loaded, and the log names it.
+namespace rawfile {
+
+static std::vector<std::string> g_log;
+
+static void SERUM_CALLBACK Collect(const char* format, va_list args,
+                                   const void* userData) {
+  (void)userData;
+  char line[1024];
+  vsnprintf(line, sizeof(line), format, args);
+  g_log.push_back(line);
+}
+
+}  // namespace rawfile
+
+static void Test_LoadRefusesRawFiles(void) {
+  const n256::Synth s;
+  for (const char* extension : {".cROM", ".cRZ"}) {
+    const std::filesystem::path dir = n256::Dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir / n256::kRom);
+    const std::string name = std::string(n256::kRom) + extension;
+    WriteTestFile(dir / n256::kRom / name, s.Serialize());
+    rawfile::g_log.clear();
+    Serum_SetLogCallback(rawfile::Collect, NULL);
+    CHECK(Serum_Load(dir.string().c_str(), n256::kRom, n256::kBothPlanes) ==
+          NULL);
+    Serum_SetLogCallback(NULL, NULL);
+    CHECK(!cromloaded);
+    bool named = false;
+    for (const std::string& line : rawfile::g_log)
+      named = named || (line.find(name) != std::string::npos &&
+                        line.find("not loaded") != std::string::npos);
+    CHECK(named);
+    // Nothing was written in its place.
+    CHECK(!std::filesystem::exists(dir / n256::kRom /
+                                   (std::string(n256::kRom) + ".cROMc")));
+  }
   n256::Unload();
 }
 
@@ -6086,10 +5786,6 @@ static const TestCase kTests[] = {
      Test_UnlitDynamicColourBeatsTheBackgroundOnRequest},
     {"colorize/unlit_dynamic_colour_casts_shadow",
      Test_UnlitDynamicColourCastsItsShadow},
-    {"crz/write_then_read_round_trips", Test_CrzWriteThenReadRoundTrips},
-    {"crz/plain_deflated_zip", Test_CrzIsAPlainDeflatedZip},
-    {"crz/failures_are_clean", Test_CrzFailuresAreClean},
-    {"crz/real_archive", Test_CrzRealArchive},
     {"sidecar/spellings", Test_ScalingSidecarSpellings},
     {"sidecar/matches_libframeutil", Test_AlgorithmMatchesLibframeutil},
     {"sidecar/shadow_offset", Test_ScalingSidecarShadowOffset},
@@ -6145,10 +5841,8 @@ static const TestCase kTests[] = {
     {"sprite/scaled_sprite_blocks_reuse", Test_ScaledSpriteBlocksReuse},
     {"sprite/layer_mode_end_to_end", Test_SpriteInLayerModeEndToEnd},
     {"colorize/monochrome_frame_blocks_reuse", Test_MonochromeFrameBlocksReuse},
-    {"memory/matches_file_load", Test_MemoryLoadMatchesFileLoad},
     {"scenes/stored_data_keeps_timers", Test_SceneDataKeepsAutoStartAndEndHold},
-    {"memory/with_scenes", Test_MemoryLoadWithScenes},
-    {"memory/callback", Test_CallbackLoadMatchesMemoryLoad},
+    {"source/with_scenes", Test_SourceLoadWithScenes},
     {"crom/settings_block", Test_CromSettingsBlock},
     {"crom/settings_lights", Test_CromSettingsLights},
     {"crom/settings_original_only_sets", Test_CromSettingsOriginalOnlySets},
@@ -6167,8 +5861,9 @@ static const TestCase kTests[] = {
     {"scene/steps_back_and_forth", Test_SceneStepsBackAndForth},
     {"load/unused_extra_dynamic_data_is_dropped",
      Test_UnusedExtraDynamicDataIsDropped},
-    {"memory/writes_no_file", Test_MemoryLoadWritesNoFile},
-    {"memory/failures_are_clean", Test_MemoryLoadFailuresAreClean},
+    {"source/writes_no_file", Test_SourceLoadWritesNoFile},
+    {"source/failures_are_clean", Test_SourceLoadFailuresAreClean},
+    {"load/refuses_raw_files", Test_LoadRefusesRawFiles},
 };
 
 int main(int argc, char** argv) {

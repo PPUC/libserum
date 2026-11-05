@@ -3,10 +3,10 @@
 #include "serum-decode.h"
 
 #include <FrameUtil.h>
-#include <miniz/miniz.h>
 
 #include <algorithm>
 #include <bitset>
+#include <cassert>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -2071,124 +2071,6 @@ uint32_t calc_crc32(uint8_t* source, uint8_t mask, uint32_t n, uint8_t Shape) {
   return crc32_fast(source, pixels);
 }
 
-struct FileCRomReader {
-  FILE* stream = nullptr;
-
-  bool readExact(void* dst, size_t bytes) {
-    return fread(dst, 1, bytes, stream) == bytes;
-  }
-  // As readExact(), for data that may be missing at the end.
-  bool tryReadExact(void* dst, size_t bytes) { return readExact(dst, bytes); }
-};
-
-struct MemoryCRomReader {
-  const uint8_t* data = nullptr;
-  size_t size = 0;
-  size_t offset = 0;
-  // Set for a buffer passed to Serum_LoadFromMemory(): short data throws, so
-  // the load can fail and return instead of ending the process.
-  bool throwOnShortData = false;
-
-  bool readExact(void* dst, size_t bytes) {
-    if (!data || offset > size || bytes > (size - offset)) {
-      if (throwOnShortData) throw std::runtime_error("cROM data is truncated");
-      return false;
-    }
-    memcpy(dst, data + offset, bytes);
-    offset += bytes;
-    return true;
-  }
-  // As readExact(), for data that may be missing at the end: never throws.
-  bool tryReadExact(void* dst, size_t bytes) {
-    if (!data || offset > size || bytes > (size - offset)) return false;
-    return readExact(dst, bytes);
-  }
-};
-
-// The cROM of Serum_LoadFromCallback(): pulled from the callback through a
-// buffer, so that small reads do not each call it. Short data throws, as for
-// Serum_LoadFromMemory().
-struct CallbackCRomReader {
-  Serum_ReadCallback read = nullptr;
-  void* userData = nullptr;
-  size_t size = 0;
-  // Bytes handed out so far.
-  size_t offset = 0;
-  std::vector<uint8_t> buffer = std::vector<uint8_t>(1u << 20);
-  size_t bufferStart = 0;
-  size_t bufferEnd = 0;
-
-  size_t remaining() const { return size - offset; }
-
-  // Gets up to `bytes` from the callback, never past `size`.
-  size_t pull(uint8_t* dst, size_t bytes) {
-    size_t done = 0;
-    while (done < bytes) {
-      const size_t got = read(userData, dst + done, bytes - done);
-      if (got == 0 || got > bytes - done) break;
-      done += got;
-    }
-    return done;
-  }
-
-  bool readExact(void* dst, size_t bytes) {
-    if (bytes > remaining()) throw std::runtime_error("cROM data is truncated");
-    uint8_t* out = static_cast<uint8_t*>(dst);
-    size_t left = bytes;
-    const size_t buffered = std::min(left, bufferEnd - bufferStart);
-    memcpy(out, buffer.data() + bufferStart, buffered);
-    bufferStart += buffered;
-    out += buffered;
-    left -= buffered;
-    if (left >= buffer.size()) {
-      if (pull(out, left) != left)
-        throw std::runtime_error("cROM data is truncated");
-      left = 0;
-    } else if (left > 0) {
-      // Not yet handed out: what is not in the buffer.
-      const size_t unread = remaining() - buffered;
-      bufferStart = 0;
-      bufferEnd = pull(buffer.data(), std::min(buffer.size(), unread));
-      if (bufferEnd < left) throw std::runtime_error("cROM data is truncated");
-      memcpy(out, buffer.data(), left);
-      bufferStart = left;
-      left = 0;
-    }
-    offset += bytes;
-    return true;
-  }
-  // As readExact(), for data that may be missing at the end: never throws.
-  bool tryReadExact(void* dst, size_t bytes) {
-    if (bytes > remaining()) return false;
-    return readExact(dst, bytes);
-  }
-};
-
-// An element count read from a header cannot exceed the bytes that follow it.
-static bool CountFitsSource(const FileCRomReader&, uint64_t) { return true; }
-static bool CountFitsSource(const CallbackCRomReader& reader, uint64_t count) {
-  return count <= reader.remaining();
-}
-static bool CountFitsSource(const MemoryCRomReader& reader, uint64_t count) {
-  return !reader.throwOnShortData || count <= reader.size - reader.offset;
-}
-
-template <typename Reader, typename T>
-static bool ReadValue(Reader& reader, T& value) {
-  return reader.readExact(&value, sizeof(T));
-}
-
-template <typename Reader>
-static bool ReadBytes(Reader& reader, void* dst, size_t bytes) {
-  return reader.readExact(dst, bytes);
-}
-
-template <typename Reader>
-static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
-                                                 const uint8_t loadFlags,
-                                                 const uint8_t runtimeFlags,
-                                                 uint32_t sizeheader);
-
 // Optional block after the last block of a v2 cROM: the scenes and scaling
 // settings of the colorization, for an editor that keeps them itself. A cROM
 // without it ends before it, and a library that does not know it stops
@@ -2496,260 +2378,6 @@ static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
   return true;
 }
 
-// Reads the block if the cROM has one; false when it is malformed.
-template <typename Reader>
-static bool ReadCromSettings(Reader& reader) {
-  uint32_t magic = 0;
-  if (!reader.tryReadExact(&magic, sizeof(magic))) return true;
-  if (magic != kCromSettingsMagic) return true;
-  uint32_t size = 0;
-  if (!ReadValue(reader, size) || size > kCromSettingsMaxBytes ||
-      !CountFitsSource(reader, size))
-    return false;
-  std::vector<uint8_t> payload(size);
-  if (size > 0 && !ReadBytes(reader, payload.data(), size)) return false;
-  return ApplyCromSettings(payload);
-}
-
-template <typename Reader>
-static Serum_Frame_Struc* Serum_LoadFilev1Stream(Reader& reader,
-                                                 const uint8_t loadFlags,
-                                                 const uint8_t runtimeFlags);
-
-// Finds the first regular entry of a cRZ archive, which is the cROM. Entry
-// names are never used to locate it: an archive is untrusted input.
-static bool FindCRZEntry(mz_zip_archive* zip_archive, mz_uint* index,
-                         mz_zip_archive_file_stat* file_stat) {
-  const mz_uint numFiles = mz_zip_reader_get_num_files(zip_archive);
-  for (mz_uint i = 0; i < numFiles; ++i) {
-    if (!mz_zip_reader_file_stat(zip_archive, i, file_stat)) {
-      continue;
-    }
-    if (mz_zip_reader_is_file_a_directory(zip_archive, i) ||
-        !mz_zip_reader_is_file_supported(zip_archive, i) ||
-        mz_zip_reader_is_file_encrypted(zip_archive, i)) {
-      continue;
-    }
-    *index = i;
-    return true;
-  }
-  return false;
-}
-
-// The returned block belongs to miniz and is released with mz_free().
-static void* ExtractCRZEntryToHeap(const char* filename, size_t* extractedSize,
-                                   mz_zip_error* error = nullptr) {
-  mz_zip_archive zip_archive = {0};
-  if (error) *error = MZ_ZIP_NO_ERROR;
-  if (!mz_zip_reader_init_file(&zip_archive, filename, 0)) {
-    if (error) *error = mz_zip_get_last_error(&zip_archive);
-    return nullptr;
-  }
-
-  void* extracted = nullptr;
-  mz_uint index = 0;
-  mz_zip_archive_file_stat file_stat;
-  if (FindCRZEntry(&zip_archive, &index, &file_stat)) {
-    extracted =
-        mz_zip_reader_extract_to_heap(&zip_archive, index, extractedSize, 0);
-    if (!extracted && error) *error = mz_zip_get_last_error(&zip_archive);
-  } else if (error) {
-    *error = MZ_ZIP_FILE_NOT_FOUND;
-  }
-
-  mz_zip_reader_end(&zip_archive);
-  return extracted;
-}
-
-static bool ExtractCRZEntryToMemory(const char* filename,
-                                    std::vector<uint8_t>& outData) {
-  size_t extractedSize = 0;
-  void* extracted = ExtractCRZEntryToHeap(filename, &extractedSize);
-  if (!extracted) {
-    return false;
-  }
-  outData.assign(static_cast<const uint8_t*>(extracted),
-                 static_cast<const uint8_t*>(extracted) + extractedSize);
-  mz_free(extracted);
-  return true;
-}
-
-// The Serum_CRZ_* functions work on files only and never touch the loaded
-// colorization, so they do not hold the API mutex while they run: deflating a
-// large cROM takes seconds and must not stall Serum_Colorize() on another
-// thread. Only the shared error buffer is updated under it.
-static void ClearCRZErrorMessage() {
-  std::lock_guard<std::recursive_mutex> serumApiLock(g_serumApiMutex);
-  ClearLastErrorMessage();
-}
-
-static void SetCRZErrorMessage(const char* format, ...) {
-  std::lock_guard<std::recursive_mutex> serumApiLock(g_serumApiMutex);
-  va_list args;
-  va_start(args, format);
-  vsnprintf(g_lastErrorMessage, sizeof(g_lastErrorMessage), format, args);
-  va_end(args);
-}
-
-// miniz reads its paths as UTF-8 on Windows and as native bytes elsewhere;
-// this is the same reading for std::filesystem.
-static std::filesystem::path CRZPathFromUtf8(const char* path) {
-  return std::filesystem::path(
-      std::u8string(reinterpret_cast<const char8_t*>(path)));
-}
-
-// An entry name is a plain file name. Anything that could be read as a path
-// would make the archive a hazard for a tool that extracts it by name.
-static bool IsPlainCRZEntryName(const char* name) {
-  if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return false;
-  return strpbrk(name, "/\\:") == nullptr;
-}
-
-static bool IsAsciiName(const char* name) {
-  for (; *name; ++name) {
-    if (static_cast<unsigned char>(*name) >= 0x80) return false;
-  }
-  return true;
-}
-
-SERUM_API bool Serum_CRZ_Read(const char* crzPath, uint8_t** data,
-                              size_t* size) {
-  ClearCRZErrorMessage();
-  if (data) *data = nullptr;
-  if (size) *size = 0;
-  if (!crzPath || !crzPath[0] || !data || !size) {
-    SetCRZErrorMessage("Serum_CRZ_Read: invalid arguments");
-    return false;
-  }
-
-  size_t extractedSize = 0;
-  mz_zip_error error = MZ_ZIP_NO_ERROR;
-  void* extracted = ExtractCRZEntryToHeap(crzPath, &extractedSize, &error);
-  if (!extracted) {
-    SetCRZErrorMessage("Serum_CRZ_Read: no cROM could be read from '%s' (%s)",
-                       crzPath, mz_zip_get_error_string(error));
-    return false;
-  }
-  *data = static_cast<uint8_t*>(extracted);
-  *size = extractedSize;
-  return true;
-}
-
-SERUM_API void Serum_CRZ_Free(uint8_t* data) { mz_free(data); }
-
-SERUM_API bool Serum_CRZ_GetEntryName(const char* crzPath, char* name,
-                                      size_t nameSize) {
-  ClearCRZErrorMessage();
-  if (name && nameSize > 0) name[0] = '\0';
-  if (!crzPath || !crzPath[0] || !name || nameSize == 0) {
-    SetCRZErrorMessage("Serum_CRZ_GetEntryName: invalid arguments");
-    return false;
-  }
-
-  mz_zip_archive zip_archive = {0};
-  if (!mz_zip_reader_init_file(&zip_archive, crzPath, 0)) {
-    SetCRZErrorMessage(
-        "Serum_CRZ_GetEntryName: could not open '%s' (%s)", crzPath,
-        mz_zip_get_error_string(mz_zip_get_last_error(&zip_archive)));
-    return false;
-  }
-
-  mz_uint index = 0;
-  mz_zip_archive_file_stat file_stat;
-  const bool found = FindCRZEntry(&zip_archive, &index, &file_stat);
-  mz_zip_reader_end(&zip_archive);
-  if (!found) {
-    SetCRZErrorMessage("Serum_CRZ_GetEntryName: no cROM entry in '%s'",
-                       crzPath);
-    return false;
-  }
-  if (strlen(file_stat.m_filename) >= nameSize) {
-    SetCRZErrorMessage(
-        "Serum_CRZ_GetEntryName: entry name of '%s' needs %zu bytes", crzPath,
-        strlen(file_stat.m_filename) + 1);
-    return false;
-  }
-  memcpy(name, file_stat.m_filename, strlen(file_stat.m_filename) + 1);
-  return true;
-}
-
-SERUM_API bool Serum_CRZ_WriteFromFile(const char* crzPath,
-                                       const char* entryName,
-                                       const char* cromPath) {
-  ClearCRZErrorMessage();
-  if (!crzPath || !crzPath[0] || !entryName || !entryName[0] || !cromPath ||
-      !cromPath[0]) {
-    SetCRZErrorMessage("Serum_CRZ_WriteFromFile: invalid arguments");
-    return false;
-  }
-
-  if (!IsPlainCRZEntryName(entryName)) {
-    SetCRZErrorMessage(
-        "Serum_CRZ_WriteFromFile: entry name '%s' is not a plain file name",
-        entryName);
-    return false;
-  }
-
-  try {
-    // Checked before the archive is created, because creating it truncates
-    // whatever is at crzPath.
-    std::error_code ec;
-    const std::filesystem::path source = CRZPathFromUtf8(cromPath);
-    const std::filesystem::path target = CRZPathFromUtf8(crzPath);
-    if (!std::filesystem::is_regular_file(source, ec)) {
-      SetCRZErrorMessage("Serum_CRZ_WriteFromFile: '%s' is not a readable file",
-                         cromPath);
-      return false;
-    }
-    if (std::filesystem::equivalent(source, target, ec)) {
-      SetCRZErrorMessage(
-          "Serum_CRZ_WriteFromFile: '%s' is both the source and the archive",
-          cromPath);
-      return false;
-    }
-
-    mz_zip_archive zip_archive = {0};
-    if (!mz_zip_writer_init_file_v2(&zip_archive, crzPath, 0, 0)) {
-      SetCRZErrorMessage(
-          "Serum_CRZ_WriteFromFile: could not create '%s' (%s)", crzPath,
-          mz_zip_get_error_string(mz_zip_get_last_error(&zip_archive)));
-      return false;
-    }
-
-    // The sizes go into the local header rather than into a trailing data
-    // descriptor, and a plain ASCII name is not flagged as UTF-8. Both match
-    // what the ColorizingDMD editor's own zip writer produces. zip64 is not
-    // requested: miniz switches to it by itself for a source of 4 GiB or more.
-    mz_uint levelAndFlags =
-        static_cast<mz_uint>(MZ_DEFAULT_LEVEL) |
-        static_cast<mz_uint>(MZ_ZIP_FLAG_WRITE_HEADER_SET_SIZE);
-    if (IsAsciiName(entryName)) {
-      levelAndFlags |= static_cast<mz_uint>(MZ_ZIP_FLAG_ASCII_FILENAME);
-    }
-
-    bool ok = mz_zip_writer_add_file(&zip_archive, entryName, cromPath, nullptr,
-                                     0, levelAndFlags) &&
-              mz_zip_writer_finalize_archive(&zip_archive);
-    const mz_zip_error error = mz_zip_get_last_error(&zip_archive);
-    // Closing flushes the file, so a full disk can still surface here.
-    if (!mz_zip_writer_end(&zip_archive)) ok = false;
-    if (!ok) {
-      std::filesystem::remove(target, ec);
-      SetCRZErrorMessage(
-          "Serum_CRZ_WriteFromFile: could not write '%s' from '%s' (%s)",
-          crzPath, cromPath, mz_zip_get_error_string(error));
-      return false;
-    }
-    return true;
-  } catch (const std::exception& e) {
-    SetCRZErrorMessage("Serum_CRZ_WriteFromFile: %s", e.what());
-    return false;
-  } catch (...) {
-    SetCRZErrorMessage("Serum_CRZ_WriteFromFile: unknown C++ exception");
-    return false;
-  }
-}
-
 void Full_Reset_ColorRotations(void) {
   memset(colorshifts, 0, MAX_COLOR_ROTATIONS * sizeof(uint32_t));
   colorrotseruminit = GetMonotonicTimeMs();
@@ -2840,8 +2468,8 @@ static void ConfigureRequestedOutputMode(const uint8_t runtimeFlags) {
   // extra-resolution content. This makes FLAG_REQUEST_FALLBACK redundant for
   // this direction; it is still honoured for the 64p-content/32p-request
   // direction, where libserum does not scale.
-  // Note: this runs before g_serumData.SerumVersion is populated on the raw
-  // cROM/cRZ path, so it must not test it. Both call sites are v2-only anyway.
+  // Note: this runs before g_serumData.SerumVersion is populated on the source
+  // path, so it must not test it. Both call sites are v2-only anyway.
   upscaleExtraFromOriginal = g_serumData.fheight == 32 &&
                              (runtimeFlags & FLAG_REQUEST_64P_FRAMES) != 0;
   originalPlaneRequestedByCaller =
@@ -4130,12 +3758,11 @@ static void EncodeSceneFrameDifferences(void) {
 // Allocate the per-frame working buffers the v2 render path needs.
 //
 // One function because there are two load paths -- the concentrate reader and
-// the cROM stream reader -- and they had drifted. The stream reader never
-// allocated separatorColors, separatorColPresent, separatorTextFrame or
-// upscaleIndexPlane, so on a .cROM or .cRZ the thousands-separator filter was
-// inert (DetectSeparators() returns 0 the moment separatorTextFrame is NULL)
-// and every upscale fell back to per-pixel source selection. The concentrate
-// reader allocated three of those twice over and leaked the first set.
+// the source an authoring tool hands over -- and they must not drift: a path
+// that does not allocate separatorTextFrame leaves the thousands-separator
+// filter inert (DetectSeparators() returns 0 the moment it is NULL), one
+// without upscaleIndexPlane makes every upscale fall back to per-pixel source
+// selection.
 //
 // Returns false if any allocation failed; the caller frees and gives up.
 static bool AllocateFrameWorkBuffers(void) {
@@ -4265,23 +3892,12 @@ static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
       enabled = false;
       return NULL;
     }
-  } else if (SERUM_V1 == g_serumData.SerumVersion) {
-    if (g_serumData.fheight == 64) {
-      mySerum.width64 = g_serumData.fwidth;
-      mySerum.width32 = 0;
-    } else {
-      mySerum.width32 = g_serumData.fwidth;
-      mySerum.width64 = 0;
-    }
-
-    mySerum.frame = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-    mySerum.palette = (uint8_t*)malloc(3 * 64);
-    mySerum.rotations = (uint8_t*)malloc(MAX_COLOR_ROTATIONS * 3);
-    if (!mySerum.frame || !mySerum.palette || !mySerum.rotations) {
-      Serum_free();
-      enabled = false;
-      return NULL;
-    }
+  } else {
+    // Serum v1 colorizations (64 colors per frame) are no longer played.
+    Log("Serum v%d colorizations are not supported", g_serumData.SerumVersion);
+    Serum_free();
+    enabled = false;
+    return NULL;
   }
 
   if (g_serumData.concentrateFileVersion >= 6) {
@@ -4428,17 +4044,6 @@ static bool PrepareV2Planes(const uint8_t loadFlags, const uint8_t runtimeFlags,
 // Block inputs of ReadV2Blocks(). Both store every element with
 // SparseVector::storeElement(), so a colorization built from a source is the
 // one a cROM of the same data loads.
-template <typename Reader>
-struct CromBlockInput {
-  Reader& reader;
-
-  template <typename T, typename U = T>
-  void block(Serum_Block, SparseVector<T>& vector, size_t elementSize,
-             uint32_t count, SparseVector<U>* parent = nullptr) {
-    vector.readFromCRomReader(elementSize, count, reader, parent);
-  }
-};
-
 struct SourceBlockInput {
   const Serum_Colorization_Source& source;
 
@@ -4703,369 +4308,8 @@ static Serum_Frame_Struc* FinishV2Load() {
   return &mySerum;
 }
 
-template <typename Reader>
-static Serum_Frame_Struc* Serum_LoadFilev2Stream(Reader& reader,
-                                                 const uint8_t loadFlags,
-                                                 const uint8_t runtimeFlags,
-                                                 uint32_t sizeheader) {
-  if (!ReadValue(reader, g_serumData.fwidth) ||
-      !ReadValue(reader, g_serumData.fheight) ||
-      !ReadValue(reader, g_serumData.fwidth_extra) ||
-      !ReadValue(reader, g_serumData.fheight_extra)) {
-    enabled = false;
-    return NULL;
-  }
-  isoriginalrequested = false;
-  isextrarequested = false;
-  isoriginalfallbackrequested = false;
-  mySerum.width32 = 0;
-  mySerum.width64 = 0;
-  mySerum.flags = runtimeFlags;
-  if (!ReadValue(reader, g_serumData.nframes) ||
-      !ReadValue(reader, g_serumData.nocolors)) {
-    enabled = false;
-    return NULL;
-  }
-  mySerum.nocolors = g_serumData.nocolors;
-  if ((g_serumData.nframes == 0) || (g_serumData.nocolors == 0) ||
-      !ValidateLoadedGeometry(true, "cROM/v2")) {
-    enabled = false;
-    return NULL;
-  }
-  if (!ReadValue(reader, g_serumData.ncompmasks) ||
-      !ReadValue(reader, g_serumData.nsprites) ||
-      !ReadValue(reader, g_serumData.nbackgrounds)) {
-    enabled = false;
-    return NULL;
-  }
-  if (!CountFitsSource(reader, g_serumData.nframes) ||
-      !CountFitsSource(reader, g_serumData.ncompmasks) ||
-      !CountFitsSource(reader, g_serumData.nsprites) ||
-      !CountFitsSource(reader, g_serumData.nbackgrounds)) {
-    Log("Invalid element count in cROM/v2");
-    enabled = false;
-    return NULL;
-  }
-  // Older headers do not carry the flag; Serum_free() has already cleared
-  // whatever the previous colorization set.
-  if (sizeheader >= 20 * sizeof(uint32_t)) {
-    int is256x64;
-    if (!ReadValue(reader, is256x64)) {
-      enabled = false;
-      return NULL;
-    }
-    g_serumData.is256x64 = (is256x64 != 0);
-  }
-  // Header revision 21 on: the format version, and from version 1 on the
-  // sprite slots of a frame. A cROM without them is version 0 with
-  // LEGACY_SPRITES_PER_FRAME slots of 8-bit sprite IDs.
-  uint32_t formatVersion = 0;
-  uint32_t spritesPerFrame = LEGACY_SPRITES_PER_FRAME;
-  if (sizeheader >= 21 * sizeof(uint32_t)) {
-    if (!ReadValue(reader, formatVersion)) {
-      enabled = false;
-      return NULL;
-    }
-    if (formatVersion > SERUM_CROM_FORMAT_VERSION) {
-      Log("The cROM has format version %u; this libserum reads up to %u",
-          formatVersion, SERUM_CROM_FORMAT_VERSION);
-      enabled = false;
-      return NULL;
-    }
-    if (formatVersion >= 1 &&
-        (!ReadValue(reader, spritesPerFrame) || spritesPerFrame == 0 ||
-         spritesPerFrame > MAX_SPRITES_PER_FRAME)) {
-      Log("Invalid number of sprites per frame in cROM/v2");
-      enabled = false;
-      return NULL;
-    }
-  }
-  if (!ValidateNativeGeometry("cROM/v2")) {
-    enabled = false;
-    return NULL;
-  }
-  bool loadExtraDataRequested = false;
-  if (!PrepareV2Planes(loadFlags, runtimeFlags, loadExtraDataRequested)) {
-    enabled = false;
-    return NULL;
-  }
-  CromBlockInput<Reader> input{reader};
-  ReadV2Blocks(input, formatVersion, spritesPerFrame, sizeheader,
-               loadExtraDataRequested);
-  if (!ReadCromSettings(reader)) {
-    Log("Invalid settings block in cROM/v2");
-    enabled = false;
-    return NULL;
-  }
-
-  return FinishV2Load();
-}
-
-template <typename Reader>
-static Serum_Frame_Struc* Serum_LoadFilev1Stream(Reader& reader,
-                                                 const uint8_t loadFlags,
-                                                 const uint8_t runtimeFlags) {
-  if (!ReadBytes(reader, g_serumData.rname, 64)) {
-    enabled = false;
-    return NULL;
-  }
-  uint32_t sizeheader;
-  if (!ReadValue(reader, sizeheader)) {
-    enabled = false;
-    return NULL;
-  }
-  if (sizeheader >= 14 * sizeof(uint32_t))
-    return Serum_LoadFilev2Stream(reader, loadFlags, runtimeFlags, sizeheader);
-
-  mySerum.SerumVersion = g_serumData.SerumVersion = SERUM_V1;
-  uint32_t nframes32;
-  if (!ReadValue(reader, g_serumData.fwidth) ||
-      !ReadValue(reader, g_serumData.fheight) ||
-      !ReadValue(reader, nframes32) ||
-      !ReadValue(reader, g_serumData.nocolors) ||
-      !ReadValue(reader, g_serumData.nccolors)) {
-    enabled = false;
-    return NULL;
-  }
-  g_serumData.nframes = (uint16_t)nframes32;
-  mySerum.nocolors = g_serumData.nocolors;
-  mySerum.flags = runtimeFlags;
-  if ((g_serumData.fwidth == 0) || (g_serumData.fheight == 0) ||
-      (g_serumData.nframes == 0) || (g_serumData.nocolors == 0) ||
-      (g_serumData.nccolors == 0)) {
-    enabled = false;
-    return NULL;
-  }
-  if (!ValidateLoadedGeometry(false, "cROM/v1")) {
-    enabled = false;
-    return NULL;
-  }
-  if (!ReadValue(reader, g_serumData.ncompmasks) ||
-      !ReadValue(reader, g_serumData.nmovmasks) ||
-      !ReadValue(reader, g_serumData.nsprites)) {
-    enabled = false;
-    return NULL;
-  }
-  if (sizeheader >= 13 * sizeof(uint32_t)) {
-    if (!ReadValue(reader, g_serumData.nbackgrounds)) {
-      enabled = false;
-      return NULL;
-    }
-  } else {
-    g_serumData.nbackgrounds = 0;
-  }
-
-  uint8_t* spritedescriptionso = (uint8_t*)malloc(
-      g_serumData.nsprites * MAX_SPRITE_SIZE * MAX_SPRITE_SIZE);
-  uint8_t* spritedescriptionsc = (uint8_t*)malloc(
-      g_serumData.nsprites * MAX_SPRITE_SIZE * MAX_SPRITE_SIZE);
-  // Releases the two buffers if a read throws; they are NULL once freed below.
-  struct FreeOnExit {
-    uint8_t*& a;
-    uint8_t*& b;
-    ~FreeOnExit() {
-      free(a);
-      free(b);
-    }
-  } freeSpriteDescriptions{spritedescriptionso, spritedescriptionsc};
-
-  mySerum.frame = (uint8_t*)malloc(g_serumData.fwidth * g_serumData.fheight);
-  mySerum.palette = (uint8_t*)malloc(3 * 64);
-  mySerum.rotations = (uint8_t*)malloc(MAX_COLOR_ROTATIONS * 3);
-  if (((g_serumData.nsprites > 0) &&
-       (!spritedescriptionso || !spritedescriptionsc)) ||
-      !mySerum.frame || !mySerum.palette || !mySerum.rotations) {
-    Serum_free();
-    enabled = false;
-    return NULL;
-  }
-
-  g_serumData.hashcodes.readFromCRomReader(1, g_serumData.nframes, reader);
-  g_serumData.shapecompmode.readFromCRomReader(1, g_serumData.nframes, reader);
-  g_serumData.compmaskID.readFromCRomReader(1, g_serumData.nframes, reader);
-  g_serumData.movrctID.readFromCRomReader(1, g_serumData.nframes, reader);
-  g_serumData.movrctID.clear();
-  g_serumData.compmasks.readFromCRomReader(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.ncompmasks, reader);
-  g_serumData.movrcts.readFromCRomReader(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.nmovmasks, reader);
-  g_serumData.movrcts.clear();
-  g_serumData.cpal.readFromCRomReader(3 * g_serumData.nccolors,
-                                      g_serumData.nframes, reader);
-  g_serumData.cframes.readFromCRomReader(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.nframes, reader);
-  g_serumData.dynamasks.readFromCRomReader(
-      g_serumData.fwidth * g_serumData.fheight, g_serumData.nframes, reader);
-  g_serumData.dyna4cols.readFromCRomReader(
-      MAX_DYNA_4COLS_PER_FRAME * g_serumData.nocolors, g_serumData.nframes,
-      reader);
-  // A v1 cROM has LEGACY_SPRITES_PER_FRAME slots of 8-bit sprite IDs.
-  {
-    SparseVector<uint8_t> legacy(255);
-    legacy.readFromCRomReader(LEGACY_SPRITES_PER_FRAME, g_serumData.nframes,
-                              reader);
-    g_serumData.WidenFrameSprites(legacy);
-  }
-
-  for (int ti = 0;
-       ti < (int)g_serumData.nsprites * MAX_SPRITE_SIZE * MAX_SPRITE_SIZE;
-       ti++) {
-    if (!ReadValue(reader, spritedescriptionsc[ti]) ||
-        !ReadValue(reader, spritedescriptionso[ti])) {
-      Free_element((void**)&spritedescriptionso);
-      Free_element((void**)&spritedescriptionsc);
-      Serum_free();
-      enabled = false;
-      return NULL;
-    }
-  }
-  for (uint32_t i = 0; i < g_serumData.nsprites; i++) {
-    g_serumData.spritedescriptionsc.set(
-        i, &spritedescriptionsc[i * MAX_SPRITE_SIZE * MAX_SPRITE_SIZE],
-        MAX_SPRITE_SIZE * MAX_SPRITE_SIZE);
-    g_serumData.spritedescriptionso.set(
-        i, &spritedescriptionso[i * MAX_SPRITE_SIZE * MAX_SPRITE_SIZE],
-        MAX_SPRITE_SIZE * MAX_SPRITE_SIZE);
-  }
-  Free_element((void**)&spritedescriptionso);
-  Free_element((void**)&spritedescriptionsc);
-
-  g_serumData.activeframes.readFromCRomReader(1, g_serumData.nframes, reader);
-  g_serumData.colorrotations.readFromCRomReader(3 * MAX_COLOR_ROTATIONS,
-                                                g_serumData.nframes, reader);
-  g_serumData.spritedetdwords.readFromCRomReader(MAX_SPRITE_DETECT_AREAS,
-                                                 g_serumData.nsprites, reader);
-  g_serumData.spritedetdwordpos.readFromCRomReader(
-      MAX_SPRITE_DETECT_AREAS, g_serumData.nsprites, reader);
-  g_serumData.spritedetareas.readFromCRomReader(4 * MAX_SPRITE_DETECT_AREAS,
-                                                g_serumData.nsprites, reader);
-  mySerum.ntriggers = 0;
-  if (sizeheader >= 11 * sizeof(uint32_t)) {
-    g_serumData.triggerIDs.readFromCRomReader(1, g_serumData.nframes, reader);
-  }
-  uint32_t framespos = g_serumData.nframes / 2;
-  uint32_t framesspace = g_serumData.nframes - framespos;
-  uint32_t framescount = (framesspace + 9) / 10;
-
-  if (framescount > 0) {
-    std::vector<uint32_t> candidates;
-    candidates.reserve(framesspace);
-    for (uint32_t ti = framespos; ti < g_serumData.nframes; ++ti) {
-      if (g_serumData.triggerIDs[ti][0] == 0xffffffff) {
-        candidates.push_back(ti);
-      }
-    }
-
-    if (!candidates.empty()) {
-      std::mt19937 rng(0xC0DE1234);
-      std::shuffle(candidates.begin(), candidates.end(), rng);
-      std::uniform_int_distribution<uint32_t> triggerDist(65433u, 0xfffffffeu);
-
-      uint32_t toAssign = std::min<uint32_t>(framescount, candidates.size());
-      for (uint32_t i = 0; i < toAssign; ++i) {
-        uint32_t triggerValue = triggerDist(rng);
-        g_serumData.triggerIDs.set(candidates[i], &triggerValue, 1);
-      }
-
-      for (uint32_t offset = 0; (framespos + offset) < g_serumData.nframes;
-           ++offset) {
-        uint32_t idx = framespos + offset;
-        if (g_serumData.triggerIDs[idx][0] == 0xffffffff) {
-          uint32_t triggerValue = triggerDist(rng);
-          g_serumData.triggerIDs.set(idx, &triggerValue, 1);
-          break;
-        }
-      }
-    }
-  }
-  for (uint32_t ti = 0; ti < g_serumData.nframes; ti++) {
-    if (g_serumData.triggerIDs[ti][0] < PUP_TRIGGER_MAX_THRESHOLD)
-      mySerum.ntriggers++;
-  }
-  if (sizeheader >= 12 * sizeof(uint32_t))
-    g_serumData.framespriteBB.readFromCRomReader(LEGACY_SPRITES_PER_FRAME * 4,
-                                                 g_serumData.nframes, reader,
-                                                 &g_serumData.framesprites);
-  else {
-    for (uint32_t tj = 0; tj < g_serumData.nframes; tj++) {
-      uint16_t tmp_framespriteBB[4 * LEGACY_SPRITES_PER_FRAME];
-      for (uint32_t ti = 0; ti < LEGACY_SPRITES_PER_FRAME; ti++) {
-        tmp_framespriteBB[ti * 4] = 0;
-        tmp_framespriteBB[ti * 4 + 1] = 0;
-        tmp_framespriteBB[ti * 4 + 2] = g_serumData.fwidth - 1;
-        tmp_framespriteBB[ti * 4 + 3] = g_serumData.fheight - 1;
-      }
-      g_serumData.framespriteBB.set(tj, tmp_framespriteBB,
-                                    LEGACY_SPRITES_PER_FRAME * 4);
-    }
-  }
-  if (sizeheader >= 13 * sizeof(uint32_t)) {
-    g_serumData.backgroundframes.readFromCRomReader(
-        g_serumData.fwidth * g_serumData.fheight, g_serumData.nbackgrounds,
-        reader);
-    g_serumData.backgroundIDs.readFromCRomReader(1, g_serumData.nframes,
-                                                 reader);
-    g_serumData.backgroundBB.readFromCRomReader(4, g_serumData.nframes, reader,
-                                                &g_serumData.backgroundIDs);
-  }
-
-  g_serumData.BuildPackingSidecarsAndNormalize();
-
-  framechecked = (bool*)malloc(sizeof(bool) * g_serumData.nframes);
-  if (!framechecked) {
-    Serum_free();
-    enabled = false;
-    return NULL;
-  }
-  if (g_serumData.fheight == 64) {
-    mySerum.width64 = g_serumData.fwidth;
-    mySerum.width32 = 0;
-  } else {
-    mySerum.width32 = g_serumData.fwidth;
-    mySerum.width64 = 0;
-  }
-  Full_Reset_ColorRotations();
-  cromloaded = true;
-  enabled = true;
-  return &mySerum;
-}
-
-Serum_Frame_Struc* Serum_LoadFilev1(const char* const filename,
-                                    const uint8_t loadFlags,
-                                    const uint8_t runtimeFlags) {
-  // check if we're using an uncompressed cROM file
-  const char* ext;
-  bool uncompressedCROM = false;
-  if ((ext = strrchr(filename, '.')) != NULL) {
-    if (strcasecmp(ext, ".cROM") == 0) {
-      uncompressedCROM = true;
-    }
-  }
-
-  if (!uncompressedCROM) {
-    std::vector<uint8_t> extractedCRom;
-    if (!ExtractCRZEntryToMemory(filename, extractedCRom)) {
-      return NULL;
-    }
-    MemoryCRomReader reader{extractedCRom.data(), extractedCRom.size(), 0};
-    return Serum_LoadFilev1Stream(reader, loadFlags, runtimeFlags);
-  }
-
-  FILE* pfile;
-  pfile = fopen(filename, "rb");
-  if (!pfile) {
-    enabled = false;
-    return NULL;
-  }
-  FileCRomReader reader{pfile};
-  Serum_Frame_Struc* result =
-      Serum_LoadFilev1Stream(reader, loadFlags, runtimeFlags);
-  fclose(pfile);
-  return result;
-}
-
 // Parts of the load sequence shared by Serum_Load() and
-// Serum_LoadFromMemory(), defined after them.
+// Serum_LoadFromSource(), defined after them.
 static void BeginColorizationLoad();
 static void RequestBothPlanesByDefault(const bool forceLoadFlags,
                                        uint8_t& loadFlags,
@@ -5100,7 +4344,6 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   Log("Searching colorization file for %s in %s", romname, pathbuf.c_str());
   double csvUpdateMs = 0.0;
   double cromcLoadMs = 0.0;
-  double rawLoadMs = 0.0;
   double cromcReloadMs = 0.0;
 
   RequestBothPlanesByDefault(forceLoadFlags, loadFlags, runtimeFlags);
@@ -5128,79 +4371,71 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   std::optional<std::string> reloadConcentratePath;
   std::optional<std::string> pFoundFile;
   if (!realMachine) {
-    std::optional<std::string> skipFoundFile =
-        find_case_insensitive_file(pathbuf, "skip-cromc.txt");
-    if (skipFoundFile) {
-      Log("Skipping .cROMc load due to presence of %s", skipFoundFile->c_str());
-    } else {
-      pFoundFile =
-          find_case_insensitive_file(pathbuf, std::string(romname) + ".cROMc");
+    pFoundFile =
+        find_case_insensitive_file(pathbuf, std::string(romname) + ".cROMc");
 
-      if (pFoundFile) {
-        Log("Found %s", pFoundFile->c_str());
-        NoteStartupRssSample("before-cromc-load");
-        const auto stageStart = g_profileLoadTimes
-                                    ? std::chrono::steady_clock::now()
-                                    : std::chrono::steady_clock::time_point{};
-        result =
-            Serum_LoadConcentrate(pFoundFile->c_str(), loadFlags, runtimeFlags);
-        if (g_profileLoadTimes) {
-          cromcLoadMs +=
-              DurationMs(stageStart, std::chrono::steady_clock::now());
+    if (pFoundFile) {
+      Log("Found %s", pFoundFile->c_str());
+      NoteStartupRssSample("before-cromc-load");
+      const auto stageStart = g_profileLoadTimes
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
+      result =
+          Serum_LoadConcentrate(pFoundFile->c_str(), loadFlags, runtimeFlags);
+      if (g_profileLoadTimes) {
+        cromcLoadMs += DurationMs(stageStart, std::chrono::steady_clock::now());
+      }
+      loadedFromConcentrate = (result != NULL);
+      if (result) {
+        NoteStartupRssSample("after-cromc-load");
+        LogLoadedColorizationSource(*pFoundFile, true);
+        bool concentrateNeedsRewrite = false;
+        LogIgnoredSidecars(csvFoundFile, requestedScaling);
+        if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
+            !g_serumData.scenesFromColorization && ([&]() {
+              const auto csvStart =
+                  g_profileLoadTimes ? std::chrono::steady_clock::now()
+                                     : std::chrono::steady_clock::time_point{};
+              const bool parsed =
+                  g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str());
+              if (g_profileLoadTimes) {
+                csvUpdateMs +=
+                    DurationMs(csvStart, std::chrono::steady_clock::now());
+              }
+              return parsed;
+            })()) {
+          sceneDataUpdatedFromCsv = true;
+          concentrateNeedsRewrite = true;
+          NoteStartupRssSample("after-csv-update");
         }
-        loadedFromConcentrate = (result != NULL);
-        if (result) {
-          NoteStartupRssSample("after-cromc-load");
-          LogLoadedColorizationSource(*pFoundFile, true);
-          bool concentrateNeedsRewrite = false;
-          LogIgnoredSidecars(csvFoundFile, requestedScaling);
-          if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
-              !g_serumData.scenesFromColorization && ([&]() {
-                const auto csvStart =
-                    g_profileLoadTimes
-                        ? std::chrono::steady_clock::now()
-                        : std::chrono::steady_clock::time_point{};
-                const bool parsed =
-                    g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str());
-                if (g_profileLoadTimes) {
-                  csvUpdateMs +=
-                      DurationMs(csvStart, std::chrono::steady_clock::now());
-                }
-                return parsed;
-              })()) {
-            sceneDataUpdatedFromCsv = true;
-            concentrateNeedsRewrite = true;
-            NoteStartupRssSample("after-csv-update");
-          }
-          if (!g_serumData.scalingFromColorization &&
-              requestedScaling.algorithm &&
-              *requestedScaling.algorithm != g_serumData.scalingAlgorithm) {
-            Log("scaling.txt changes the stored scaling algorithm from %u to "
-                "%u",
-                (uint32_t)g_serumData.scalingAlgorithm,
-                (uint32_t)*requestedScaling.algorithm);
-            g_serumData.scalingAlgorithm = *requestedScaling.algorithm;
-            concentrateNeedsRewrite = true;
-          }
-          if (!g_serumData.scalingFromColorization &&
-              requestedScaling.shadowOffsetMode &&
-              *requestedScaling.shadowOffsetMode !=
-                  g_serumData.shadowOffsetMode) {
-            Log("scaling.txt changes the stored shadow offset from %u to %u",
-                (uint32_t)g_serumData.shadowOffsetMode,
-                (uint32_t)*requestedScaling.shadowOffsetMode);
-            g_serumData.shadowOffsetMode = *requestedScaling.shadowOffsetMode;
-            concentrateNeedsRewrite = true;
-          }
-          if (concentrateNeedsRewrite && !realMachine) {
-            // Update the concentrate file with the new PUP/scaling data
-            if (generateCRomC && Serum_SaveConcentrate(pFoundFile->c_str())) {
-              reloadConcentratePath = *pFoundFile;
-            }
-          }
-        } else {
-          Log("Failed to load %s", pFoundFile->c_str());
+        if (!g_serumData.scalingFromColorization &&
+            requestedScaling.algorithm &&
+            *requestedScaling.algorithm != g_serumData.scalingAlgorithm) {
+          Log("scaling.txt changes the stored scaling algorithm from %u to "
+              "%u",
+              (uint32_t)g_serumData.scalingAlgorithm,
+              (uint32_t)*requestedScaling.algorithm);
+          g_serumData.scalingAlgorithm = *requestedScaling.algorithm;
+          concentrateNeedsRewrite = true;
         }
+        if (!g_serumData.scalingFromColorization &&
+            requestedScaling.shadowOffsetMode &&
+            *requestedScaling.shadowOffsetMode !=
+                g_serumData.shadowOffsetMode) {
+          Log("scaling.txt changes the stored shadow offset from %u to %u",
+              (uint32_t)g_serumData.shadowOffsetMode,
+              (uint32_t)*requestedScaling.shadowOffsetMode);
+          g_serumData.shadowOffsetMode = *requestedScaling.shadowOffsetMode;
+          concentrateNeedsRewrite = true;
+        }
+        if (concentrateNeedsRewrite && !realMachine) {
+          // Update the concentrate file with the new PUP/scaling data
+          if (generateCRomC && Serum_SaveConcentrate(pFoundFile->c_str())) {
+            reloadConcentratePath = *pFoundFile;
+          }
+        }
+      } else {
+        Log("Failed to load %s", pFoundFile->c_str());
       }
     }
   } else {
@@ -5233,64 +4468,18 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
       enabled = false;
       return NULL;
     }
-    if (!realMachine && !forceLoadFlags) {
-      // by default, we request both frame types
-      loadFlags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
-    }
-    pFoundFile =
-        find_case_insensitive_file(pathbuf, std::string(romname) + ".cROM");
-    if (!pFoundFile)
-      pFoundFile =
-          find_case_insensitive_file(pathbuf, std::string(romname) + ".cRZ");
-    if (!pFoundFile) {
-      enabled = false;
-      return NULL;
-    }
-    Log("Found %s", pFoundFile->c_str());
-    NoteStartupRssSample("before-crom-load");
-    const auto rawStageStart = g_profileLoadTimes
-                                   ? std::chrono::steady_clock::now()
-                                   : std::chrono::steady_clock::time_point{};
-    result = Serum_LoadFilev1(pFoundFile->c_str(), loadFlags, runtimeFlags);
-    if (g_profileLoadTimes) {
-      rawLoadMs += DurationMs(rawStageStart, std::chrono::steady_clock::now());
-    }
-    if (result) {
-      NoteStartupRssSample("after-crom-load");
-      LogLoadedColorizationSource(*pFoundFile, false);
-      LogIgnoredSidecars(csvFoundFile, requestedScaling);
-      if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
-          !g_serumData.scenesFromColorization) {
-        const auto csvStart = g_profileLoadTimes
-                                  ? std::chrono::steady_clock::now()
-                                  : std::chrono::steady_clock::time_point{};
-        sceneDataUpdatedFromCsv =
-            g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str());
-        if (g_profileLoadTimes) {
-          csvUpdateMs += DurationMs(csvStart, std::chrono::steady_clock::now());
-        }
-        if (sceneDataUpdatedFromCsv) {
-          NoteStartupRssSample("after-csv-update");
-        }
+    // Colorizations are loaded from a cROMc only. A cROM or cRZ of an earlier
+    // version is named, so that a user knows why nothing is colorized.
+    for (const char* extension : {".cROM", ".cRZ"}) {
+      if (const std::optional<std::string> raw = find_case_insensitive_file(
+              pathbuf, std::string(romname) + extension)) {
+        Log("%s is not loaded: only a .cROMc is, as the colorization's author "
+            "provides it",
+            raw->c_str());
       }
-      if (!g_serumData.scalingFromColorization && requestedScaling.algorithm) {
-        // A raw source without a settings block carries no scaling settings,
-        // so the sidecar is the only input for the cROMc generated below.
-        g_serumData.scalingAlgorithm = *requestedScaling.algorithm;
-      }
-      if (!g_serumData.scalingFromColorization &&
-          requestedScaling.shadowOffsetMode) {
-        g_serumData.shadowOffsetMode = *requestedScaling.shadowOffsetMode;
-      }
-      if (!realMachine) {
-        if (generateCRomC && Serum_SaveConcentrate(pFoundFile->c_str())) {
-          reloadConcentratePath =
-              BuildConcentratePathFromSourcePath(pFoundFile->c_str());
-        }
-      }
-    } else {
-      Log("Failed to load %s", pFoundFile->c_str());
     }
+    enabled = false;
+    return NULL;
   }
   if (reloadConcentratePath) {
     NoteStartupRssSample("before-cromc-reload");
@@ -5317,7 +4506,7 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     g_serumData.sceneGenerator->setDepth(result->nocolors == 16 ? 4 : 2);
   if (result) {
     FinishColorizationLoad(loadedFromConcentrate, sceneDataUpdatedFromCsv,
-                           loadTotalStart, csvUpdateMs, cromcLoadMs, rawLoadMs,
+                           loadTotalStart, csvUpdateMs, cromcLoadMs, 0.0,
                            cromcReloadMs);
     Log("Upscaling algorithm: %s (source=%s, extra plane: %s)",
         ScalingAlgorithmName(),
@@ -5341,11 +4530,10 @@ struct FastPackingScope {
   FastPackingScope& operator=(const FastPackingScope&) = delete;
 };
 
-// Serum_LoadFromMemory(), Serum_LoadFromMemoryWithScenes() and
-// Serum_LoadFromCallback(): the cROM comes from the reader. csvPath, when
-// given, is parsed between reading the cROM and FinishColorizationLoad(), as
-// Serum_Load() parses a pup.csv beside a raw cROM. No cROMc is written from
-// these loads, so they pack with LZ4's fast mode.
+// Serum_LoadFromSource(): load() reads the colorization. csvPath, when given,
+// is parsed between reading it and FinishColorizationLoad(), as Serum_Load()
+// parses a pup.csv beside a cROMc. No cROMc is written from this load, so it
+// packs with LZ4's fast mode.
 template <typename Load>
 static Serum_Frame_Struc* LoadThrough(Load&& load, const char* const csvPath,
                                       uint8_t flags, const char* api) {
@@ -5360,12 +4548,12 @@ static Serum_Frame_Struc* LoadThrough(Load&& load, const char* const csvPath,
   BeginColorizationLoad();
   RequestBothPlanesByDefault(forceLoadFlags, loadFlags, runtimeFlags);
   if (!forceLoadFlags) {
-    // As Serum_Load() does for a raw file: both frame types are loaded.
+    // Both frame types are loaded, as for a cROMc export.
     loadFlags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
   }
 
   const FastPackingScope fastPacking;
-  std::string failure = "not a cROM this library can load";
+  std::string failure = "not a colorization this library can load";
   Serum_Frame_Struc* result = NULL;
   double rawLoadMs = 0.0;
   const auto rawStageStart = g_profileLoadTimes
@@ -5383,7 +4571,7 @@ static Serum_Frame_Struc* LoadThrough(Load&& load, const char* const csvPath,
   if (!result) {
     Serum_free();
     enabled = false;
-    Log("Failed to load cROM (%s): %s", api, failure.c_str());
+    Log("Failed to load the colorization (%s): %s", api, failure.c_str());
     SetLastErrorMessage("%s: %s", api, failure.c_str());
     return NULL;
   }
@@ -5415,17 +4603,6 @@ static Serum_Frame_Struc* LoadThrough(Load&& load, const char* const csvPath,
       g_serumData.concentrateFileVersion >= 8 ? "cROMc header" : "default",
       IsExactDoubleExtraPlane() ? "yes" : "no");
   return result;
-}
-
-template <typename Reader>
-static Serum_Frame_Struc* LoadFromReader(Reader& reader,
-                                         const char* const csvPath,
-                                         uint8_t flags, const char* api) {
-  return LoadThrough(
-      [&reader](uint8_t loadFlags, uint8_t runtimeFlags) {
-        return Serum_LoadFilev1Stream(reader, loadFlags, runtimeFlags);
-      },
-      csvPath, flags, api);
 }
 
 // A v2 colorization from an authoring tool's source: the header values as a
@@ -5486,34 +4663,6 @@ static Serum_Frame_Struc* LoadV2FromSource(
   return FinishV2Load();
 }
 
-static Serum_Frame_Struc* LoadFromMemory(const uint8_t* crom, size_t size,
-                                         const char* const csvPath,
-                                         uint8_t flags) {
-  if (!crom || size == 0) {
-    Serum_free();
-    enabled = false;
-    SetLastErrorMessage("Serum_LoadFromMemory: no data");
-    return NULL;
-  }
-  MemoryCRomReader reader{crom, size, 0, true};
-  return LoadFromReader(reader, csvPath, flags, "Serum_LoadFromMemory");
-}
-
-SERUM_API Serum_Frame_Struc* Serum_LoadFromMemory(const uint8_t* crom,
-                                                  size_t size, uint8_t flags) {
-  SERUM_API_GUARD_START("Serum_LoadFromMemory")
-  return LoadFromMemory(crom, size, NULL, flags);
-  SERUM_API_GUARD_END("Serum_LoadFromMemory", nullptr)
-}
-
-SERUM_API Serum_Frame_Struc* Serum_LoadFromMemoryWithScenes(
-    const uint8_t* crom, size_t size, const char* const csvPath,
-    uint8_t flags) {
-  SERUM_API_GUARD_START("Serum_LoadFromMemoryWithScenes")
-  return LoadFromMemory(crom, size, csvPath, flags);
-  SERUM_API_GUARD_END("Serum_LoadFromMemoryWithScenes", nullptr)
-}
-
 SERUM_API Serum_Frame_Struc* Serum_LoadFromSource(
     const Serum_Colorization_Source* source, const char* const csvPath,
     uint8_t flags) {
@@ -5563,25 +4712,6 @@ SERUM_API bool Serum_ConcentrateFromSource(
   }
   return saved;
   SERUM_API_GUARD_END("Serum_ConcentrateFromSource", false)
-}
-
-SERUM_API Serum_Frame_Struc* Serum_LoadFromCallback(Serum_ReadCallback read,
-                                                    void* userData, size_t size,
-                                                    const char* const csvPath,
-                                                    uint8_t flags) {
-  SERUM_API_GUARD_START("Serum_LoadFromCallback")
-  if (!read || size == 0) {
-    Serum_free();
-    enabled = false;
-    SetLastErrorMessage("Serum_LoadFromCallback: no data");
-    return NULL;
-  }
-  CallbackCRomReader reader;
-  reader.read = read;
-  reader.userData = userData;
-  reader.size = size;
-  return LoadFromReader(reader, csvPath, flags, "Serum_LoadFromCallback");
-  SERUM_API_GUARD_END("Serum_LoadFromCallback", nullptr)
 }
 
 // Start of every load, after Serum_free().
@@ -6283,141 +5413,6 @@ void GetSpriteSize(uint16_t nospr, int* pswid, int* pshei,
   (*pswid)++;
 }
 
-bool Check_Spritesv1(uint8_t* Frame, uint32_t quelleframe,
-                     uint16_t* pquelsprites, uint8_t* nspr, uint16_t* pfrx,
-                     uint16_t* pfry, uint16_t* pspx, uint16_t* pspy,
-                     uint16_t* pwid, uint16_t* phei) {
-  uint32_t ti = 0;
-  uint32_t mdword;
-  *nspr = 0;
-  const uint32_t slots = g_serumData.SpritesPerFrame();
-  while ((ti < slots) &&
-         (g_serumData.framesprites[quelleframe][ti] != SERUM_NO_SPRITE)) {
-    uint16_t qspr = g_serumData.framesprites[quelleframe][ti];
-    if (!g_serumData.spritedescriptionso.hasData(qspr) ||
-        !g_serumData.spritedescriptionso_opaque.hasData(qspr)) {
-      ti++;
-      continue;
-    }
-    const uint8_t* spriteDescription = g_serumData.spritedescriptionso[qspr];
-    const uint8_t* spriteOpaque = g_serumData.spritedescriptionso_opaque[qspr];
-    int spw, sph;
-    GetSpriteSize(qspr, &spw, &sph, spriteDescription, MAX_SPRITE_SIZE,
-                  MAX_SPRITE_SIZE, spriteOpaque);
-    short minxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4]);
-    short minyBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 1]);
-    short maxxBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 2]);
-    short maxyBB = (short)(g_serumData.framespriteBB[quelleframe][ti * 4 + 3]);
-    for (uint32_t tm = 0; tm < MAX_SPRITE_DETECT_AREAS; tm++) {
-      if (g_serumData.spritedetareas[qspr][tm * 4] == 0xffff) continue;
-      // we look for the sprite in the frame sent
-      for (short ty = minyBB; ty <= maxyBB; ty++) {
-        mdword = (uint32_t)(Frame[ty * g_serumData.fwidth + minxBB] << 8) |
-                 (uint32_t)(Frame[ty * g_serumData.fwidth + minxBB + 1] << 16) |
-                 (uint32_t)(Frame[ty * g_serumData.fwidth + minxBB + 2] << 24);
-        for (short tx = minxBB; tx <= maxxBB - 3; tx++) {
-          uint32_t tj = ty * g_serumData.fwidth + tx;
-          mdword = (mdword >> 8) | (uint32_t)(Frame[tj + 3] << 24);
-          // we look for the magic dword first:
-          uint16_t sddp = g_serumData.spritedetdwordpos[qspr][tm];
-          if (mdword == g_serumData.spritedetdwords[qspr][tm]) {
-            short frax =
-                (short)tx;  // position in the frame of the detection dword
-            short fray = (short)ty;
-            short sprx =
-                (short)(sddp % MAX_SPRITE_SIZE);  // position in the sprite of
-                                                  // the detection dword
-            short spry = (short)(sddp / MAX_SPRITE_SIZE);
-            // details of the det area:
-            short detx =
-                (short)g_serumData
-                    .spritedetareas[qspr][tm * 4];  // position of the detection
-                                                    // area in the sprite
-            short dety = (short)g_serumData.spritedetareas[qspr][tm * 4 + 1];
-            short detw =
-                (short)g_serumData
-                    .spritedetareas[qspr]
-                                   [tm * 4 + 2];  // size of the detection area
-            short deth = (short)g_serumData.spritedetareas[qspr][tm * 4 + 3];
-            // if the detection area starts before the frame (left or top),
-            // continue:
-            if ((frax - minxBB < sprx - detx) || (fray - minyBB < spry - dety))
-              continue;
-            // position of the detection area in the frame
-            int offsx = frax - sprx + detx;
-            int offsy = fray - spry + dety;
-            // if the detection area extends beyond the bounding box (right or
-            // bottom), continue:
-            if ((offsx + detw > (int)maxxBB + 1) ||
-                (offsy + deth > (int)maxyBB + 1))
-              continue;
-            // we can now check if the full detection area is around the found
-            // detection dword
-            bool notthere = false;
-            for (uint16_t tk = 0; tk < deth; tk++) {
-              for (uint16_t tl = 0; tl < detw; tl++) {
-                const uint32_t spritePixelIndex =
-                    (tk + dety) * MAX_SPRITE_SIZE + tl + detx;
-                if (spriteOpaque[spritePixelIndex] == 0) continue;
-                uint8_t val = spriteDescription[spritePixelIndex];
-                if (val !=
-                    Frame[(tk + offsy) * g_serumData.fwidth + tl + offsx]) {
-                  notthere = true;
-                  break;
-                }
-              }
-              if (notthere == true) break;
-            }
-            if (!notthere) {
-              pquelsprites[*nspr] = qspr;
-              if (frax - minxBB < sprx) {
-                pspx[*nspr] =
-                    (uint16_t)(sprx -
-                               (frax - minxBB));  // display sprite from point
-                pfrx[*nspr] = (uint16_t)minxBB;
-                pwid[*nspr] = std::min((uint16_t)(spw - pspx[*nspr]),
-                                       (uint16_t)(maxxBB - minxBB + 1));
-              } else {
-                pspx[*nspr] = 0;
-                pfrx[*nspr] = (uint16_t)(frax - sprx);
-                pwid[*nspr] = std::min((uint16_t)(maxxBB - pfrx[*nspr] + 1),
-                                       (uint16_t)spw);
-              }
-              if (fray - minyBB < spry) {
-                pspy[*nspr] = (uint16_t)(spry - (fray - minyBB));
-                pfry[*nspr] = (uint16_t)minyBB;
-                phei[*nspr] = std::min((uint16_t)(sph - pspy[*nspr]),
-                                       (uint16_t)(maxyBB - minyBB + 1));
-              } else {
-                pspy[*nspr] = 0;
-                pfry[*nspr] = (uint16_t)(fray - spry);
-                phei[*nspr] = std::min((uint16_t)(maxyBB - pfry[*nspr] + 1),
-                                       (uint16_t)sph);
-              }
-              // we check the identical sprites as there may be duplicate due
-              // to the multi detection zones
-              bool identicalfound = false;
-              for (uint8_t tk = 0; tk < *nspr; tk++) {
-                if ((pquelsprites[*nspr] == pquelsprites[tk]) &&
-                    (pfrx[*nspr] == pfrx[tk]) && (pfry[*nspr] == pfry[tk]) &&
-                    (pwid[*nspr] == pwid[tk]) && (phei[*nspr] == phei[tk]))
-                  identicalfound = true;
-              }
-              if (!identicalfound) {
-                (*nspr)++;
-                if (*nspr == MAX_SPRITES_PER_FRAME) return true;
-              }
-            }
-          }
-        }
-      }
-    }
-    ti++;
-  }
-  if (*nspr > 0) return true;
-  return false;
-}
-
 // poffx and poffy, when given, take the offset each sprite was moved by from
 // where it was found (SerumSpriteOffset): Colorize_Spritev2() reads the ROM
 // shades of its dynamic pixels there.
@@ -6708,42 +5703,6 @@ bool Check_Spritesv2(uint8_t* recframe, uint32_t quelleframe,
   DebugLogSpriteCheckResult(quelleframe, *nspr);
   if (*nspr > 0) return true;
   return false;
-}
-
-void Colorize_Framev1(uint8_t* frame, uint32_t IDfound) {
-  uint16_t tj, ti;
-  // Generate the colorized version of a frame once identified in the crom
-  // frames
-  const bool frameHasDynamic = IDfound < g_serumData.frameHasDynamic.size() &&
-                               g_serumData.frameHasDynamic[IDfound] > 0;
-  const uint8_t* frameDyna =
-      frameHasDynamic ? g_serumData.dynamasks[IDfound] : nullptr;
-  const uint8_t* frameDynaActive =
-      frameHasDynamic ? g_serumData.dynamasks_active[IDfound] : nullptr;
-  for (tj = 0; tj < g_serumData.fheight; tj++) {
-    for (ti = 0; ti < g_serumData.fwidth; ti++) {
-      uint16_t tk = tj * g_serumData.fwidth + ti;
-
-      if ((g_serumData.backgroundIDs[IDfound][0] < g_serumData.nbackgrounds) &&
-          (frame[tk] == 0) && (ti >= g_serumData.backgroundBB[IDfound][0]) &&
-          (tj >= g_serumData.backgroundBB[IDfound][1]) &&
-          (ti <= g_serumData.backgroundBB[IDfound][2]) &&
-          (tj <= g_serumData.backgroundBB[IDfound][3]))
-        mySerum.frame[tk] =
-            g_serumData
-                .backgroundframes[g_serumData.backgroundIDs[IDfound][0]][tk];
-      else {
-        if (!frameHasDynamic || frameDynaActive[tk] == 0)
-          mySerum.frame[tk] = g_serumData.cframes[IDfound][tk];
-        else {
-          const uint8_t dynacouche = frameDyna[tk];
-          mySerum.frame[tk] =
-              g_serumData.dyna4cols[IDfound][dynacouche * g_serumData.nocolors +
-                                             frame[tk]];
-        }
-      }
-    }
-  }
 }
 
 bool CheckExtraFrameAvailable(uint32_t frID) {
@@ -7405,23 +6364,6 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
   }
 }
 
-void Colorize_Spritev1(uint16_t nosprite, uint16_t frx, uint16_t fry,
-                       uint16_t spx, uint16_t spy, uint16_t wid, uint16_t hei) {
-  if (!g_serumData.spritedescriptionso_opaque.hasData(nosprite)) return;
-  const uint8_t* spriteOpaque =
-      g_serumData.spritedescriptionso_opaque[nosprite];
-  for (uint16_t tj = 0; tj < hei; tj++) {
-    for (uint16_t ti = 0; ti < wid; ti++) {
-      if (spriteOpaque[(tj + spy) * MAX_SPRITE_SIZE + ti + spx] > 0) {
-        mySerum.frame[(fry + tj) * g_serumData.fwidth + frx + ti] =
-            g_serumData
-                .spritedescriptionsc[nosprite]
-                                    [(tj + spy) * MAX_SPRITE_SIZE + ti + spx];
-      }
-    }
-  }
-}
-
 // One colour of a sprite: from the array serum_accel::SpriteColourArray()
 // returned, or from the store where it returned null.
 template <typename Store>
@@ -7852,180 +6794,6 @@ SERUM_API void Serum_SetStandardPalette(const uint8_t* palette,
     monochromePaletteV2Length = num_colors;
   }
   SERUM_API_GUARD_END_VOID("Serum_SetStandardPalette")
-}
-
-uint32_t Calc_Next_Rotationv1(uint32_t now) {
-  uint32_t nextrot = 0xffffffff;
-  for (int ti = 0; ti < MAX_COLOR_ROTATIONS; ti++) {
-    if (mySerum.rotations[ti * 3] == 255) continue;
-    if (colorrotnexttime[ti] < nextrot) nextrot = colorrotnexttime[ti];
-  }
-  if (nextrot == 0xffffffff) return 0;
-  return nextrot - now;
-}
-
-uint32_t Serum_ColorizeWithMetadatav1(uint8_t* frame) {
-  // return IDENTIFY_NO_FRAME if no new frame detected
-  // return 0 if new frame with no rotation detected
-  // return > 0 if new frame with rotations detected, the value is the delay
-  // before the first rotation in ms
-  mySerum.triggerID = 0xffffffff;
-
-  if (!enabled) {
-    // apply standard palette
-    memcpy(mySerum.palette, standardPalette, standardPaletteLength);
-    return 0;
-  }
-
-  // Let's first identify the incoming frame among the ones we have in the
-  // crom
-  const uint32_t inputCrc =
-      (frame && g_serumData.fwidth > 0 && g_serumData.fheight > 0)
-          ? crc32_fast(frame, g_serumData.fwidth * g_serumData.fheight)
-          : 0;
-  g_debugCurrentInputCrc = inputCrc;
-  if (DebugTraceAllInputsEnabled()) {
-    Log("Serum debug input: api=v1 inputCrc=%u", inputCrc);
-  }
-  uint32_t frameID = Identify_Frame(frame, false);
-  mySerum.frameID = IDENTIFY_NO_FRAME;
-  uint32_t now = GetMonotonicTimeMs();
-  if (is_real_machine() && !showStatusMessages) {
-    showStatusMessages = (g_serumData.triggerIDs[lastfound][0] > 0xff98 &&
-                          g_serumData.triggerIDs[lastfound][0] < 0xffffffff);
-    if (showStatusMessages) ignoreUnknownFramesTimeout = 0x2000;
-  }
-  if (frameID != IDENTIFY_NO_FRAME && !showStatusMessages) {
-    // Black frames can distort a monochrome stream. Example: flashing text in
-    // a WPC settings menu. This could trigger a random black frame in the
-    // project, if this black frame doesn't have the appropriate monochrome
-    // trigger, it would end the monochrome stream and stay stuck on a black
-    // frame until a frame in the project is detected again. The code below
-    // takes care of that.
-    if ((!monochromeMode) ||
-        !IsFullBlackFrame(frame, g_serumData.fwidth * g_serumData.fheight)) {
-      monochromeMode =
-          (g_serumData.triggerIDs[lastfound][0] == MONOCHROME_TRIGGER_ID);
-    }
-
-    if (g_serumData.triggerIDs[lastfound][0] > 0xff98)
-      g_serumData.triggerIDs[lastfound][0] = 0xffffffff;
-
-    firstUnknownFrameTimestamp = 0;
-    if (maxFramesToSkip) {
-      framesSkippedCounter = 0;
-    }
-
-    if (frameID == IDENTIFY_SAME_FRAME) {
-      if (cromloaded && enabled && lastfound < g_serumData.nframes &&
-          DebugIdentifyVerboseEnabled() &&
-          DebugTraceMatchesInputCrc(g_debugCurrentInputCrc)) {
-        Log("Serum debug identify same-frame: inputCrc=%u lastfound=%u "
-            "sceneRequested=%s triggerId=%u",
-            g_debugCurrentInputCrc, lastfound, "false",
-            g_serumData.triggerIDs[lastfound][0]);
-      }
-      if (cromloaded && enabled && DebugTraceAllInputsEnabled()) {
-        Log("Serum debug input result: api=v1 inputCrc=%u result=same-frame "
-            "lastfound=%u",
-            g_debugCurrentInputCrc, lastfound);
-      }
-      if (keepTriggersInternal ||
-          mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
-        mySerum.triggerID = 0xffffffff;
-      return IDENTIFY_SAME_FRAME;
-    }
-
-    mySerum.frameID = frameID;
-    mySerum.rotationtimer = 0;
-    if (DebugTraceAllInputsEnabled()) {
-      Log("Serum debug input result: api=v1 inputCrc=%u result=frame "
-          "frameId=%u",
-          g_debugCurrentInputCrc, frameID);
-    }
-
-    uint16_t nosprite[MAX_SPRITES_PER_FRAME];
-    uint8_t nspr;
-    uint16_t frx[MAX_SPRITES_PER_FRAME], fry[MAX_SPRITES_PER_FRAME],
-        spx[MAX_SPRITES_PER_FRAME], spy[MAX_SPRITES_PER_FRAME],
-        wid[MAX_SPRITES_PER_FRAME], hei[MAX_SPRITES_PER_FRAME];
-    std::fill(nosprite, nosprite + MAX_SPRITES_PER_FRAME, SERUM_NO_SPRITE);
-
-    bool isspr = Check_Spritesv1(frame, (uint32_t)lastfound, nosprite, &nspr,
-                                 frx, fry, spx, spy, wid, hei);
-    if (((frameID < MAX_NUMBER_FRAMES) || isspr) &&
-        FrameHasRenderableContent(lastfound)) {
-      Colorize_Framev1(frame, lastfound);
-      Copy_Frame_Palette(lastfound);
-      {
-        uint32_t ti = 0;
-        while (ti < nspr) {
-          Colorize_Spritev1(nosprite[ti], frx[ti], fry[ti], spx[ti], spy[ti],
-                            wid[ti], hei[ti]);
-          ti++;
-        }
-      }
-      memcpy(mySerum.rotations, g_serumData.colorrotations[lastfound],
-             MAX_COLOR_ROTATIONS * 3);
-      for (uint32_t ti = 0; ti < MAX_COLOR_ROTATIONS; ti++) {
-        if (mySerum.rotations[ti * 3] == 255) {
-          colorrotnexttime[ti] = 0;
-          continue;
-        }
-        // Reset the timer if the previous frame had this rotation inactive or
-        // if the last init time is more than a new rotation away. Otherwise,
-        // we keep the already running timings for subsequent frames like
-        // blinking PUSH START or GAME OVER.
-        if ((colorshiftinittime[ti] + mySerum.rotations[ti * 3 + 2] * 10) <=
-            now) {
-          colorshiftinittime[ti] = now;
-          colorrotnexttime[ti] =
-              colorshiftinittime[ti] + mySerum.rotations[ti * 3 + 2] * 10;
-        }
-
-        if (colorrotnexttime[ti] <= now)
-          colorrotnexttime[ti] =
-              colorshiftinittime[ti] + mySerum.rotations[ti * 3 + 2] * 10;
-      }
-
-      mySerum.rotationtimer = Calc_Next_Rotationv1(now);
-
-      if (g_serumData.triggerIDs[lastfound][0] != lastTriggerID ||
-          lasttriggerTimestamp < (now - PUP_TRIGGER_REPEAT_TIMEOUT)) {
-        lastTriggerID = mySerum.triggerID =
-            g_serumData.triggerIDs[lastfound][0];
-        lasttriggerTimestamp = now;
-      }
-
-      if (keepTriggersInternal ||
-          mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD)
-        mySerum.triggerID = 0xffffffff;
-
-      return mySerum.rotationtimer;
-    }
-  } else if (firstUnknownFrameTimestamp == 0) {
-    firstUnknownFrameTimestamp = now;
-  }
-
-  mySerum.triggerID = 0xffffffff;
-
-  if (monochromeMode ||
-      (ignoreUnknownFramesTimeout && firstUnknownFrameTimestamp > 0 &&
-       (now - firstUnknownFrameTimestamp) >= ignoreUnknownFramesTimeout) ||
-      (maxFramesToSkip && (frameID == IDENTIFY_NO_FRAME) &&
-       (++framesSkippedCounter >= maxFramesToSkip))) {
-    // apply standard palette
-    memcpy(mySerum.palette, standardPalette, standardPaletteLength);
-    // disable render features like rotations
-    for (uint32_t ti = 0; ti < MAX_COLOR_ROTATIONS * 3; ti++) {
-      mySerum.rotations[ti] = 255;
-    }
-    mySerum.rotationtimer = 0;
-    return 0;  // new but not colorized frame, return true
-  }
-
-  return IDENTIFY_NO_FRAME;  // no new frame, return false, client has to
-                             // update rotations!
 }
 
 uint32_t Calc_Next_Rotationv2(uint32_t now) {
@@ -9026,44 +7794,8 @@ SERUM_API uint32_t Serum_Colorize(uint8_t* frame) {
   // before the first rotation in ms
   if (g_serumData.SerumVersion == SERUM_V2)
     return Serum_ColorizeWithMetadatav2(frame);
-  else
-    return Serum_ColorizeWithMetadatav1(frame);
+  return IDENTIFY_NO_FRAME;
   SERUM_API_GUARD_END("Serum_Colorize", IDENTIFY_NO_FRAME)
-}
-
-uint32_t Serum_ApplyRotationsv1(void) {
-  uint32_t isrotation = 0;
-  uint32_t now = GetMonotonicTimeMs();
-  for (int ti = 0; ti < MAX_COLOR_ROTATIONS; ti++) {
-    if (mySerum.rotations[ti * 3] == 255) continue;
-    uint32_t elapsed = now - colorshiftinittime[ti];
-    if (elapsed >= (uint32_t)(mySerum.rotations[ti * 3 + 2] * 10)) {
-      colorshifts[ti]++;
-      colorshifts[ti] %= mySerum.rotations[ti * 3 + 1];
-      colorshiftinittime[ti] = now;
-      colorrotnexttime[ti] = now + mySerum.rotations[ti * 3 + 2] * 10;
-      isrotation = FLAG_RETURNED_V1_ROTATED;
-      uint8_t palsave[3 * 64];
-      memcpy(palsave, &mySerum.palette[mySerum.rotations[ti * 3] * 3],
-             (size_t)mySerum.rotations[ti * 3 + 1] * 3);
-      for (int tj = 0; tj < mySerum.rotations[ti * 3 + 1]; tj++) {
-        uint32_t shift = (tj + 1) % mySerum.rotations[ti * 3 + 1];
-        mySerum.palette[(mySerum.rotations[ti * 3] + tj) * 3] =
-            palsave[shift * 3];
-        mySerum.palette[(mySerum.rotations[ti * 3] + tj) * 3 + 1] =
-            palsave[shift * 3 + 1];
-        mySerum.palette[(mySerum.rotations[ti * 3] + tj) * 3 + 2] =
-            palsave[shift * 3 + 2];
-      }
-    }
-  }
-  mySerum.rotationtimer = (uint16_t)Calc_Next_Rotationv1(
-      now);  // can't be more than 65s, so val is contained in the lower word
-             // of val
-  return ((uint32_t)mySerum.rotationtimer |
-          isrotation);  // if there was a rotation, returns the next time in ms
-                        // to the next one and set high dword to 1
-                        // if not, just the delay to the next rotation
 }
 
 // One more run of the running scene: a repeat count of 1 loops, a higher one
@@ -9461,8 +8193,6 @@ SERUM_API uint32_t Serum_Rotate(void) {
   SERUM_API_GUARD_START("Serum_Rotate")
   if (g_serumData.SerumVersion == SERUM_V2) {
     return Serum_ApplyRotationsv2();
-  } else {
-    return Serum_ApplyRotationsv1();
   }
   return 0;
   SERUM_API_GUARD_END("Serum_Rotate", 0)

@@ -25,22 +25,21 @@ All runtime output is returned through `Serum_Frame_Struc`, defined in
 
 ## Serum Formats
 
-`libserum` supports two Serum content generations:
+`libserum` plays `Serum v2` colorizations:
 
-- `Serum v1`
-  - classic palette-based colorization output
-- `Serum v2`
-  - direct color frame output for 32-pixel and 64-pixel height DMD planes
-  - optional rotation scenes
+- direct color frame output for 32-pixel and 64-pixel height DMD planes
+- optional rotation scenes
 
-This fork also supports the concentrated archive format:
+`Serum v1` (classic palette-based colorization output) is no longer supported
+since 3.0.
+
+Colorizations come in the concentrated archive format:
 
 - `*.cROMc`
-  - preprocessed runtime archive generated from `cROM` / `cRZ` source data
-  - supports both `Serum v1` and `Serum v2` content
+  - preprocessed runtime archive, exported by the colorization's editor
   - stores additional derived runtime-ready data so startup is faster and RAM
     use is lower than rebuilding everything from raw source data every time
-  - Memory paeks can happen when loading the colorization
+  - Memory peaks can happen when loading the colorization
 
 ## Main Differences To Original libserum (`v2.3.1`)
 
@@ -49,7 +48,8 @@ maintains:
 
 - `cROMc` support
   - concentrated runtime archive format
-  - automatic generation from raw `cROM` / `cRZ` source files
+  - written by the colorization's editor; raw `cROM` / `cRZ` files are not
+    loaded since 3.0
   - much better startup behavior on repeated loads
 - better cross-platform support
   - Windows, macOS, Linux, iOS, tvOS, Android
@@ -65,53 +65,37 @@ maintains:
 The important architectural difference is:
 
 - original `libserum v2.3.1` primarily worked with raw Serum source files
-- this fork keeps raw source support, but treats `cROMc` as the preferred
-  runtime format
+- since 3.0 this fork loads `cROMc` files only; colorization authors export
+  them from their editor
 
 ## Loading Model
 
-On desktop/authoring-style usage, `libserum` typically:
+`Serum_Load(altcolorpath, romname, flags)` loads
+`<altcolorpath>/<romname>/<romname>.cROMc`, the file the colorization's author
+exports. A raw `*.cROM` or `*.cRZ` of an earlier version is not loaded; the log
+says so, and the author provides a `*.cROMc` instead. Serum v1 colorizations
+(64 colors per frame) are not supported.
 
-1. looks for `*.cROMc`
-2. if not present or skipped, loads raw `*.cROM` / `*.cRZ`
-3. for `Serum v2`, optionally applies `*.pup.csv` (only relevant for colorization authors)
-4. can write an updated `*.cROMc`
+On desktop/authoring-style usage, a `*.pup.csv` or `scaling.txt` beside the
+`*.cROMc` updates it (only relevant for colorization authors), and the updated
+`*.cROMc` is written again unless `Serum_SetGenerateCRomC(false)` was called.
 
 On real-machine targets:
 
 - only `*.cROMc` is supported
-- `*.pup.csv` and `skip-cromc.txt` are ignored
+- `*.pup.csv` is ignored
 
-## Loading From Memory
+## Loading From An Authoring Tool
 
-`Serum_LoadFromMemory(crom, size, flags)` loads the bytes of a `cROM` file from
-a buffer the caller owns. It behaves as `Serum_Load(...)` does for that file
-with cROMc generation off, takes the same flags, and reads or writes no file:
-no `cROMc`, no `*.pup.csv`, no `scaling.txt`. It returns `NULL` on failure, with
-the reason in `Serum_GetLastErrorMessage()`. Release with `Serum_Dispose()`.
+An editor hands its colorization over without writing a file:
 
-`Serum_LoadFromCallback(read, userData, size, csvPath, flags)` loads a `cROM`
-of `size` bytes that a callback delivers in order, so that the caller never
-holds the whole file: an editor can serialize its project straight into the
-load.
+- `Serum_LoadFromSource(source, csvPath, flags)` builds the colorization from
+  the blocks the tool delivers through `source->fill()` and loads it.
+- `Serum_ConcentrateFromSource(source, cromcPath)` writes the `*.cROMc` of such
+  a colorization, the file `Serum_Load(...)` loads.
 
-## cRZ Archives
-
-A `cRZ` is a zip archive holding one `cROM`. Besides loading one through
-`Serum_Load(...)`, a host — an editor, a converter — can read and create them
-directly, without a loaded colorization:
-
-- `Serum_CRZ_Read(crzPath, &data, &size)` returns the cROM bytes; release them
-  with `Serum_CRZ_Free(data)`.
-- `Serum_CRZ_GetEntryName(crzPath, name, nameSize)` returns the name of that
-  entry.
-- `Serum_CRZ_WriteFromFile(crzPath, entryName, cromPath)` creates the archive
-  from a cROM on disk, streaming it, so the file size does not have to fit in
-  memory. The entry is deflated; zip64 is used only for a cROM of 4 GiB or
-  more. By convention the entry is called `<romname>.cRom`.
-
-All return `false` on failure, with the reason in
-`Serum_GetLastErrorMessage()`. Paths are UTF-8 on Windows.
+Both return `NULL`/`false` on failure, with the reason in
+`Serum_GetLastErrorMessage()`.
 
 ## Monochrome Triggers
 
@@ -119,9 +103,8 @@ All return `false` on failure, with the reason in
 
 - `65432` (`MONOCHROME_TRIGGER_ID`)
   - enables monochrome fallback mode
-  - in `v2`, incoming ROM shades are rendered with fixed `greyscale_4` /
+  - incoming ROM shades are rendered with fixed `greyscale_4` /
     `greyscale_16`
-  - in `v1`, the configured standard monochrome palette is used
 
 - `65431` (`MONOCHROME_PALETTE_TRIGGER_ID`)
   - enables palette-based monochrome fallback mode (`v2` only)

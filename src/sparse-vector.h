@@ -20,9 +20,8 @@
 bool is_real_machine();
 
 // Whether set() packs with LZ4's fast mode instead of LZ4 HC. For a
-// colorization loaded to be played only (Serum_LoadFromMemory() and the other
-// authoring loads): no cROMc is written from it, and the values read back are
-// the same.
+// colorization loaded to be played only (Serum_LoadFromSource()): no cROMc is
+// written from it, and the values read back are the same.
 inline bool &SparseVectorFastPacking() {
   static bool fast = false;
   return fast;

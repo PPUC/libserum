@@ -9,19 +9,18 @@ twice and the link fails.
 
 The tests build their frames in memory — a handful of pixels chosen to make one
 rule observable. There are no dumps and no colorization files in the repository.
-The one test that can use a real file takes its path from the environment:
-
-    SERUM_TEST_CRZ=/path/to/rom.cRZ ./build/serum_unit_tests crz/
 
 Frame buffers come from `AllocateFrameWorkBuffers()`, the same function both
 load paths call, so a buffer added there is present here too.
 
 The `n256/` tests are the exception to building `g_serumData` by hand. They
-serialize a small cROM exactly as the editor writes one (`n256::Synth`), put it
-in a temporary directory and go through `Serum_Load()` and `Serum_Colorize()`,
-once from the cROM and once from the cROMc generated from it. That covers the
-stream loader, the concentrate round trip, identification and the sprite
-sidecars without a fixture file. The ROM frame handed to `Serum_Colorize()` is a
+serialize a small cROM exactly as the editor writes one (`n256::Synth`) and
+hand it to libserum through `source::CromSource`, a `Serum_Colorization_Source`
+over those bytes: once through `Serum_LoadFromSource()`, and once through
+`Serum_Load()` on the cROMc `Serum_ConcentrateFromSource()` writes to a
+temporary directory, before `Serum_Colorize()`. That covers the block loader,
+the concentrate round trip, identification and the sprite sidecars without a
+fixture file. The ROM frame handed to `Serum_Colorize()` is a
 heap buffer of exactly one frame, so a read past it is something the sanitizer
 build names.
 
@@ -95,23 +94,20 @@ and a packing bug corrupts every colorization at once.
 | `separator/envelope_follows_the_font` | how tall a separator may be follows the height of the text it belongs to; the width bound is still fixed, and the test says so |
 | `colorize/unchanged_picture_keeps_extra_plane` | an unchanged `128x32` picture keeps the `256x64` plane already derived from it, and a changed one derives again; the state does not outlive the colorization |
 | `colorize/hd_sprite_art_blocks_reuse` | HD sprite artwork lands in the plane after the composite, so the plane can no longer be kept |
-| `colorize/monochrome_frame_blocks_reuse` | a monochrome frame written into an authored `64`-row plane ends the kept plane, so the colorized picture that follows it -- the same `128x32` picture as before the monochrome frame -- is derived again instead of standing beside a grey plane; from a cROM and from its cROMc, for `64P` and `32P \| 64P` |
+| `colorize/monochrome_frame_blocks_reuse` | a monochrome frame written into an authored `64`-row plane ends the kept plane, so the colorized picture that follows it -- the same `128x32` picture as before the monochrome frame -- is derived again instead of standing beside a grey plane; from the source and from its cROMc, for `64P` and `32P \| 64P` |
 | `colorize/hd_static_frame_is_not_reused` | frames that composite HD statics each draw their own artwork, whichever frame the plane was last derived from |
 | `colorize/finished_frame_already_on_display` | a finished frame that matches the picture the caller already has is not announced again — unless it rotates differently, or a scene or trigger makes it news whatever it looks like |
 | `colorize/static_content` | a frame's own colours come through untouched, whatever the ROM shade was |
 | `colorize/background_mask` | the background image shows where its mask is set and the ROM lit nothing, and only there |
 | `colorize/dynamic_zone_colours` | inside a dynamic zone the colour comes from that zone's set, indexed by the ROM shade |
 | `colorize/dynamic_zone_active_mask` | a zone only applies where its active mask says so; elsewhere the static colour stands |
-| `crz/write_then_read_round_trips` | a cRZ written from a cROM file reads back byte for byte under the entry name it was given, through the public call and through the loader's own extraction |
-| `crz/plain_deflated_zip` | a small cROM yields a plain deflated zip: no zip64, no data descriptor, no UTF-8 flag on an ASCII name — what older readers expect |
-| `crz/failures_are_clean` | a failed read hands back nothing to free and says why; a failed write neither destroys an archive already there nor leaves half of one |
-| `crz/real_archive` | checks nothing unless `SERUM_TEST_CRZ` names a real cRZ, which must then read and survive being written again |
-| `memory/matches_file_load` | `Serum_LoadFromMemory()` gives the same loaded state and the same output as `Serum_Load()` of the same bytes as a `.cROM` file, for a `128x32` and an `is256x64` project and seven request flag combinations |
-| `memory/callback` | `Serum_LoadFromCallback()` gives the state and output of a memory load however the callback cuts the bytes, asks for no byte past the cROM, and fails cleanly on data that ends early |
 | `scenes/stored_data_keeps_timers` | scenes set from stored data (a cROMc load) keep the auto-start scene and the end-hold durations their pup.csv gives |
-| `crom/settings_block` | a cROM settings block gives scenes and scaling that a pup.csv and scaling.txt beside it do not change, in the cROM, its cROMc, that cROMc alone and a memory load; an empty block leaves the sidecars in charge; a cut block fails |
-| `memory/writes_no_file` | a memory load writes nothing, with cROMc generation on |
-| `memory/failures_are_clean` | `NULL`, empty, truncated at any block, impossible element counts, a refused geometry and bytes that are no cROM all return `NULL` with an error message and nothing loaded; a valid load afterwards works |
+| `crom/settings_block` | a cROM settings block gives scenes and scaling that a pup.csv and scaling.txt beside it do not change, from the source, in its cROMc and in that cROMc loaded again; an empty block leaves the pup.csv in charge, and beside a cROMc the scaling.txt as well; a cut block fails |
+| `source/with_scenes` | `Serum_LoadFromSource()` with a pup.csv gives the state and output of `Serum_Load()` with that pup.csv beside the cROMc; without one there are no scenes |
+| `source/builds_the_croms_colorization` | the cROMc `Serum_ConcentrateFromSource()` writes loads through `Serum_Load()` with the state and output of `Serum_LoadFromSource()`, for `128x32` and `is256x64`, 8- and 16-bit sprite IDs and a settings block; no path, no source or no `fill()` is refused |
+| `source/writes_no_file` | a load from a source writes nothing, with cROMc generation on |
+| `source/failures_are_clean` | no source, a refused geometry, no frames, no colours and an impossible sprite slot count return `NULL` with an error message and nothing loaded, also releasing what was loaded before; a valid load afterwards works |
+| `load/refuses_raw_files` | `Serum_Load()` on a directory with only `<rom>.cROM`, or only `<rom>.cRZ`, returns `NULL`, writes no cROMc and logs a line naming that file |
 | `sidecar/spellings` | every spelling `scaling.txt` advertises, bare and under `scaling:`/`algorithm:` |
 | `sidecar/shadow_offset` | `native`/`proportional`/`1`/`2`, and both keys in one file |
 | `sidecar/tolerance` | comments, blank lines, padding, case; an unknown key or value leaves the stored choice alone rather than replacing it with a default |
@@ -148,8 +144,8 @@ rule each test pins.
 | `n256/sprite_drawing` | a sprite is drawn 1:1 where it was found, from the extra arrays, dynamic pixel included |
 | `n256/rotation` | the plane rotates with the extra table and nothing is reported for a `32p` plane |
 | `n256/request_both` | `32P \| 64P`: the `256x64` plane, no `32p` buffer, flag or width; the frame's trigger is reported |
-| `n256/request_32p_only` | `32P` alone: the colorization loads from cROM, generated cROMc and a direct cROMc load; frames are identified and a trigger is reported, but there is no buffer and no plane, for a known frame and an unknown one, and plane-less frames after the first read as already on display |
-| `n256/request_fallback` | `32P \| FALLBACK` gets the `256x64` plane, also from a direct cROMc load and from a forced cROM load, where nothing widens the request; with `64P` the flag changes nothing |
+| `n256/request_32p_only` | `32P` alone: the colorization loads from the source, from its cROMc and from that cROMc loaded again; frames are identified and a trigger is reported, but there is no buffer and no plane, for a known frame and an unknown one, and plane-less frames after the first read as already on display |
+| `n256/request_fallback` | `32P \| FALLBACK` gets the `256x64` plane, also from a cROMc loaded again and from a forced load from the source, where nothing widens the request; with `64P` the flag changes nothing |
 | `n256/unknown_frame_fallback` | the grey fallback is the ROM frame pixel for pixel on the `256x64` plane only, for every request that has a plane |
 | `n256/monochrome_palette` | the monochrome palette trigger takes the extra plane's colour set, and none when the frame has no extra content |
 | `n256/without_extra_data` | a frame, a background or a sprite without extra data leaves its frame with no plane for that call, with or without `FALLBACK`: identified, trigger reported, `frame64` untouched, and the next complete frame renders |
@@ -186,7 +182,7 @@ extra plane from there; `AGENTS.md` ("Sprites in layer mode") has the rules.
 | `sprite/drawn_for_64p_only_request` | a `64P`-only request shows the sprite at twice its position and size, dynamic pixel included, with and without HD art, in both algorithms — the same plane a `32P \| 64P` request gets — and still reports only the `64`-row plane |
 | `sprite/frame_shadow_inside_sprite_region` | a frame's dynamic shadow under a transparent sprite pixel survives the sprite's composite for a `64P`-only request as it does for `32P \| 64P` |
 | `sprite/scaled_sprite_blocks_reuse` | a sprite without HD art ends the kept extra plane, so it does not stay behind when the next frame has the same `128x32` picture without it |
-| `sprite/layer_mode_end_to_end` | the same through `Serum_Load()` and `Serum_Colorize()`, from a cROM and from its cROMc: a sprite found at one place, then another, then gone, then back, on one frame ID, for `64P` and `32P \| 64P` |
+| `sprite/layer_mode_end_to_end` | the same through `Serum_Load()` and `Serum_Colorize()`, from the source and from its cROMc: a sprite found at one place, then another, then gone, then back, on one frame ID, for `64P` and `32P \| 64P` |
 
 Each of the three rules was taken out by itself on a copy of the tree: asking
 the advertised flag again fails the first, third and fourth test, replaying
@@ -198,14 +194,14 @@ derived after a sprite fails the third and fourth.
 In rough order of what is worth doing next:
 
 - **`Identify_Frame()`** on a hand-built `g_serumData` — which colorization
-  frame a ROM frame is. The `n256/` tests reach it through `Serum_Load()`
+  frame a ROM frame is. The `n256/` tests reach it through the public loads
   instead, and an ordinary `128x32` project could be covered the same way.
   The in-memory attempt was
   backed out: the fixture needs more than the render does. Two things are
   already solved for whoever picks it up. `hashcodes` is index-based, so
   `set()` refuses it, but `readFromCRomReader()` takes any object with a
   `readExact()`, so an in-memory reader fills it the way the loader does. And
-  `framechecked` is allocated by each of the three load paths rather than by
+  `framechecked` is allocated by each load path rather than by
   `AllocateFrameWorkBuffers()`, because it is sized by the frame count rather
   than by the frame — a fixture has to allocate it itself. With both of those
   the search still answers `IDENTIFY_SAME_FRAME` for distinct frames and

@@ -18,7 +18,12 @@
 SERUM_API void Serum_SetLogCallback(Serum_LogCallback callback,
                                     const void* userData);
 
-/** @brief Load a Serum file.
+/** @brief Load a Serum colorization
+ *
+ * Loads <altcolorpath>/<romname>/<romname>.cROMc, the file the colorization's
+ * author exports. A .cROM or .cRZ is not loaded; the log names one that is
+ * there. A <romname>.pup.csv or scaling.txt beside it updates the cROMc, which
+ * is then written again unless Serum_SetGenerateCRomC(false) was called.
  *
  *  @param altcolorpath: path to the altcolor directory (e.g. "C:\\visual
  * pinball\\vpinmame\\altcolor\\")
@@ -36,77 +41,21 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
                                         const char* const romname,
                                         uint8_t flags);
 
-/** @brief Load a Serum colorization from a cROM held in memory
+/** @brief Load a colorization an authoring tool hands over
  *
- * Takes the bytes of a .cROM file and loads them as Serum_Load() loads that
- * file when cROMc generation is off: same flags, same result.
+ * libserum asks for every element of every block through source->fill(), in
+ * the order of the blocks, and builds the colorization. No file is read or
+ * written apart from the pup.csv: no cROMc, no scaling.txt. A colorization
+ * loaded before is released first, also when the call fails.
  *
- * No file is read or written: no cROMc, no .pup.csv, no scaling.txt, no
- * skip-cromc.txt. The upscaling algorithm and shadow offset are the defaults.
- * A cROMc or a cRZ is not accepted.
- *
- * The buffer is only read during the call and stays owned by the caller.
- * A colorization loaded before is released first, also when the call fails.
- *
- * @param crom: the cROM bytes
- * @param size: number of bytes
+ * @param source: the header values, fill() and the settings payload
+ * @param csvPath: for a colorization without scenes in its settings, the
+ * pup.csv to read the scenes from, parsed before the lookups are built as
+ * Serum_Load() does for a pup.csv beside a cROMc; NULL for none
  * @param flags: as for Serum_Load()
  *
  * @return As Serum_Load(). NULL if the data cannot be loaded; nothing is
  * loaded then and Serum_GetLastErrorMessage() says why.
- */
-SERUM_API Serum_Frame_Struc* Serum_LoadFromMemory(const uint8_t* crom,
-                                                  size_t size, uint8_t flags);
-
-/** @brief Load a raw cROM from memory, with the scenes of a pup.csv
- *
- * As Serum_LoadFromMemory(), and for a v2 colorization the scenes of the
- * pup.csv at csvPath are parsed before the lookups are built, in the order
- * Serum_Load() uses for a pup.csv beside a cROM. An editor that holds its
- * project in memory gets the scenes the runtime would have. A NULL or empty
- * csvPath, or one that cannot be parsed, loads without scenes, as
- * Serum_LoadFromMemory() does.
- *
- * @param crom: the cROM bytes
- * @param size: number of bytes
- * @param csvPath: the pup.csv to read the scenes from, or NULL
- * @param flags: as for Serum_Load()
- *
- * @return As Serum_LoadFromMemory().
- */
-SERUM_API Serum_Frame_Struc* Serum_LoadFromMemoryWithScenes(
-    const uint8_t* crom, size_t size, const char* const csvPath, uint8_t flags);
-
-/** @brief Load a raw cROM that a callback delivers
- *
- * As Serum_LoadFromMemoryWithScenes() for the `size` bytes of a cROM that
- * read() delivers in order, so that the caller never holds the whole cROM: an
- * editor can write it into the load as it serializes its project. libserum
- * asks for a few MB at most at a time and never for more than `size` bytes in
- * all. A read() that returns 0 before all bytes came fails the load as a
- * truncated cROM does.
- *
- * @param read: delivers the bytes, on the calling thread
- * @param userData: passed to read()
- * @param size: number of bytes of the cROM
- * @param csvPath: the pup.csv to read the scenes from, or NULL
- * @param flags: as for Serum_Load()
- *
- * @return As Serum_LoadFromMemory().
- */
-/** @brief Load a colorization an authoring tool hands over
- *
- * As Serum_LoadFromMemoryWithScenes(), for a colorization that comes from the
- * tool's own data instead of a cROM: libserum asks for every element of every
- * block through source->fill(), in cROM order, and builds the same
- * colorization a cROM of that data loads. Serum_SaveConcentrate() then writes
- * its cROMc.
- *
- * @param source: the header values, fill() and the settings payload
- * @param csvPath: the pup.csv to read the scenes from, or NULL
- * @param flags: as for Serum_Load()
- *
- * @return As Serum_LoadFromMemory().
  */
 SERUM_API Serum_Frame_Struc* Serum_LoadFromSource(
     const Serum_Colorization_Source* source, const char* const csvPath,
@@ -115,19 +64,14 @@ SERUM_API Serum_Frame_Struc* Serum_LoadFromSource(
 /** @brief Write the cROMc of a colorization an authoring tool hands over
  *
  * Builds the colorization from the source as Serum_LoadFromSource() does, but
- * with the packing of Serum_Load(), and writes its cROMc to cromcPath: the
- * cROMc Serum_Load() writes for a cROM of the same data. Nothing stays loaded.
+ * with the smaller packing, and writes its cROMc to cromcPath, the file
+ * Serum_Load() loads. Nothing stays loaded.
  * Scenes and scaling settings come from the source's settings payload only.
  *
  * @return false with Serum_GetLastErrorMessage() when it fails.
  */
 SERUM_API bool Serum_ConcentrateFromSource(
     const Serum_Colorization_Source* source, const char* const cromcPath);
-
-SERUM_API Serum_Frame_Struc* Serum_LoadFromCallback(Serum_ReadCallback read,
-                                                    void* userData, size_t size,
-                                                    const char* const csvPath,
-                                                    uint8_t flags);
 
 /** @brief Set timeout for skipping unknown frames
  *
@@ -152,9 +96,10 @@ SERUM_API void Serum_SetMaximumUnknownFramesToSkip(uint8_t maximum);
 SERUM_API void Serum_SetStandardPalette(const uint8_t* palette,
                                         const int bitDepth);
 
-/** @brief Enable or disable automatic cROMc generation
+/** @brief Enable or disable writing a cROMc a load updated
  *
- * @param generate: true to generate/save cROMc data, false to disable
+ * @param generate: false keeps Serum_Load() from writing a cROMc again that a
+ * pup.csv or scaling.txt beside it changed; true (the default) writes it
  */
 SERUM_API void Serum_SetGenerateCRomC(bool generate);
 
@@ -262,72 +207,14 @@ SERUM_API const char* Serum_GetMinorVersion(void);
 /** @brief Get the last fatal runtime error message
  *
  * Returns the most recent top-level exception/fatal error captured by the DLL,
- * or the reason the last Serum_CRZ_* or Serum_LoadFromMemory() call failed.
+ * or the reason the last Serum_LoadFromSource() or
+ * Serum_ConcentrateFromSource() call failed.
  * The returned pointer is owned by libserum and remains valid until the next
  * API call that updates the stored error state.
  *
  * @return Empty string if no fatal error has been recorded
  */
 SERUM_API const char* Serum_GetLastErrorMessage(void);
-
-/** @brief Read the cROM stored in a cRZ archive
- *
- * A cRZ is a zip archive holding one cROM. The first regular entry is taken,
- * whatever it is called: entry names are not interpreted and nothing is
- * written to disk. This is the same extraction Serum_Load() uses.
- *
- * Works on the file only. It neither needs nor changes a loaded colorization
- * and may be called from any thread.
- *
- * @param crzPath: path of the archive, UTF-8 on Windows
- * @param data: receives the cROM bytes; release them with Serum_CRZ_Free()
- * @param size: receives the number of bytes
- * @return true on success. On failure *data is NULL, *size is 0 and
- * Serum_GetLastErrorMessage() says why.
- */
-SERUM_API bool Serum_CRZ_Read(const char* crzPath, uint8_t** data,
-                              size_t* size);
-
-/** @brief Release a buffer returned by Serum_CRZ_Read()
- *
- * @param data: the buffer; NULL is accepted
- */
-SERUM_API void Serum_CRZ_Free(uint8_t* data);
-
-/** @brief Get the name of the entry Serum_CRZ_Read() would return
- *
- * The name is data from the archive. Do not build a path from it.
- *
- * @param crzPath: path of the archive, UTF-8 on Windows
- * @param name: receives the zero-terminated entry name
- * @param nameSize: size of the name buffer in bytes
- * @return true on success, false if there is no such entry or the buffer is
- * too small; Serum_GetLastErrorMessage() says why
- */
-SERUM_API bool Serum_CRZ_GetEntryName(const char* crzPath, char* name,
-                                      size_t nameSize);
-
-/** @brief Create a cRZ archive from a cROM file
- *
- * Writes a zip archive with one deflated entry. The cROM is streamed from
- * disk, so its size does not have to fit in memory. zip64 is used only for a
- * cROM of 4 GiB or more. The entry gets the cROM file's modification time.
- *
- * An existing file at crzPath is replaced. If writing fails after the archive
- * was created, the incomplete archive is removed.
- *
- * Works on the files only. It neither needs nor changes a loaded colorization
- * and may be called from any thread.
- *
- * @param crzPath: path of the archive to create, UTF-8 on Windows
- * @param entryName: name of the entry, by convention "<romname>.cRom". It has
- * to be a plain file name: '/', '\\' and ':' are refused, as are "." and ".."
- * @param cromPath: path of the cROM file to store, UTF-8 on Windows
- * @return true on success, otherwise Serum_GetLastErrorMessage() says why
- */
-SERUM_API bool Serum_CRZ_WriteFromFile(const char* crzPath,
-                                       const char* entryName,
-                                       const char* cromPath);
 
 /** @brief Parse a scene description file in CSV format
  *
