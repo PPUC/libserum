@@ -21,9 +21,9 @@ SERUM_API void Serum_SetLogCallback(Serum_LogCallback callback,
 /** @brief Load a Serum colorization
  *
  * Loads <altcolorpath>/<romname>/<romname>.cROMc, the file the colorization's
- * author exports. A .cROM or .cRZ is not loaded; the log names one that is
- * there. A <romname>.pup.csv or scaling.txt beside it updates the cROMc, which
- * is then written again unless Serum_SetGenerateCRomC(false) was called.
+ * author exports, with the scenes and scaling settings it carries. A .cROM or
+ * .cRZ is not loaded; the log names one that is there. No pup.csv or
+ * scaling.txt beside it is read, and nothing is written.
  *
  *  @param altcolorpath: path to the altcolor directory (e.g. "C:\\visual
  * pinball\\vpinmame\\altcolor\\")
@@ -96,17 +96,10 @@ SERUM_API void Serum_SetMaximumUnknownFramesToSkip(uint8_t maximum);
 SERUM_API void Serum_SetStandardPalette(const uint8_t* palette,
                                         const int bitDepth);
 
-/** @brief Enable or disable writing a cROMc a load updated
- *
- * @param generate: false keeps Serum_Load() from writing a cROMc again that a
- * pup.csv or scaling.txt beside it changed; true (the default) writes it
- */
-SERUM_API void Serum_SetGenerateCRomC(bool generate);
-
 /** @brief Get the upscaling algorithm selected for the loaded colorization
  *
- * Valid after a successful Serum_Load(). The value comes from the cROMc header
- * and may be overridden at authoring time by altcolor/<romname>/scaling.txt.
+ * Valid after a successful Serum_Load(). The value comes from the cROMc header,
+ * as the colorization's editor set it.
  *
  * Callers that scale libserum's output frame further (for example to fit a
  * physical DMD) should use this so their scaling matches the scaling libserum

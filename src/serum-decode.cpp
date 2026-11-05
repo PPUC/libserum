@@ -609,8 +609,7 @@ static std::unordered_map<uint32_t, SceneResumeState> g_sceneResumeState;
 static constexpr uint32_t SCENE_RESUME_WINDOW_MS = 8000;
 
 // variables
-bool cromloaded = false;  // is there a crom loaded?
-bool generateCRomC = true;
+bool cromloaded = false;        // is there a crom loaded?
 uint32_t lastfound = 0;         // last frame ID identified (current stream)
 uint32_t lastfound_normal = 0;  // last frame ID for non-scene frames
 uint32_t lastfound_scene = 0;   // last frame ID for scene frames
@@ -1789,122 +1788,6 @@ static std::optional<std::string> find_case_insensitive_file(
 
   Log("File %s not found in directory %s", filename.c_str(), dir_path.c_str());
   return std::nullopt;
-}
-
-// Read the optional altcolor/<romname>/scaling.txt authoring sidecar.
-//
-// Each non-empty, non-comment line is either a bare algorithm name or a
-// "key: value" setting. `#` starts a comment. Recognised:
-//
-//   scale2x | line-doubling         upscaling algorithm
-//   shadow-offset: native           dynamic shadows offset by 1 extra-plane px
-//   shadow-offset: proportional     ...by 2, keeping SD-relative thickness
-//
-// Numeric algorithm values are deliberately not accepted: a bare "0" or "1" in
-// an author's file would name a value rather than an algorithm, and the values
-// belong to libframeutil's numbering rather than to this file.
-//
-// Anything left unset keeps the value stored in the cROMc header.
-struct ScalingSidecar {
-  std::optional<uint8_t> algorithm;
-  std::optional<uint8_t> shadowOffsetMode;
-  bool any() const {
-    return algorithm.has_value() || shadowOffsetMode.has_value();
-  }
-};
-
-// scaling.txt offers two algorithms: line-doubling and scale2x.
-static bool ParseScalingAlgorithm(const std::string& value,
-                                  std::optional<uint8_t>& out) {
-  if (value == "line-doubling" || value == "linedoubling" ||
-      value == "linedouble") {
-    out = (uint8_t)SERUM_SCALING_LINE_DOUBLING;
-    return true;
-  }
-  if (value == "scale2x") {
-    out = (uint8_t)SERUM_SCALING_SCALE2X;
-    return true;
-  }
-  return false;
-}
-
-// A colorization that carries its scenes or scaling settings is not changed by
-// the sidecars.
-static void LogIgnoredSidecars(const std::optional<std::string>& csvFile,
-                               const ScalingSidecar& scaling) {
-  if (csvFile && g_serumData.scenesFromColorization)
-    Log("Scenes from the colorization, %s not read", csvFile->c_str());
-  if (scaling.any() && g_serumData.scalingFromColorization)
-    Log("Scaling settings from the colorization, scaling.txt not applied");
-}
-
-static ScalingSidecar read_scaling_sidecar(const std::string& dirPath) {
-  ScalingSidecar result;
-  std::optional<std::string> foundFile =
-      find_case_insensitive_file(dirPath, "scaling.txt");
-  if (!foundFile) return result;
-
-  std::ifstream file(*foundFile);
-  if (!file.is_open()) {
-    Log("Failed to open %s", foundFile->c_str());
-    return result;
-  }
-
-  auto trim = [](const std::string& in) -> std::string {
-    const size_t a = in.find_first_not_of(" \t\r\n");
-    if (a == std::string::npos) return std::string();
-    const size_t b = in.find_last_not_of(" \t\r\n");
-    return in.substr(a, b - a + 1);
-  };
-
-  std::string line;
-  while (std::getline(file, line)) {
-    const size_t comment = line.find('#');
-    if (comment != std::string::npos) line.erase(comment);
-    const std::string trimmed = trim(line);
-    if (trimmed.empty()) continue;
-
-    const size_t colon = trimmed.find(':');
-    if (colon == std::string::npos) {
-      const std::string value = to_lower(trimmed);
-      if (!ParseScalingAlgorithm(value, result.algorithm))
-        Log("Ignoring unknown scaling algorithm '%s' in %s", value.c_str(),
-            foundFile->c_str());
-      continue;
-    }
-
-    const std::string key = to_lower(trim(trimmed.substr(0, colon)));
-    const std::string value = to_lower(trim(trimmed.substr(colon + 1)));
-    if (key == "shadow-offset" || key == "shadowoffset") {
-      if (value == "native" || value == "1") {
-        result.shadowOffsetMode = (uint8_t)SERUM_SHADOW_OFFSET_NATIVE;
-      } else if (value == "proportional" || value == "2") {
-        result.shadowOffsetMode = (uint8_t)SERUM_SHADOW_OFFSET_PROPORTIONAL;
-      } else {
-        Log("Ignoring unknown shadow-offset '%s' in %s", value.c_str(),
-            foundFile->c_str());
-      }
-    } else if (key == "scaling" || key == "algorithm") {
-      if (!ParseScalingAlgorithm(value, result.algorithm))
-        Log("Ignoring unknown scaling algorithm '%s' in %s", value.c_str(),
-            foundFile->c_str());
-    } else {
-      Log("Ignoring unknown setting '%s' in %s", key.c_str(),
-          foundFile->c_str());
-    }
-  }
-
-  if (result.algorithm) {
-    Log("scaling.txt: algorithm = %s",
-        ScalingAlgorithmNameOf(*result.algorithm));
-  }
-  if (result.shadowOffsetMode) {
-    Log("scaling.txt: shadow-offset = %s",
-        *result.shadowOffsetMode == SERUM_SHADOW_OFFSET_NATIVE
-            ? "native"
-            : "proportional");
-  }
-  return result;
 }
 
 void Free_element(void** ppElement) {
@@ -3688,25 +3571,10 @@ uint32_t min(uint32_t v1, uint32_t v2) {
 
 long serum_file_length;
 
-static std::string BuildConcentratePathFromSourcePath(const char* filename) {
-  std::string concentratePath;
-  if (const char* dot = strrchr(filename, '.')) {
-    concentratePath = std::string(filename, dot);
-  } else {
-    concentratePath = filename;
-  }
-  concentratePath += ".cROMc";
-  return concentratePath;
-}
-
 static bool SaveConcentrateTo(const std::string& concentratePath);
 static void EncodeSceneFrameDifferences(void);
 
-bool Serum_SaveConcentrate(const char* filename) {
-  return SaveConcentrateTo(BuildConcentratePathFromSourcePath(filename));
-}
-
-// Serum_SaveConcentrate() to the path itself.
+// Writes the cROMc of the loaded colorization (Serum_ConcentrateFromSource()).
 static bool SaveConcentrateTo(const std::string& concentratePath) {
   if (!cromloaded || is_real_machine()) return false;
   // A save always produces the current concentrate format, no matter which
@@ -4342,33 +4210,15 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   pathbuf += '/';
 
   Log("Searching colorization file for %s in %s", romname, pathbuf.c_str());
-  double csvUpdateMs = 0.0;
   double cromcLoadMs = 0.0;
-  double cromcReloadMs = 0.0;
 
   RequestBothPlanesByDefault(forceLoadFlags, loadFlags, runtimeFlags);
 
-  std::optional<std::string> csvFoundFile;
-  ScalingSidecar requestedScaling;
-  if (!realMachine) {
-    csvFoundFile =
-        find_case_insensitive_file(pathbuf, std::string(romname) + ".pup.csv");
-    // Authoring-time override of the algorithm stored in the cROMc header. On
-    // a real machine only the cROMc header value is used.
-    requestedScaling = read_scaling_sidecar(pathbuf);
-  }
+  // The cROMc carries the scenes and scaling settings the author's editor
+  // gave it; no pup.csv or scaling.txt beside it is read.
   NoteStartupRssSample("after-file-scan");
-  if (csvFoundFile) {
-    Log("Found %s", csvFoundFile->c_str());
-    if (!realMachine && !forceLoadFlags) {
-      // request both frame types for updating concentrate
-      loadFlags |= FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES;
-    }
-  }
   Serum_Frame_Struc* result = NULL;
   bool loadedFromConcentrate = false;
-  bool sceneDataUpdatedFromCsv = false;
-  std::optional<std::string> reloadConcentratePath;
   std::optional<std::string> pFoundFile;
   if (!realMachine) {
     pFoundFile =
@@ -4389,51 +4239,6 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
       if (result) {
         NoteStartupRssSample("after-cromc-load");
         LogLoadedColorizationSource(*pFoundFile, true);
-        bool concentrateNeedsRewrite = false;
-        LogIgnoredSidecars(csvFoundFile, requestedScaling);
-        if (csvFoundFile && g_serumData.SerumVersion == SERUM_V2 &&
-            !g_serumData.scenesFromColorization && ([&]() {
-              const auto csvStart =
-                  g_profileLoadTimes ? std::chrono::steady_clock::now()
-                                     : std::chrono::steady_clock::time_point{};
-              const bool parsed =
-                  g_serumData.sceneGenerator->parseCSV(csvFoundFile->c_str());
-              if (g_profileLoadTimes) {
-                csvUpdateMs +=
-                    DurationMs(csvStart, std::chrono::steady_clock::now());
-              }
-              return parsed;
-            })()) {
-          sceneDataUpdatedFromCsv = true;
-          concentrateNeedsRewrite = true;
-          NoteStartupRssSample("after-csv-update");
-        }
-        if (!g_serumData.scalingFromColorization &&
-            requestedScaling.algorithm &&
-            *requestedScaling.algorithm != g_serumData.scalingAlgorithm) {
-          Log("scaling.txt changes the stored scaling algorithm from %u to "
-              "%u",
-              (uint32_t)g_serumData.scalingAlgorithm,
-              (uint32_t)*requestedScaling.algorithm);
-          g_serumData.scalingAlgorithm = *requestedScaling.algorithm;
-          concentrateNeedsRewrite = true;
-        }
-        if (!g_serumData.scalingFromColorization &&
-            requestedScaling.shadowOffsetMode &&
-            *requestedScaling.shadowOffsetMode !=
-                g_serumData.shadowOffsetMode) {
-          Log("scaling.txt changes the stored shadow offset from %u to %u",
-              (uint32_t)g_serumData.shadowOffsetMode,
-              (uint32_t)*requestedScaling.shadowOffsetMode);
-          g_serumData.shadowOffsetMode = *requestedScaling.shadowOffsetMode;
-          concentrateNeedsRewrite = true;
-        }
-        if (concentrateNeedsRewrite && !realMachine) {
-          // Update the concentrate file with the new PUP/scaling data
-          if (generateCRomC && Serum_SaveConcentrate(pFoundFile->c_str())) {
-            reloadConcentratePath = *pFoundFile;
-          }
-        }
       } else {
         Log("Failed to load %s", pFoundFile->c_str());
       }
@@ -4481,33 +4286,11 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
     enabled = false;
     return NULL;
   }
-  if (reloadConcentratePath) {
-    NoteStartupRssSample("before-cromc-reload");
-    Serum_free();
-    const auto reloadStart = g_profileLoadTimes
-                                 ? std::chrono::steady_clock::now()
-                                 : std::chrono::steady_clock::time_point{};
-    result = Serum_LoadConcentrate(reloadConcentratePath->c_str(), loadFlags,
-                                   runtimeFlags);
-    if (g_profileLoadTimes) {
-      cromcReloadMs +=
-          DurationMs(reloadStart, std::chrono::steady_clock::now());
-    }
-    loadedFromConcentrate = (result != NULL);
-    sceneDataUpdatedFromCsv = false;
-    if (result) {
-      NoteStartupRssSample("after-cromc-reload");
-      LogLoadedColorizationSource(*reloadConcentratePath, true);
-    } else {
-      Log("Failed to reload %s after update", reloadConcentratePath->c_str());
-    }
-  }
   if (result && g_serumData.sceneGenerator->isActive())
     g_serumData.sceneGenerator->setDepth(result->nocolors == 16 ? 4 : 2);
   if (result) {
-    FinishColorizationLoad(loadedFromConcentrate, sceneDataUpdatedFromCsv,
-                           loadTotalStart, csvUpdateMs, cromcLoadMs, 0.0,
-                           cromcReloadMs);
+    FinishColorizationLoad(loadedFromConcentrate, false, loadTotalStart, 0.0,
+                           cromcLoadMs, 0.0, 0.0);
     Log("Upscaling algorithm: %s (source=%s, extra plane: %s)",
         ScalingAlgorithmName(),
         g_serumData.concentrateFileVersion >= 8 ? "cROMc header" : "default",
@@ -6741,12 +6524,6 @@ SERUM_API void Serum_SetMaximumUnknownFramesToSkip(uint8_t maximum) {
   SERUM_API_GUARD_START("Serum_SetMaximumUnknownFramesToSkip")
   maxFramesToSkip = maximum;
   SERUM_API_GUARD_END_VOID("Serum_SetMaximumUnknownFramesToSkip")
-}
-
-SERUM_API void Serum_SetGenerateCRomC(bool generate) {
-  SERUM_API_GUARD_START("Serum_SetGenerateCRomC")
-  generateCRomC = generate;
-  SERUM_API_GUARD_END_VOID("Serum_SetGenerateCRomC")
 }
 
 SERUM_API uint8_t Serum_GetScalingAlgorithm(void) {

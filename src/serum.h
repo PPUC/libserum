@@ -369,7 +369,6 @@ typedef void (*Serum_SetIgnoreUnknownFramesTimeoutFunc)(uint16_t milliseconds);
 typedef void (*Serum_SetMaximumUnknownFramesToSkipFunc)(uint8_t maximum);
 typedef void (*Serum_SetStandardPaletteFunc)(const uint8_t* palette,
                                              int bitDepth);
-typedef void (*Serum_SetGenerateCRomCFunc)(bool generate);
 typedef uint8_t (*Serum_GetScalingAlgorithmFunc)(void);
 typedef void (*Serum_DisableColorizationFunc)(void);
 typedef void (*Serum_EnableColorizationFunc)(void);

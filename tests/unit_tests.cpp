@@ -1656,56 +1656,6 @@ static void WriteTestFile(const std::filesystem::path& path,
 // scaling.txt, the per-colorization override
 // ---------------------------------------------------------------------------
 
-// Writes a scaling.txt and hands back the directory holding it.
-static std::string WriteSidecar(const char* body) {
-  const std::filesystem::path dir =
-      std::filesystem::temp_directory_path() / "libserum_tests" / "altcolor";
-  std::filesystem::create_directories(dir);
-  std::ofstream out(dir / "scaling.txt", std::ios::trunc);
-  out << body;
-  out.close();
-  return dir.string();
-}
-
-static void ExpectSidecar(const char* body, int algorithm, int shadowOffset) {
-  const ScalingSidecar got = read_scaling_sidecar(WriteSidecar(body));
-  ++g_checks;
-  if (algorithm < 0) {
-    if (got.algorithm)
-      Fail(__FILE__, __LINE__, "%s: algorithm set to %d, want untouched", body,
-           (int)*got.algorithm);
-  } else if (!got.algorithm || (int)*got.algorithm != algorithm) {
-    Fail(__FILE__, __LINE__, "%s: algorithm %s, want %d", body,
-         got.algorithm ? std::to_string((int)*got.algorithm).c_str() : "unset",
-         algorithm);
-  }
-  ++g_checks;
-  if (shadowOffset < 0) {
-    if (got.shadowOffsetMode)
-      Fail(__FILE__, __LINE__, "%s: shadow-offset set to %d, want untouched",
-           body, (int)*got.shadowOffsetMode);
-  } else if (!got.shadowOffsetMode ||
-             (int)*got.shadowOffsetMode != shadowOffset) {
-    Fail(__FILE__, __LINE__, "%s: shadow-offset %s, want %d", body,
-         got.shadowOffsetMode
-             ? std::to_string((int)*got.shadowOffsetMode).c_str()
-             : "unset",
-         shadowOffset);
-  }
-}
-
-// The file is how an author overrides the stored choice, so every spelling the
-// parser advertises has to keep working, and anything it does not recognize
-// has to leave the stored choice alone rather than fall back to a default.
-static void Test_ScalingSidecarSpellings(void) {
-  ExpectSidecar("scale2x\n", SERUM_SCALING_SCALE2X, -1);
-  ExpectSidecar("line-doubling\n", SERUM_SCALING_LINE_DOUBLING, -1);
-  ExpectSidecar("linedoubling\n", SERUM_SCALING_LINE_DOUBLING, -1);
-  ExpectSidecar("linedouble\n", SERUM_SCALING_LINE_DOUBLING, -1);
-  ExpectSidecar("scaling: scale2x\n", SERUM_SCALING_SCALE2X, -1);
-  ExpectSidecar("algorithm: line-doubling\n", SERUM_SCALING_LINE_DOUBLING, -1);
-}
-
 // The value libserum reports is the one a host passes to libframeutil to scale
 // the same way, so the two have to keep the same numbering -- and libserum's
 // Scale2x is libframeutil's Scale2xPreserve, not its reference Scale2x.
@@ -1727,42 +1677,6 @@ static void Test_AlgorithmMatchesLibframeutil(void) {
   CHECK_EQ((int)RuntimeScalingAlgorithm(),
            (int)FrameUtil::ScalingAlgorithm::Scale2xPreserve);
   TearDownFrame();
-}
-
-static void Test_ScalingSidecarShadowOffset(void) {
-  ExpectSidecar("shadow-offset: native\n", -1, SERUM_SHADOW_OFFSET_NATIVE);
-  ExpectSidecar("shadow-offset: proportional\n", -1,
-                SERUM_SHADOW_OFFSET_PROPORTIONAL);
-  ExpectSidecar("shadowoffset: 1\n", -1, SERUM_SHADOW_OFFSET_NATIVE);
-  ExpectSidecar("shadow-offset: 2\n", -1, SERUM_SHADOW_OFFSET_PROPORTIONAL);
-  ExpectSidecar("scale2x\nshadow-offset: proportional\n", SERUM_SCALING_SCALE2X,
-                SERUM_SHADOW_OFFSET_PROPORTIONAL);
-}
-
-// Comments, blank lines, padding and case are all tolerated; an unknown key,
-// an unknown value and a missing file all leave the stored choice standing.
-static void Test_ScalingSidecarTolerance(void) {
-  ExpectSidecar("# a comment\n\n  SCALE2X  \n", SERUM_SCALING_SCALE2X, -1);
-  ExpectSidecar("scale2x # trailing comment\n", SERUM_SCALING_SCALE2X, -1);
-  ExpectSidecar("\tShadow-Offset :\tPROPORTIONAL \n", -1,
-                SERUM_SHADOW_OFFSET_PROPORTIONAL);
-  ExpectSidecar("hq2x\n", -1, -1);
-  // The names the preserving variant of Scale2x used to have. There is one
-  // Scale2x now, so these are unknown like any other unknown value: the stored
-  // choice stands rather than being replaced.
-  ExpectSidecar("scale2x-preserve\n", -1, -1);
-  ExpectSidecar("preserve\n", -1, -1);
-  ExpectSidecar("scaling: hq2x\n", -1, -1);
-  ExpectSidecar("shadow-offset: sideways\n", -1, -1);
-  ExpectSidecar("colours: many\n", -1, -1);
-  ExpectSidecar("", -1, -1);
-
-  const ScalingSidecar none = read_scaling_sidecar(
-      (std::filesystem::temp_directory_path() / "libserum_tests_absent")
-          .string());
-  CHECK(!none.algorithm);
-  CHECK(!none.shadowOffsetMode);
-  CHECK(!none.any());
 }
 
 // ---------------------------------------------------------------------------
@@ -2399,15 +2313,27 @@ static Serum_Frame_Struc* LoadCrom(const std::vector<uint8_t>& crom,
 }
 
 // Writes the cROMc of the cROM bytes through Serum_ConcentrateFromSource() to
-// <dir>/<rom>/<rom>.cROMc, where Serum_Load(dir, rom, ...) finds it.
+// <dir>/<rom>/<rom>.cROMc, where Serum_Load(dir, rom, ...) finds it. With a
+// csvPath the scenes of that pup.csv go into the cROMc, as an editor puts the
+// scenes of a project into its export: the colorization is loaded with them
+// and the cROMc written from what is loaded.
 static bool WriteCromc(const std::vector<uint8_t>& crom,
-                       const std::filesystem::path& dir, const char* rom) {
-  CromSource source;
-  source.crom = crom;
-  if (!source.Parse()) return false;
+                       const std::filesystem::path& dir, const char* rom,
+                       const char* csvPath = NULL) {
   std::filesystem::create_directories(dir / rom);
   const std::filesystem::path target =
       dir / rom / (std::string(rom) + ".cROMc");
+  if (csvPath) {
+    const bool written =
+        LoadCrom(crom, FLAG_REQUEST_32P_FRAMES | FLAG_REQUEST_64P_FRAMES,
+                 csvPath) != NULL &&
+        SaveConcentrateTo(target.string());
+    Serum_Dispose();
+    return written;
+  }
+  CromSource source;
+  source.crom = crom;
+  if (!source.Parse()) return false;
   return Serum_ConcentrateFromSource(&source.source, target.string().c_str());
 }
 
@@ -2856,7 +2782,11 @@ static Serum_Frame_Struc* LoadUnchecked(const Synth& s, uint8_t flags,
   if (!viaConcentrate)
     return source::LoadCrom(s.Serialize(), flags,
                             csv ? csvPath.string().c_str() : NULL);
-  if (!source::WriteCromc(s.Serialize(), dir, kRom)) {
+  const bool written = source::WriteCromc(
+      s.Serialize(), dir, kRom, csv ? csvPath.string().c_str() : NULL);
+  // The scenes are in the cROMc; Serum_Load() reads no pup.csv beside it.
+  std::filesystem::remove(csvPath);
+  if (!written) {
     Serum_Dispose();
     return NULL;
   }
@@ -4517,7 +4447,7 @@ static std::vector<uint8_t> Block(uint32_t contents, uint8_t algorithm,
 // Writes a pup.csv naming another scene and a scaling.txt asking for the other
 // settings, and loads the cROM with its block appended: through
 // Serum_LoadFromSource() with that pup.csv, or through Serum_Load() on the
-// cROMc written from it, with both sidecars beside the cROMc.
+// cROMc written from it, with both sidecars beside the cROMc, unread.
 static Serum_Frame_Struc* Load(const std::vector<uint8_t>& crom,
                                bool viaConcentrate) {
   const std::filesystem::path dir = n256::Dir();
@@ -4609,10 +4539,8 @@ static void Test_ConcentrateVersion9Sprites(void) {
   g_serumData.concentrateFileVersion = 9;
   CHECK(g_serumData.SaveToFile(cromc.c_str()));
   Serum_Dispose();
-  Serum_SetGenerateCRomC(false);
   CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
                    n256::kBothPlanes) != NULL);
-  Serum_SetGenerateCRomC(true);
   CHECK_EQ(g_serumData.concentrateFileVersion, 9);
   CHECK_EQ(g_serumData.SpritesPerFrame(), (uint32_t)LEGACY_SPRITES_PER_FRAME);
   uint16_t which[MAX_SPRITES_PER_FRAME];
@@ -4629,9 +4557,9 @@ static void Test_ConcentrateVersion9Sprites(void) {
 }
 
 // The scenes and scaling settings of a cROM's settings block are the
-// colorization's own: a pup.csv or scaling.txt beside it changes neither,
-// loaded from the source with that pup.csv, in the cROMc made from it, or in
-// that cROMc loaded again. Without the block, the pup.csv applies as before.
+// colorization's own: a pup.csv handed to the source changes neither, nor do a
+// pup.csv and scaling.txt beside the cROMc made from it, which Serum_Load()
+// does not read. Without the block, the pup.csv handed to the source applies.
 static void Test_CromSettingsBlock(void) {
   n256::Synth s;
   {
@@ -4680,8 +4608,8 @@ static void Test_CromSettingsBlock(void) {
     Serum_Dispose();
   }
 
-  // A block that sets nothing leaves the pup.csv in charge, and beside a
-  // cROMc the scaling.txt as well.
+  // A block that sets nothing leaves the pup.csv handed to the source in
+  // charge. Beside a cROMc neither the pup.csv nor the scaling.txt is read.
   std::vector<uint8_t> empty = s.Serialize();
   const std::vector<uint8_t> nothing = settings::Block(0, 0, 0);
   empty.insert(empty.end(), nothing.begin(), nothing.end());
@@ -4689,7 +4617,7 @@ static void Test_CromSettingsBlock(void) {
     CHECK(settings::Load(empty, viaConcentrate != 0) != NULL);
     CHECK(!g_serumData.scenesFromColorization);
     CHECK(!g_serumData.scalingFromColorization);
-    CHECK(settings::HasScene(9));
+    CHECK_EQ(settings::HasScene(9), viaConcentrate == 0);
     CHECK(!settings::HasScene(7));
     if (viaConcentrate) {
       CHECK_EQ(g_serumData.scalingAlgorithm, SERUM_SCALING_SCALE2X);
@@ -5567,8 +5495,8 @@ static void Test_SourceBuildsTheCromsColorization(void) {
 }
 
 // Serum_LoadFromSource() with a pup.csv: its scenes, parsed before the lookups
-// are built, give the state and output of Serum_Load() with the same pup.csv
-// beside the cROMc; without a path there are no scenes.
+// are built, give the state and output of Serum_Load() of a cROMc that carries
+// them; without a path there are no scenes.
 static void Test_SourceLoadWithScenes(void) {
   const char* const csv = "7,2,100\n";
   n256::Synth s;
@@ -5595,11 +5523,14 @@ static void Test_SourceLoadWithScenes(void) {
   const memload::Capture fromFile = memload::Run(s, framePixels);
   Serum_Dispose();
 
-  // The pup.csv stays in the test folder; the colorization comes from the
-  // source.
+  // The colorization from the source, with the pup.csv.
   const std::string csvPath =
       (n256::Dir() / n256::kRom / (std::string(n256::kRom) + ".pup.csv"))
           .string();
+  {
+    std::ofstream out(csvPath);
+    out << csv;
+  }
   Serum_SetMaximumUnknownFramesToSkip(0);
   Serum_SetIgnoreUnknownFramesTimeout(0);
   CHECK(source::LoadCrom(crom, n256::kBothPlanes, csvPath.c_str()) == &mySerum);
@@ -5626,7 +5557,6 @@ static void Test_SourceLoadWritesNoFile(void) {
   std::filesystem::create_directories(dir);
   const std::filesystem::path before = std::filesystem::current_path();
   std::filesystem::current_path(dir);
-  Serum_SetGenerateCRomC(true);
   CHECK(source::LoadCrom(crom, n256::kBothPlanes) != NULL);
   CHECK(std::filesystem::is_empty(dir));
   std::filesystem::current_path(before);
@@ -5786,10 +5716,7 @@ static const TestCase kTests[] = {
      Test_UnlitDynamicColourBeatsTheBackgroundOnRequest},
     {"colorize/unlit_dynamic_colour_casts_shadow",
      Test_UnlitDynamicColourCastsItsShadow},
-    {"sidecar/spellings", Test_ScalingSidecarSpellings},
     {"sidecar/matches_libframeutil", Test_AlgorithmMatchesLibframeutil},
-    {"sidecar/shadow_offset", Test_ScalingSidecarShadowOffset},
-    {"sidecar/tolerance", Test_ScalingSidecarTolerance},
     {"sparse/round_trip", Test_SparseVectorRoundTrip},
     {"sparse/drops_empty_payloads", Test_SparseVectorDropsEmptyPayloads},
     {"sparse/parent_gating", Test_SparseVectorParentGating},

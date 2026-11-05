@@ -85,8 +85,7 @@ explains the rule; if the test fails, read that commit message first.
 | `separator/survives_a_row_wipe` | a score wiped away one row at a time keeps its commas while the picture around them is untouched, and stops keeping them when the wipe arrives |
 
 Not everything here is a past bug. The rest covers behaviour that had no test at
-all and would fail quietly — a misparsed `scaling.txt` falls back to a default
-nobody chose, a rotation that ticks at the wrong rate looks like a slow machine,
+all and would fail quietly — a rotation that ticks at the wrong rate looks like a slow machine,
 and a packing bug corrupts every colorization at once.
 
 | test | what it pins |
@@ -102,15 +101,12 @@ and a packing bug corrupts every colorization at once.
 | `colorize/dynamic_zone_colours` | inside a dynamic zone the colour comes from that zone's set, indexed by the ROM shade |
 | `colorize/dynamic_zone_active_mask` | a zone only applies where its active mask says so; elsewhere the static colour stands |
 | `scenes/stored_data_keeps_timers` | scenes set from stored data (a cROMc load) keep the auto-start scene and the end-hold durations their pup.csv gives |
-| `crom/settings_block` | a cROM settings block gives scenes and scaling that a pup.csv and scaling.txt beside it do not change, from the source, in its cROMc and in that cROMc loaded again; an empty block leaves the pup.csv in charge, and beside a cROMc the scaling.txt as well; a cut block fails |
-| `source/with_scenes` | `Serum_LoadFromSource()` with a pup.csv gives the state and output of `Serum_Load()` with that pup.csv beside the cROMc; without one there are no scenes |
+| `crom/settings_block` | a cROM settings block gives scenes and scaling that a pup.csv handed to the source does not change, from the source, in its cROMc and in that cROMc loaded again; a pup.csv and scaling.txt beside a cROMc are not read; an empty block leaves the pup.csv handed to the source in charge; a cut block fails |
+| `source/with_scenes` | `Serum_LoadFromSource()` with a pup.csv gives the state and output of `Serum_Load()` of a cROMc that carries those scenes; without one there are no scenes |
 | `source/builds_the_croms_colorization` | the cROMc `Serum_ConcentrateFromSource()` writes loads through `Serum_Load()` with the state and output of `Serum_LoadFromSource()`, for `128x32` and `is256x64`, 8- and 16-bit sprite IDs and a settings block; no path, no source or no `fill()` is refused |
-| `source/writes_no_file` | a load from a source writes nothing, with cROMc generation on |
+| `source/writes_no_file` | a load from a source writes nothing |
 | `source/failures_are_clean` | no source, a refused geometry, no frames, no colours and an impossible sprite slot count return `NULL` with an error message and nothing loaded, also releasing what was loaded before; a valid load afterwards works |
 | `load/refuses_raw_files` | `Serum_Load()` on a directory with only `<rom>.cROM`, or only `<rom>.cRZ`, returns `NULL`, writes no cROMc and logs a line naming that file |
-| `sidecar/spellings` | every spelling `scaling.txt` advertises, bare and under `scaling:`/`algorithm:` |
-| `sidecar/shadow_offset` | `native`/`proportional`/`1`/`2`, and both keys in one file |
-| `sidecar/tolerance` | comments, blank lines, padding, case; an unknown key or value leaves the stored choice alone rather than replacing it with a default |
 | `sparse/round_trip` | an element never set reads back as the no-data signature, so the render path can index it unconditionally |
 | `sparse/drops_empty_payloads` | an all-no-data payload is not stored — the point of the structure |
 | `sparse/parent_gating` | a child vector stores nothing where its parent has nothing (`dynamasks_extra` hangs off `isextraframe` this way) |

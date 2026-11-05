@@ -237,7 +237,6 @@ Requested-output mode:
    - accept only `*.cROMc`
    - do not fall back to `*.cROM` or `*.cRZ`
 3. On non-real-machine/runtime-update flows:
-   - look for optional `*.pup.csv`
    - load `*.cROMc`.
    - If `*.cROMc` starts with `CROM` magic, load via `SerumData::LoadFromFile`.
    - Otherwise, try encrypted in-memory load (`vault::read` + `SerumData::LoadFromBuffer`).
@@ -245,14 +244,9 @@ Requested-output mode:
    never loaded (since 2.99.14, towards 3.0): `Serum_Load()` logs that one
    is there, so that a user learns why nothing is colorized. Colorizations of
    Serum v1 are refused, also as a cROMc.
-5. If CSV exists and format is v2, parse scenes via `SceneGenerator::parseCSV`,
-   unless the colorization carries its scenes (`scenesFromColorization`, see
-   "cROM settings block"); then the CSV is not read. `scaling.txt` likewise
-   does not apply when `scalingFromColorization` is set.
-   - If CSV parsing updates scene data for a loaded `*.cROMc` and runtime
-     generation is enabled, libserum rewrites the `*.cROMc` and reloads it in
-     the same load cycle so the current process immediately uses the persisted
-     scene-aware data.
+5. No sidecar is read (since 2.99.14): the `*.cROMc` carries the scenes and
+   scaling settings its author's editor gave it, and a `*.pup.csv` or
+   `scaling.txt` beside it is ignored. `Serum_Load()` writes no file.
 6. Set scene depth from color count when scenes are active.
 7. Build or restore frame lookup acceleration:
    - If loaded from cROMc v6 and no CSV update in this run: use stored lookup
@@ -276,7 +270,8 @@ Requested-output mode:
      authoring-time rebuild flows, not to the final-device direct `v6` path.
 Important:
 - `BuildFrameLookupVectors()` must run after final scene data is known for this load cycle.
-- CSV parsing after loading can invalidate stored scene lookup data and requires rebuild.
+- CSV parsing after loading (`Serum_LoadFromSource()` with a `csvPath`) can
+  invalidate stored scene lookup data and requires rebuild.
 - Design policy:
   - `v5` backward-compatibility logic must remain scoped to `v5` loads.
   - `pup.csv`-driven rebuild/update logic is an authoring-time path and is not
@@ -313,8 +308,7 @@ reader for raw cROM or cRZ files any more.
 - A `pup.csv` named by `csvPath` is parsed for a v2 colorization after the
   blocks are read and before `FinishColorizationLoad()` (whose
   `sceneDataUpdatedFromCsv` it sets), and the scene depth is set from the
-  colour count, in the order `Serum_Load()` uses for a `pup.csv` beside a
-  cROMc. A colorization whose settings carry scenes keeps them: the `pup.csv`
+  colour count. A colorization whose settings carry scenes keeps them: the `pup.csv`
   is not read. No other file is read or written. This is an authoring-time
   path; it has no real-machine branch.
 - On failure it calls `Serum_free()`, returns `NULL` and stores the reason for
@@ -358,10 +352,9 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
   A block that is cut short or malformed fails the load.
 - Scenes from the block set `scenesFromColorization`, scaling settings set
   `scalingFromColorization` (also when the block holds zero scenes). Either
-  makes the matching sidecar (`<rom>.pup.csv`, `scaling.txt`) ignored, in
-  `Serum_LoadFromSource()` and in the cROMc made from the source. A source
-  without the payload, or a payload that does not set a part, keeps the
-  sidecar behaviour for that part.
+  makes a `csvPath` handed to `Serum_LoadFromSource()` ignored. A source
+  without the payload, or a payload that does not set scenes, takes the scenes
+  of that `pup.csv`. `Serum_Load()` reads no sidecar at all.
 - Both flags are stored in the cROMc from concentrate version 9; older cROMcs
   load with both false and behave as before.
 - A frame group count of 0 is read as 1, as `parseCSV()` reads it.
@@ -577,7 +570,7 @@ Log line:
 - `Loaded X frames and Y rotation scene frames`
 
 Save-time invariant:
-- `Serum_SaveConcentrate()` must set `SceneGenerator` depth from
+- `SaveConcentrateTo()` must set `SceneGenerator` depth from
   `g_serumData.nocolors` before `BuildFrameLookupVectors()`. Otherwise large
   v2 scene sets authored for 4-level scene markers can serialize empty derived
   scene lookup data even though the source `.pup.csv` parses successfully.
@@ -751,8 +744,7 @@ no `128x32` output.**
 - **Nothing is scaled, in either direction.** `upscaleExtraFromOriginal` (layer
   mode) is never set, and `isoriginalrequested` / `isoriginalfallbackrequested`
   are never set either, so the original-plane passes of `Colorize_Framev2()`
-  and `Colorize_Spritev2()` do not run. `scaling.txt` and the scaling algorithm
-  have no effect.
+  and `Colorize_Spritev2()` do not run. The scaling settings have no effect.
 - **The stored `128x32` data is loaded and ignored**: `cframes_v2`,
   `dynamasks`, `dyna4cols_v2`, `backgroundframes_v2`, `backgroundmask`,
   `dynashadowsdir`/`dynashadowscol`, `colorrotations_v2`, `spritecolored`,
@@ -1270,11 +1262,9 @@ With these the `64p` plane is the same picture for a `64p`-only request and a
 `SERUM_SCALING_*` and `SERUM_SHADOW_OFFSET_*` live in `serum.h`; the shared
 implementation is `FrameUtil::ScalingAlgorithm` in libframeutil, fetched into
 `third-party/include` by `platforms/<platform>/<arch>/external.sh`. Both values
-are stored in the `cROMc` header from concentrate version 8, can come with the
-cROM's settings block (then nothing overrides them), and are otherwise
-overridable per colorization through `altcolor/<romname>/scaling.txt`
-(`read_scaling_sidecar()`), which is **not** read on a real machine — the stored
-values are authoritative there, matching how `pup.csv` is treated.
+are stored in the `cROMc` header from concentrate version 8 and come with the
+source's settings payload. The stored values are authoritative: no
+`scaling.txt` is read (since 2.99.14).
 
 `SERUM_SCALING_SCALE2X` (value `2`) is the default and one of only two
 selectable algorithms, the other being `SERUM_SCALING_LINE_DOUBLING`. It is
@@ -1346,8 +1336,7 @@ libserum did; libframeutil's value `0` is its reference Scale2x, which nothing
 here selects. It remains there because a host scaling a finished frame has no
 ROM frame to judge a corner against, so it is what that host has to use.
 
-A stored value that is neither reads as `SERUM_SCALING_SCALE2X`, and
-`scaling.txt` accepts only `scale2x` and `line-doubling`.
+A stored value that is neither reads as `SERUM_SCALING_SCALE2X`.
 The selector must never be gated on extra-plane geometry: the whole-frame upscale
 runs precisely when there is no extra plane, and gating there silently made every
 `32p`-only colorization fall back to line doubling.
@@ -1494,7 +1483,7 @@ Stored in v6:
 - Sparse vectors in packed sparse layout.
 - Normalized sentinel vectors plus sidecar flag vectors for transparency and
   dynamic-zone activity.
-- Scene frames as differences (version 18): `Serum_SaveConcentrate()` runs
+- Scene frames as differences (version 18): `SaveConcentrateTo()` runs
   `EncodeSceneFrameDifferences()` after `BuildFrameLookupVectors()`. Each frame
   of a scene group after the first is stored as the difference to the frame
   before it in the group (`sceneFrameIdByTriplet`), on each plane where that

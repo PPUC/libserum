@@ -76,14 +76,9 @@ exports. A raw `*.cROM` or `*.cRZ` of an earlier version is not loaded; the log
 says so, and the author provides a `*.cROMc` instead. Serum v1 colorizations
 (64 colors per frame) are not supported.
 
-On desktop/authoring-style usage, a `*.pup.csv` or `scaling.txt` beside the
-`*.cROMc` updates it (only relevant for colorization authors), and the updated
-`*.cROMc` is written again unless `Serum_SetGenerateCRomC(false)` was called.
-
-On real-machine targets:
-
-- only `*.cROMc` is supported
-- `*.pup.csv` is ignored
+The `*.cROMc` carries the colorization's scenes and scaling settings, set in
+the author's editor. No `*.pup.csv` or `scaling.txt` beside it is read, and
+`Serum_Load(...)` writes no file.
 
 ## Loading From An Authoring Tool
 
@@ -272,41 +267,23 @@ There is no sidecar setting for this — it is always on. A handful of artwork
 pixels per frame can match the same shape and get line doubled with the commas.
 Measured at 0.3% of a frame, and not noticeable in practice.
 
-### `scaling.txt`
+### Scaling settings
 
-Authors override the defaults with an optional sidecar next to the colorization
-files:
-
-```text
-altcolor/<romname>/scaling.txt
-```
-
-Each non-empty line is either a bare algorithm name or a `key: value` setting.
-`#` starts a comment:
-
-```text
-# the default; line-doubling is the alternative
-scale2x
-shadow-offset: proportional
-```
+The upscaling algorithm and the shadow offset are settings of the
+colorization, chosen by its author in the editor and stored in the `*.cROMc`:
 
 | setting | values | default | meaning |
 |---|---|---|---|
-| *(bare word)* or `scaling:` | `scale2x`, `line-doubling` | `scale2x` | upscaling algorithm |
-| `shadow-offset:` | `native`, `proportional` | `native` | how far dynamic shadows are offset on the upscaled plane |
+| algorithm | `scale2x`, `line-doubling` | `scale2x` | upscaling algorithm |
+| shadow offset | `native`, `proportional` | `native` | how far dynamic shadows are offset on the upscaled plane |
 
-`shadow-offset: native` offsets a shadow by one `256x64` pixel, which is what
-`libserum` has always rendered into the high-resolution plane and therefore what
-most colorizations were tuned against. `proportional` uses two pixels, keeping
-the shadow's thickness proportional to the glyph and matching the `128x32`
-output. Tight glyphs such as `8` can lose the gap between their loops under
+`native` offsets a shadow by one `256x64` pixel, which is what `libserum` has
+always rendered into the high-resolution plane and therefore what most
+colorizations were tuned against. `proportional` uses two pixels, keeping the
+shadow's thickness proportional to the glyph and matching the `128x32` output.
+Tight glyphs such as `8` can lose the gap between their loops under
 `proportional`, while thicker fonts often look better with it — which is why it
-is a per-colorization choice.
-
-Dropping in or editing `scaling.txt` next to an existing `*.cROMc` regenerates
-that `*.cROMc` on the next load, so the settings take effect immediately and are
-then carried by the archive itself. On real-machine targets `scaling.txt` is not
-read and the values stored in the `*.cROMc` are used.
+is a per-colorization choice. A `scaling.txt` beside the `*.cROMc` is not read.
 
 Downscaling is not done by `libserum`. A `128x32` request against `64p`-only
 content still returns the `64p` frame, and the host decides how to reduce it.
@@ -321,7 +298,7 @@ header) are rendered at that resolution only, and the frame you pass to
 output**. Frames are identified, sprites are looked for and everything is drawn
 on the `256x64` ROM frame, pixel for pixel, into `frame64`. The file still
 stores a `128x32` plane, written by the editor; it is loaded and not used.
-`scaling.txt` has no effect on such a colorization.
+The scaling settings have no effect on such a colorization.
 
 What you get depends on the flags passed to `Serum_Load()`:
 
@@ -372,7 +349,10 @@ where every colorized frame genuinely differs, nothing changes at all.
 
 ## Rotation Scenes
 
-For `Serum v2`, scenes are authored in `*.pup.csv`.
+For `Serum v2`, scenes are authored in the editor, which may import them from a
+`*.pup.csv`, and stored in the `*.cROMc`. `Serum_Load(...)` reads no
+`*.pup.csv`; the format below is what the editor imports and what
+`Serum_LoadFromSource(...)` and `Serum_Scene_ParseCSV(...)` take.
 
 Format of a PUP scene line:
 
