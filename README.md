@@ -103,12 +103,7 @@ offline against the root keys it carries and logs the result, which
 - **signed**: the file is unchanged since its author signed it;
 - **not signed**: nothing is shown, the log says so;
 - **modified**: the file is loaded and colorized all the same, with a notice
-  on the display for the first 10 seconds and for 5 seconds every 5 to 10
-  minutes. The notice is a frame the author designed for it, or, when there is
-  none, the words "COLORIZATION MODIFIED" over the colorized frames.
-
-A `*.cROMc` of the current format that is not signed takes 30 seconds longer
-to load.
+  on the display.
 
 The `*.cROMc` keeps the colorization's author, license and terms of use
 readable at its start (`Serum_GetColorizationText()` returns them).
@@ -454,6 +449,13 @@ So when a scene is meant to cover the end of an animation:
 
 Set field `5` to `1` if the scene should replace the triggering frame at once
 rather than after its frame duration.
+
+## License
+
+libserum is licensed under the GPLv2 or later (GPLv2+, `LICENSE.md`), except where a file's
+header or a sub-directory names a different license, as for the libraries in
+`third-party/include`. Be aware that your own enhancements of libserum need to be licensed
+under a compatible license.
 
 ## Build
 
