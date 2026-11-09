@@ -977,23 +977,49 @@ uint16_t* separatorTextFrame = NULL;  // the 32p plane, lit dynamic pixels only
 // unlit neighbour, exactly what the rule exists to prevent. The ROM frame is
 // the only place that distinction survives colorization.
 const uint8_t* romFrameForUpscale = NULL;
-// A background scene with the game's frame in front of it: the picture the
-// upscale reads is put together from two sources, and the game's content has
-// to scale the same whatever the scene shows behind it -- a movie changes the
-// neighbouring colours with every step, and with them which corners Scale2x
-// rounds, so the text flickered. Where the scene shows, the game's content is
-// therefore scaled as on black: upscaleSceneMask marks those pixels, the
-// selection for a pixel of the game's content sees them as black, and
-// upscaleRomReference -- the game frame's shades, unlit where the scene shows
-// -- is what the corner rule and the separator filter read (through
-// UpscaleRomFrame()). Reading the ROM frame of the call instead judged the
-// text on the scene's marker frame in every scene step. Both hold for the rest
-// of the colorize call that built them (sprites included).
+// A background with the game's frame in front of it -- the frame's background
+// image or a background scene: the picture the upscale reads is put together
+// from two sources, and the game's content has to scale as if it were drawn on
+// black and then put on the background. Scale2x rounds a corner only where the
+// two pixels beside it match, and a background with texture almost never
+// matches itself: in front of an image the text came out nearly line doubled,
+// and in front of a movie, whose colours change with every step, it flickered.
+// So where the background shows, the game's content is scaled as on black:
+// upscaleBackgroundMask marks those pixels, the selection for a pixel of the
+// game's content sees them as black, and upscaleRomReference -- the game
+// frame's shades, unlit where the background shows -- is what the corner rule
+// and the separator filter read (through UpscaleRomFrame()). Reading the ROM
+// frame of the call instead judged the text on the scene's marker frame in
+// every scene step. Both hold for the rest of the colorize call that built
+// them (sprites included); a sprite pixel drawn over the background takes its
+// pixel out of the mask.
 uint8_t upscaleRomReference[256 * 64] = {0};
-uint8_t upscaleSceneMask[256 * 64] = {0};
+uint8_t upscaleBackgroundMask[256 * 64] = {0};
 const uint8_t* upscaleRomOverride = NULL;
-// The selection source with the scene's pixels black.
-uint16_t upscaleSceneFreeFrame[256 * 64] = {0};
+// The selection source in front of a background, as a key: 0 where the
+// background shows, the colour plus one everywhere else.
+//
+// "On black" means on nothing. libframeutil compares the selection source and
+// counts outside the frame as T(), so the background has to be 0 to match the
+// outside, and black content must not be 0: with colours as keys, a black
+// outline or a black glyph matched the background and was scaled as if it were
+// not there.
+uint32_t upscaleBackgroundFreeFrame[256 * 64] = {0};
+// Inner corners the scaled layer fills on the background, over HD content.
+//
+// Scaled on black, the content fills the inner corners of its diagonals: the
+// destination pixel beside a step takes the content's colour. That pixel's own
+// source is the background, which the layer does not own where HD content
+// stands, so it was left to the HD plane and every diagonal kept its steps.
+// The layer now paints those pixels too, and remembers what the HD plane held
+// there: a sprite composites its region again after the frame, and where the
+// picture the sprite left no longer fills a corner, the HD plane's pixel comes
+// back instead of the frame's fill. One entry per extra-plane pixel; the
+// rotation entries are two per pixel, as in rotationsinframe64.
+uint8_t* upscaleFillMarked = NULL;
+uint16_t* upscaleFillColour = NULL;
+uint16_t* upscaleFillUnderlay = NULL;
+uint16_t* upscaleFillUnderlayRotation = NULL;
 
 // The ROM frame the upscale judges pixels on; NULL outside a colorize call.
 static inline const uint8_t* UpscaleRomFrame(void) {
@@ -1007,6 +1033,9 @@ static inline const uint8_t* UpscaleRomFrame(void) {
 // for a 128x32 frame, each re-deriving the same neighbourhood -- 23.9 us
 // against 6.2 us for the whole plane in one pass on a Cortex-A53.
 uint32_t* upscaleIndexPlane = NULL;
+// The same for the selection on upscaleBackgroundFreeFrame, which the game's
+// content in front of a background selects on.
+uint32_t* upscaleBackgroundFreeIndexPlane = NULL;
 // The mask is a property of the composited 32p plane, so it is computed once
 // per frame rather than on every upscale. Sprite compositing calls the upscale
 // again per sprite to preserve z-order, and re-deriving the whole-frame mask
@@ -1847,6 +1876,11 @@ void Serum_free(void) {
   Free_element((void**)&separatorTextFrame);
   romFrameForUpscale = NULL;
   Free_element((void**)&upscaleIndexPlane);
+  Free_element((void**)&upscaleBackgroundFreeIndexPlane);
+  Free_element((void**)&upscaleFillMarked);
+  Free_element((void**)&upscaleFillColour);
+  Free_element((void**)&upscaleFillUnderlay);
+  Free_element((void**)&upscaleFillUnderlayRotation);
   separatorMaskValid = false;
   separatorMaskCount = 0;
   rememberedSeparatorCount = 0;
@@ -2508,6 +2542,7 @@ static void ResetScaledLayerCoverage(void) {
   if (sdShadowClaim) memset(sdShadowClaim, 0, px);
   sdShadowClaimAny = false;
   if (hdDynaLayerMap) memset(hdDynaLayerMap, 0, px * 4);
+  if (upscaleFillMarked) memset(upscaleFillMarked, 0, px * 4);
   scaledLayerHasCoverage = false;
   separatorMaskValid = false;
 }
@@ -3176,26 +3211,55 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
     lineDoubled = serum_accel::CompositeLineDoubled(job);
   }
 
-  // A background scene behind the game's content: the content selects on a
-  // picture where the scene is black, the scene's own pixels on its colours
-  // (see upscaleSceneMask). Per pixel, as the source differs.
-  const bool sceneBehind = upscaleRomOverride != NULL && !lineDoubled;
-  if (sceneBehind) {
+  // A background behind the game's content: the content selects on a picture
+  // where the background is nothing, the background's own pixels on its
+  // colours (see upscaleBackgroundMask). Per pixel, as the source differs. A
+  // separator taken out of the picture is nothing as well.
+  const bool backgroundBehind = upscaleRomOverride != NULL && !lineDoubled;
+  if (backgroundBehind) {
     const size_t px = (size_t)srcWidth * srcHeight;
     for (size_t i = 0; i < px; ++i)
-      upscaleSceneFreeFrame[i] = upscaleSceneMask[i] ? 0 : selectSource[i];
+      upscaleBackgroundFreeFrame[i] =
+          upscaleBackgroundMask[i] || (separatorsFound && separatorMask[i])
+              ? 0u
+              : (uint32_t)mySerum.frame32[i] + 1u;
   }
 
-  // Whole-frame upscales take the indices in one vectorizable pass. A bounded
-  // one (a sprite region) stays per pixel: it touches too few pixels to pay
-  // for a full-plane derivation.
+  // Whole-frame upscales take the indices in one vectorizable pass, behind a
+  // background once for each of the two pictures. A bounded one (a sprite
+  // region) stays per pixel: it touches too few pixels to pay for a full-plane
+  // derivation.
   const uint32_t* indexPlane = NULL;
-  if (!lineDoubled && !srcBounds && !sceneBehind && upscaleIndexPlane) {
+  const uint32_t* backgroundFreeIndexPlane = NULL;
+  if (!lineDoubled && !srcBounds && upscaleIndexPlane) {
     FrameUtil::Helper::SelectUpscaled2xSourceIndices(
         upscaleIndexPlane, selectSource, srcWidth, srcHeight,
         selectionAlgorithm);
     indexPlane = upscaleIndexPlane;
+    if (backgroundBehind && upscaleBackgroundFreeIndexPlane) {
+      FrameUtil::Helper::SelectUpscaled2xSourceIndices(
+          upscaleBackgroundFreeIndexPlane, upscaleBackgroundFreeFrame, srcWidth,
+          srcHeight, selectionAlgorithm);
+      backgroundFreeIndexPlane = upscaleBackgroundFreeIndexPlane;
+    }
   }
+  // The source index for a destination pixel, on one of the two pictures.
+  const auto selectOn = [&](bool backgroundFree, uint32_t x, uint32_t y) {
+    if (backgroundFree) {
+      return backgroundFreeIndexPlane
+                 ? backgroundFreeIndexPlane[(size_t)y * dstWidth + x]
+                 : FrameUtil::Helper::SelectUpscaled2xSourceIndex(
+                       upscaleBackgroundFreeFrame, srcWidth, srcHeight, x, y,
+                       selectionAlgorithm);
+    }
+    return indexPlane ? indexPlane[(size_t)y * dstWidth + x]
+                      : FrameUtil::Helper::SelectUpscaled2xSourceIndex(
+                            selectSource, srcWidth, srcHeight, x, y,
+                            selectionAlgorithm);
+  };
+  const bool fillsInnerCorners =
+      coverageProtectsHd && backgroundBehind && upscaleFillMarked &&
+      upscaleFillColour && upscaleFillUnderlay && upscaleFillUnderlayRotation;
 
   for (uint32_t y = y0; !lineDoubled && y <= y1; y++) {
     // Index of the source pixel this destination row belongs to. Both the
@@ -3215,19 +3279,66 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       // leaking into the letter next to it on Iron Man's settings screen.
       // Upscaling the whole frame at once, as an editor does, cannot do this
       // because there is no layer to be outside of.
-      if (coverageProtectsHd && scaledLayerCoverage[own] == 0) continue;
+      //
+      // The background is not such content. Scaled on black, the layer fills
+      // the inner corners of its diagonals with destination pixels whose own
+      // source is the background, and put on the background those pixels are
+      // the layer's (see upscaleFillMarked).
+      if (coverageProtectsHd && scaledLayerCoverage[own] == 0) {
+        if (!fillsInnerCorners || !upscaleBackgroundMask[own]) continue;
+        const size_t dst = dstRow + x;
+        const uint32_t fill = selectOn(true, x, y);
+        if (fill == FrameUtil::Helper::kUpscaleSourceOutside ||
+            scaledLayerCoverage[fill] == 0 || upscaleBackgroundMask[fill] ||
+            upscaleBackgroundFreeFrame[fill] == 0) {
+          // No fill here, or no longer: what the HD plane held comes back,
+          // unless something drew over the fill since.
+          if (upscaleFillMarked[dst]) {
+            if (mySerum.frame64[dst] == upscaleFillColour[dst]) {
+              mySerum.frame64[dst] = upscaleFillUnderlay[dst];
+              if (hdDynaLayerMap) hdDynaLayerMap[dst] = 0;
+              if (mySerum.rotationsinframe64) {
+                mySerum.rotationsinframe64[dst * 2] =
+                    upscaleFillUnderlayRotation[dst * 2];
+                mySerum.rotationsinframe64[dst * 2 + 1] =
+                    upscaleFillUnderlayRotation[dst * 2 + 1];
+              }
+            }
+            upscaleFillMarked[dst] = 0;
+          }
+          continue;
+        }
+        if (!upscaleFillMarked[dst]) {
+          upscaleFillMarked[dst] = 1;
+          upscaleFillUnderlay[dst] = mySerum.frame64[dst];
+          upscaleFillUnderlayRotation[dst * 2] =
+              mySerum.rotationsinframe64 ? mySerum.rotationsinframe64[dst * 2]
+                                         : 0xffff;
+          upscaleFillUnderlayRotation[dst * 2 + 1] =
+              mySerum.rotationsinframe64
+                  ? mySerum.rotationsinframe64[dst * 2 + 1]
+                  : 0xffff;
+        }
+        upscaleFillColour[dst] = mySerum.frame32[fill];
+        mySerum.frame64[dst] = mySerum.frame32[fill];
+        if (sdDynaLayerMap && hdDynaLayerMap)
+          hdDynaLayerMap[dst] = sdDynaLayerMap[fill];
+        if (mySerum.rotationsinframe64 && mySerum.rotationsinframe32) {
+          mySerum.rotationsinframe64[dst * 2] =
+              mySerum.rotationsinframe32[fill * 2];
+          mySerum.rotationsinframe64[dst * 2 + 1] =
+              mySerum.rotationsinframe32[fill * 2 + 1];
+        }
+        continue;
+      }
       // Always select on the COLOUR, never on an ownership-tagged key: the
       // scaled layer must round its edges exactly as a whole-frame upscale of
       // the same picture would, and tagging ownership into the comparison
       // changes those decisions along every layer boundary. frame32 is a
-      // complete picture here -- see sdRendersStatics.
-      uint32_t src = indexPlane
-                         ? indexPlane[dstRow + x]
-                         : FrameUtil::Helper::SelectUpscaled2xSourceIndex(
-                               sceneBehind && !upscaleSceneMask[own]
-                                   ? upscaleSceneFreeFrame
-                                   : selectSource,
-                               srcWidth, srcHeight, x, y, selectionAlgorithm);
+      // complete picture here -- see sdRendersStatics. In front of a
+      // background the picture is the game's content on black.
+      uint32_t src =
+          selectOn(backgroundBehind && !upscaleBackgroundMask[own], x, y);
       // Outside the frame: black, and no index to read the parallel planes
       // from. Where HD content stands the layer simply does not paint. Where
       // nothing else writes this plane it has to paint the black, or the pixel
@@ -3273,13 +3384,13 @@ static void UpscaleOriginalPlaneIntoExtra(bool propagateModifiedElements,
       // artwork looks like, and nothing else changes where the HD frame does
       // hold content.
       //
-      // Behind a background scene, though, the plane holds the scene's picture
-      // of the step, or the output of the step before: black there or not is
-      // the scene's, and changes from step to step. Where the selection lands
-      // on a pixel the scene shows, the corner rounds to the scene in every
-      // step, as it does on black (see upscaleSceneMask).
-      if (coverageProtectsHd && scaledLayerCoverage[src] == 0 && sceneBehind &&
-          upscaleSceneMask[src])
+      // Not where the selection lands on a pixel the background shows, though:
+      // black there or not is the background's. Behind a background scene the
+      // plane holds the scene's picture of the step, or the output of the step
+      // before, and that changes from step to step. The corner rounds to the
+      // background, as it does on black (see upscaleBackgroundMask).
+      if (coverageProtectsHd && scaledLayerCoverage[src] == 0 &&
+          backgroundBehind && upscaleBackgroundMask[src])
         continue;
       if (coverageProtectsHd && scaledLayerCoverage[src] == 0) {
         // A bounded pass is a sprite compositing its own region. What stands
@@ -3707,6 +3818,12 @@ static bool AllocateFrameWorkBuffers(void) {
       (uint8_t*)malloc((size_t)kSeparatorMaxColors * g_serumData.fwidth);
   separatorTextFrame = (uint16_t*)malloc(px * sizeof(uint16_t));
   upscaleIndexPlane = (uint32_t*)malloc(px * 4 * sizeof(uint32_t));
+  upscaleBackgroundFreeIndexPlane =
+      (uint32_t*)malloc(px * 4 * sizeof(uint32_t));
+  upscaleFillMarked = (uint8_t*)calloc(px * 4, 1);
+  upscaleFillColour = (uint16_t*)malloc(px * 4 * sizeof(uint16_t));
+  upscaleFillUnderlay = (uint16_t*)malloc(px * 4 * sizeof(uint16_t));
+  upscaleFillUnderlayRotation = (uint16_t*)malloc(px * 8 * sizeof(uint16_t));
   // Zeroed, not just allocated: the separator filter reads sdDynaLayerMap to
   // tell dynamic content from artwork, and it is only cleared per frame once
   // a layer-mode render begins. Before that it would be reading whatever the
@@ -3719,8 +3836,11 @@ static bool AllocateFrameWorkBuffers(void) {
          separatorMask && separatorFreeFrame && separatorRowCount &&
          separatorDescends && separatorColors && separatorColPresent &&
          separatorColRun && separatorColLastRow && separatorTextFrame &&
-         separatorOnlyFrame && upscaleIndexPlane && sdDynaLayerMap &&
-         sdShadowColour && sdShadowClaim && hdDynaLayerMap;
+         separatorOnlyFrame && upscaleIndexPlane &&
+         upscaleBackgroundFreeIndexPlane && upscaleFillMarked &&
+         upscaleFillColour && upscaleFillUnderlay &&
+         upscaleFillUnderlayRotation && sdDynaLayerMap && sdShadowColour &&
+         sdShadowClaim && hdDynaLayerMap;
 }
 
 static Serum_Frame_Struc* Serum_LoadConcentratePrepared(
@@ -5778,23 +5898,23 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
       sceneBackgroundWidth = g_serumData.fwidth;
       sceneBackgroundHeight = g_serumData.fheight;
     }
-    // The picture is the game's frame in front of the scene: the game's
-    // content is scaled as on black (see upscaleSceneMask).
-    // Not for an is256x64 project: its ROM frame is not laid out as this
-    // plane is.
-    const bool recordRomReference = applySceneBackground &&
+    // The picture is the game's frame in front of a background, the frame's
+    // image or a scene: the game's content is scaled as on black (see
+    // upscaleBackgroundMask). Not for an is256x64 project: its ROM frame is not
+    // laid out as this plane is.
+    const bool recordRomReference = (applySceneBackground || hasBackground) &&
                                     romFrameForUpscale != NULL &&
                                     !g_serumData.is256x64;
     if (recordRomReference) {
       const size_t pixels = (size_t)g_serumData.fwidth * g_serumData.fheight;
       memcpy(upscaleRomReference, frame, pixels);
-      memset(upscaleSceneMask, 0, pixels);
+      memset(upscaleBackgroundMask, 0, pixels);
       upscaleRomOverride = upscaleRomReference;
     }
-    const auto sceneShows = [&](uint32_t pixel) {
+    const auto backgroundShows = [&](uint32_t pixel) {
       if (recordRomReference) {
         upscaleRomReference[pixel] = 0;
-        upscaleSceneMask[pixel] = 1;
+        upscaleBackgroundMask[pixel] = 1;
       }
     };
     memset(isdynapix, 0, g_serumData.fheight * g_serumData.fwidth);
@@ -5816,9 +5936,10 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             if (applySceneBackground) {
               pfr[tk] = GetSceneBackgroundPixel(ti, tj, g_serumData.fwidth,
                                                 g_serumData.fheight);
-              sceneShows(tk);
+              backgroundShows(tk);
             } else if (!suppressFrameBackgroundImage) {
               pfr[tk] = frameBackground[tk];
+              backgroundShows(tk);
               if (ColorInRotationOnPlane(originalPlaneRotates, IDfound, pfr[tk],
                                          &prot[tk * 2], &prot[tk * 2 + 1],
                                          false))
@@ -5840,7 +5961,7 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
               if (replaceStaticPixel) {
                 pfr[tk] = GetSceneBackgroundPixel(ti, tj, g_serumData.fwidth,
                                                   g_serumData.fheight);
-                sceneShows(tk);
+                backgroundShows(tk);
               } else {
                 pfr[tk] = frameColors[tk];
                 if (ColorInRotationOnPlane(originalPlaneRotates, IDfound,
@@ -5868,9 +5989,10 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                   if (applySceneBackground) {
                     pfr[tk] = GetSceneBackgroundPixel(
                         ti, tj, g_serumData.fwidth, g_serumData.fheight);
-                    sceneShows(tk);
+                    backgroundShows(tk);
                   } else if (!suppressFrameBackgroundImage) {
                     pfr[tk] = frameBackground[tk];
+                    backgroundShows(tk);
                     if (ColorInRotationOnPlane(originalPlaneRotates, IDfound,
                                                pfr[tk], &prot[tk * 2],
                                                &prot[tk * 2 + 1], false))
@@ -6361,6 +6483,14 @@ void Colorize_Spritev2(uint8_t* oframe, uint16_t nosprite, uint16_t frx,
           if (layerMode &&
               (!spriteHasHdArt || (hasDynaActive && spriteDynaActive[tl] != 0)))
             MarkScaledLayer(tk);
+          // The sprite covers the background here: its pixel is content, and
+          // the upscale judges it on the ROM frame (see upscaleBackgroundMask).
+          if (upscaleRomOverride == upscaleRomReference &&
+              upscaleBackgroundMask[tk]) {
+            upscaleBackgroundMask[tk] = 0;
+            if (romFrameForUpscale)
+              upscaleRomReference[tk] = romFrameForUpscale[tk];
+          }
           if (!hasColor) {
             if (traceSprite) {
               Log("Serum debug sprite render skip: frameId=%u inputCrc=%u "

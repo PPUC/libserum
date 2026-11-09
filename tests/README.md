@@ -72,6 +72,8 @@ explains the rule; if the test fails, read that commit message first.
 | `upscale/line_doubling_replicates` | line doubling is exactly a 2x2 replication |
 | `upscale/no_yield_to_hd_nothing` | the layer yields a rounded pixel to HD content, but not to the black an author leaves under a dynamic zone |
 | `upscale/sprite_region_not_left_stale` | a sprite's own pass paints its whole region, so the frame's earlier composite of the picture before the sprite drew cannot survive at its rounded edges |
+| `upscale/sprite_region_restores_background_fill` | an inner corner the frame filled on the background goes back to the HD background when a sprite's pass no longer fills it |
+| `upscale/background_keeps_dynamic_shape` | dynamic content in front of a background image is scaled as on black, with an HD background and without: corners round and diagonals are filled |
 | `shadow/every_dyna_layer` | `fb5c3a1` — the layer index is bounded by the table it indexes, not by the v1 constant |
 | `shadow/claim_marker_is_not_a_layer` | `e9f8c07` — a painted shadow is not content and casts nothing |
 | `shadow/offset_modes` | native is one extra-plane pixel, proportional is two |

@@ -381,6 +381,60 @@ static void Test_SpriteRegionIsNotLeftStale(void) {
   TearDownFrame();
 }
 
+// Over HD content the layer fills the inner corners of a diagonal on the
+// background (upscaleFillMarked). A sprite drawn afterwards changes the
+// picture, and where its own pass no longer fills a corner the HD background
+// has to come back: the frame's fill left there would be a speck of the text
+// the sprite replaced.
+static void Test_SpriteRegionRestoresBackgroundFill(void) {
+  SetUpFrame();
+  const uint32_t W = g_serumData.fwidth;
+  const uint16_t kText = 0x7777, kSprite = 0x5555;
+  const auto hdBackground = [](size_t i) { return (uint16_t)(0x4000 + i); };
+  // The background everywhere, a colour of its own per pixel, and the HD
+  // background standing in the plane.
+  memset(scaledLayerCoverage, 0, (size_t)W * kH);
+  for (uint32_t y = 0; y < kH; ++y)
+    for (uint32_t x = 0; x < W; ++x) {
+      Px(x, y, 0, (uint16_t)(0x2000 + y * W + x));
+      upscaleBackgroundMask[y * W + x] = 1;
+    }
+  for (size_t i = 0; i < (size_t)W * kH * 4; ++i)
+    mySerum.frame64[i] = hdBackground(i);
+  // A diagonal one pixel wide, rising to the right from (dx, dy).
+  const uint32_t dx = 4, dy = 8;
+  for (uint32_t i = 0; i < 4; ++i) {
+    const uint32_t x = dx + i, y = dy - i;
+    Px(x, y, 3, kText);
+    scaledLayerCoverage[y * W + x] = 1;
+    upscaleBackgroundMask[y * W + x] = 0;
+  }
+  memcpy(upscaleRomReference, g_rom.data(), (size_t)W * kH);
+  upscaleRomOverride = upscaleRomReference;
+  memset(upscaleFillMarked, 0, (size_t)W * kH * 4);
+  mySerum.flags = FLAG_RETURNED_64P_FRAME_OK;
+  extraPlaneIsDerived = false;
+
+  // The background pixel right of the second step: its top left quadrant
+  // fills the step.
+  const uint32_t px = dx + 2, py = dy - 1;
+  const size_t corner = (size_t)(py * 2) * (W * 2) + px * 2;
+  UpscaleOriginalPlaneIntoExtra(false, /*onlyCoveredPixels=*/true);
+  CHECK_EQ(mySerum.frame64[corner], kText);
+
+  // A sprite replaces the step above it, so the corner is no longer filled.
+  const uint32_t sx = dx + 2, sy = dy - 2;
+  Px(sx, sy, 2, kSprite);
+  const uint16_t bounds[4] = {(uint16_t)sx, (uint16_t)sy, (uint16_t)sx,
+                              (uint16_t)sy};
+  UpscaleOriginalPlaneIntoExtra(false, /*onlyCoveredPixels=*/true, bounds);
+  CHECK_EQ(mySerum.frame64[corner], hdBackground(corner));
+
+  upscaleRomOverride = NULL;
+  memset(upscaleBackgroundMask, 0, sizeof(upscaleBackgroundMask));
+  TearDownFrame();
+}
+
 // ---------------------------------------------------------------------------
 // Dynamic shadows on the extra plane
 // ---------------------------------------------------------------------------
@@ -4079,6 +4133,102 @@ static void Test_BackgroundSceneRoundsZoneCorners(void) {
   Unload();
 }
 
+// Dynamic text in front of a frame background, a 128x32 project upscaled to 64
+// rows: the text is scaled as on black and then put on the background, whether
+// that is the original background scaled with it or an HD background. Every
+// pixel of the original background has a colour of its own, so the two pixels
+// beside a corner never matched and Scale2x rounded no corner at all: the text
+// came out nearly line doubled in front of any picture with texture. Over an HD
+// background the inner corners of a diagonal stayed unfilled as well, because
+// the destination pixels that fill them belong to the background. A solid
+// corner now rounds to the background and a diagonal's steps are filled with
+// the text, on both. Black text too: "on black" means on nothing, and black
+// content compared equal to the background and kept its square shape. A black
+// shadow is cast by the upscaled text, filled steps included.
+static void Test_BackgroundKeepsDynamicShape(void) {
+  using namespace n256;
+  // A solid block with its top left corner at (bx, by), and a diagonal one
+  // pixel wide rising to the right from (dx, dy).
+  const uint32_t bx = 40, by = 10, dx = 70, dy = 20;
+  const struct {
+    bool hd;
+    uint8_t shade;  // of the text; set 0 colours shade 1 black
+    bool shadow;    // a black shadow to the right
+  } cases[] = {{false, 3, false},
+               {true, 3, false},
+               {false, 1, false},
+               {true, 1, false},
+               {true, 3, true}};
+  for (const auto& c : cases) {
+    const bool hd = c.hd;
+    const uint16_t kText = c.shade == 1 ? 0 : (uint16_t)(0x0100 + c.shade);
+    const uint16_t kShadow = 0;
+    Synth s;
+    s.is256x64 = false;
+    s.compmasks.assign((size_t)s.ncompmasks * kOPx, 0);
+    s.compmaskid.assign(s.nframes, 255);
+    s.framesprites.assign(s.framesprites.size(), 255);
+    s.isextraframe.assign(s.nframes, 0);
+    memset(s.Native(kDynamic), 0, kNPx);
+    for (uint32_t y = by; y < by + 6; ++y)
+      for (uint32_t x = bx; x < bx + 6; ++x)
+        s.Native(kDynamic)[y * kOW + x] = c.shade;
+    for (uint32_t i = 0; i < 6; ++i)
+      s.Native(kDynamic)[(dy - i) * kOW + dx + i] = c.shade;
+    s.dyna4cols[(size_t)kDynamic * MAX_DYNA_SETS_PER_FRAME_V2 * kColors + 1] =
+        0;
+    if (c.shadow) {
+      s.shdir[(size_t)kDynamic * MAX_DYNA_SETS_PER_FRAME_V2] = 0x08;  // right
+      s.shcol[(size_t)kDynamic * MAX_DYNA_SETS_PER_FRAME_V2] = kShadow;
+    }
+    // The whole frame is one dynamic zone with the background behind
+    // everything unlit.
+    s.bgids[kDynamic] = 0;
+    memset(&s.bgmask[(size_t)kDynamic * kOPx], 1, kOPx);
+    if (hd) {
+      s.isextraframe[kDynamic] = 1;
+      memset(&s.bgmaskx[(size_t)kDynamic * kNPx], 1, kNPx);
+    }
+
+    if (!Load(s, FLAG_REQUEST_64P_FRAMES, false)) return;
+    CHECK(upscaleExtraFromOriginal);
+    std::vector<uint8_t> game(s.Native(kDynamic), s.Native(kDynamic) + kOPx);
+    game.shrink_to_fit();
+    const uint32_t r = Serum_Colorize(game.data());
+    CHECK(r != IDENTIFY_NO_FRAME);
+    CHECK_EQ(mySerum.frameID, kDynamic);
+    CHECK(mySerum.flags & FLAG_RETURNED_64P_FRAME_OK);
+    const auto at = [](uint32_t x, uint32_t y) {
+      return mySerum.frame64[(size_t)y * (kOW * 2) + x];
+    };
+    // The block's corner is rounded to the background: the HD background's
+    // own pixel, or the original background's pixel beside the corner.
+    const uint16_t corner = at(bx * 2, by * 2);
+    CHECK(corner != kText);
+    if (hd)
+      CHECK_EQ(corner, Bg64(by * 2 * (kOW * 2) + bx * 2));
+    else
+      CHECK_EQ(corner, Bg32(by * kOW + bx - 1));
+    // The rest of the corner pixel and the inside of the block are text.
+    CHECK_EQ(at(bx * 2 + 1, by * 2), kText);
+    CHECK_EQ(at(bx * 2, by * 2 + 1), kText);
+    CHECK_EQ(at(bx * 2 + 2, by * 2 + 2), kText);
+    // The background pixel right of each step of the diagonal, with the next
+    // step above it: its top left quadrant fills the step.
+    for (uint32_t i = 1; i < 4; ++i) {
+      const uint32_t px = dx + i + 1, py = dy - i;
+      CHECK_EQ(at(px * 2, py * 2), kText);
+      // Right of the filled step: the background, or the shadow the step
+      // casts.
+      if (c.shadow)
+        CHECK_EQ(at(px * 2 + 1, py * 2), kShadow);
+      else
+        CHECK(at(px * 2 + 1, py * 2) != kText);
+    }
+    Unload();
+  }
+}
+
 // A colorization loaded after another starts with no scene running and no
 // trigger reported. A background scene the last one was playing used to stay
 // "running": the first frame of the new load that fires the same trigger was
@@ -6100,6 +6250,8 @@ static const TestCase kTests[] = {
     {"upscale/line_doubling_replicates", Test_LineDoublingReplicates},
     {"upscale/no_yield_to_hd_nothing", Test_LayerDoesNotYieldToHdNothing},
     {"upscale/sprite_region_not_left_stale", Test_SpriteRegionIsNotLeftStale},
+    {"upscale/sprite_region_restores_background_fill",
+     Test_SpriteRegionRestoresBackgroundFill},
     {"shadow/every_dyna_layer", Test_EveryDynaLayerCastsItsShadow},
     {"shadow/claim_marker_is_not_a_layer", Test_ShadowClaimMarkerIsNotALayer},
     {"shadow/offset_modes", Test_ShadowOffsetModes},
@@ -6212,6 +6364,8 @@ static const TestCase kTests[] = {
      Test_BackgroundSceneKeepsTextShape},
     {"upscale/background_scene_rounds_zone_corners",
      Test_BackgroundSceneRoundsZoneCorners},
+    {"upscale/background_keeps_dynamic_shape",
+     Test_BackgroundKeepsDynamicShape},
     {"scene/load_forgets_the_running_scene", Test_LoadForgetsTheRunningScene},
     {"scene/steps_back_and_forth", Test_SceneStepsBackAndForth},
     {"load/unused_extra_dynamic_data_is_dropped",

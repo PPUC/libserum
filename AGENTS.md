@@ -983,11 +983,27 @@ The mask decides what the layer **contributes**. It does not decide how the
 upscaler **rounds** — see the first invariant below, which is why the SD statics
 are always rendered even when HD statics will cover them.
 
-### Three invariants that are easy to break
+### Four invariants that are easy to break
+
+**A background never decides the shape of the game's content.** This is a
+decision of the project, not an implementation detail, and it has been lost
+twice: the content -- dynamic zones, the frame's statics, sprites -- is scaled
+as if it stood on nothing and is then put on the background. That holds for
+every kind of background: the frame's background image, with or without an HD
+version, and a background scene. Whether a corner rounds or a diagonal step is
+filled must not depend on the background's colours, nor on whether it is HD,
+upscaled or black. A change that makes the upscale read the background's
+colours for a pixel of the content again is wrong, whatever the next invariant
+seems to say; a fix for one kind of background has to be checked against the
+others (`upscale/background_keeps_dynamic_shape` and the two
+`upscale/background_scene_*` tests). The first fix covered background scenes
+only (`332356b`), so text in front of a background image stayed nearly line
+doubled, with an HD background as without -- see "Selection and persistence".
 
 **Select on `frame32`, never on an ownership-tagged key.** The scaled layer has
-to round its edges exactly as a whole-frame upscale of the same picture would,
-because that is what every other player produces. Feeding ownership into the
+to round its edges exactly as a whole-frame upscale of the same picture would --
+where the picture is the content on nothing in front of a background, see the
+invariant above. Feeding ownership into the
 comparison breaks that along every layer boundary: black *outside* the layer and
 black *inside* it stop comparing equal, so Scale2x's `b == h` guard — the thing
 that preserves a glyph pixel sitting on the boundary — no longer fires and the
@@ -998,6 +1014,14 @@ the top of a dynamic zone lost its top row, on both the top and bottom edges of
 the zone. It is also why the SD static render must always run. Skipping it when
 HD statics cover it looks like free work to save, but it leaves `frame32`
 incomplete, which is what forced the tagged key in the first place.
+
+The one picture the content selects on that is not `frame32` itself is the same
+picture with the background taken out (`upscaleBackgroundFreeFrame`, see
+"Selection and persistence"). It is a key, not a colour: 0 where the background
+shows, which is also what libframeutil reads outside the frame, and the colour
+plus one everywhere else, so black content is still content. Everything the
+background shows is 0, inside the layer and outside it alike, so the guard
+still fires.
 
 **Let the selected source decide painting, not the centre pixel.** If the
 selection lands on an unowned pixel the destination is left to the HD layer —
@@ -1013,7 +1037,10 @@ bright edge paint over the HD content beside it — Iron Man's settings screen,
 where the highlighted border of the active tab bled into the letter next to it.
 Both tests are needed, and they answer different questions: the selected source
 decides whether the boundary rounds, the destination's own source decides
-whether the layer may paint there at all. An editor upscaling the whole frame
+whether the layer may paint there at all. The background is not content to
+protect, though: where the destination's own source is a pixel the background
+shows (`upscaleBackgroundMask`), the layer paints the inner corner it fills when
+scaled on black -- see "Selection and persistence". An editor upscaling the whole frame
 cannot hit this, which is why the same frame looks right there.
 
 One exception, and it is about what "HD content" means. An author who puts a
@@ -1302,29 +1329,55 @@ libframeutil can only recognize an unlit neighbour when the palette paints it
 black, so a colorization with a coloured background — `afm_113b`'s
 `BALL`/`CREDITS` caption on dark blue — silently lost the protection.
 
-The game's content in front of a background scene is scaled as on black.
-`Colorize_Framev2()` with `applySceneBackground` marks the pixels where the
-scene shows (`upscaleSceneMask`) and fills `upscaleRomReference` with the
-game frame's shades, unlit where the scene shows; until the colorize call ends
-(sprites included) `UpscaleRomFrame()` hands that to the corner rule and the
-separator filter, and the upscale selects for every pixel of the game's
-content on a copy of the picture with the scene's pixels black
-(`upscaleSceneFreeFrame`), per pixel, while the scene's own pixels keep
-selecting on their colours. Before, the content took its neighbours' colours
-from the scene -- a movie changes them every step, and with them which corners
-Scale2x rounds -- and the corner rule read the scene's marker frame in scene
-steps, so text in front of a background movie flickered
+The game's content in front of a background -- the frame's background image or
+a background scene -- is scaled as on black and then put on the background.
+`Colorize_Framev2()` marks the pixels where the background shows
+(`upscaleBackgroundMask`) and fills `upscaleRomReference` with the game frame's
+shades, unlit where the background shows; until the colorize call ends (sprites
+included) `UpscaleRomFrame()` hands that to the corner rule and the separator
+filter, and the upscale selects for every pixel of the game's content on a copy
+of the picture with the background taken out (`upscaleBackgroundFreeFrame`: 0
+there and outside the frame, the colour plus one elsewhere, so that black
+content and black shadows are not mistaken for the background), while the
+background's own pixels keep selecting on their colours. A sprite pixel drawn over the background takes its
+pixel out of the mask again. Before, the content took its neighbours' colours
+from the background. Scale2x rounds a corner only where the two pixels beside
+it match, and a picture with texture almost never matches itself, so in front
+of a background image the text came out nearly line doubled -- with an HD
+background just as without, since the original-resolution background is what
+the selection read (`upscale/background_keeps_dynamic_shape`). In front of a
+movie, which changes those colours every step, the text flickered, and the
+corner rule read the scene's marker frame in scene steps
 (`upscale/background_scene_keeps_text_shape`). Not for an `is256x64` project,
-whose ROM frame is not laid out as the plane is.
+whose ROM frame is not laid out as the plane is. A whole-frame upscale computes
+the source indices for both pictures in one pass each
+(`upscaleIndexPlane`, `upscaleBackgroundFreeIndexPlane`).
 
 Where a corner of the scaled layer selects a pixel outside the layer, the HD
 content there stands, and where the HD plane is black the layer keeps its own
-pixel. Behind a background scene that question is not asked of the plane, which
-holds the scene's picture of the step or the step before's output: where the
-selected pixel is one the scene shows (`upscaleSceneMask`), the corner rounds
-to the scene in every step. Asking the plane let a dark movie decide, and the
-corners of text in a dynamic zone over a frame with a black HD picture
-flickered (`upscale/background_scene_rounds_zone_corners`). The colorize call
+pixel. Where the selected pixel is one the background shows
+(`upscaleBackgroundMask`), that question is not asked of the plane: the corner
+rounds to the background. Behind a scene the plane holds the scene's picture of
+the step or the step before's output, so asking it let a dark movie decide, and
+the corners of text in a dynamic zone over a frame with a black HD picture
+flickered (`upscale/background_scene_rounds_zone_corners`).
+
+Scaled on black, the content also fills the inner corners of its diagonals:
+the destination pixel beside each step takes the content's colour, and its own
+source is the background. Over HD content the layer does not own the
+background, so those pixels were left to the HD plane and every diagonal kept
+its steps. Where the destination's own source is a pixel the background shows,
+the layer now selects on the background-free picture and paints the pixel when
+that lands on a pixel the layer owns, black ones included. A filled pixel
+carries its source's dyna layer into `hdDynaLayerMap`, so the dynamic shadows
+generated afterwards follow the filled shape; the original-resolution shadows
+are never in the picture the upscale reads (see "Dynamic shadows"). It
+records what the HD plane held there (`upscaleFillMarked`, `upscaleFillUnderlay` and its rotation entries,
+`upscaleFillColour`): a sprite's bounded pass that no longer fills such a pixel
+puts the HD plane's pixel back, unless something drew over the fill since --
+otherwise the frame's fill would stay as a speck of the text the sprite replaced
+(`upscale/sprite_region_restores_background_fill`). The marks are cleared with
+the coverage mask at the start of every layer-mode frame. The colorize call
 that starts the scene colorizes the scene's first frame inside the frame's own
 call; the inner call gives the outer one its `romFrameForUpscale` and
 `upscaleRomOverride` back when it returns, so the frame's own upscale is judged

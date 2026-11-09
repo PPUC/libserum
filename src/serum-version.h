@@ -2,7 +2,7 @@
 
 #define SERUM_VERSION_MAJOR 2         // X Digits
 #define SERUM_VERSION_MINOR 99        // Max 2 Digits
-#define SERUM_VERSION_PATCH 16        // Max 2 Digits
+#define SERUM_VERSION_PATCH 17        // Max 2 Digits
 #define SERUM_CONCENTRATE_VERSION 20  // Max 2 Digits
 // The newest cROMc version libserum 2.8.2 writes. A cROMc of this version or
 // older is read; the development versions after it, up to
