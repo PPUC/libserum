@@ -5917,6 +5917,27 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
         upscaleBackgroundMask[pixel] = 1;
       }
     };
+    // Draw the background at pixel tk of row tj, column ti: the scene's picture
+    // of the step, or the frame's background image with its colour rotation.
+    // False where the image is only a placeholder: nothing is drawn, and the
+    // caller decides what the pixel shows.
+    const auto drawBackground = [&](uint16_t tk) {
+      if (applySceneBackground) {
+        pfr[tk] = GetSceneBackgroundPixel(ti, tj, g_serumData.fwidth,
+                                          g_serumData.fheight);
+      } else if (!suppressFrameBackgroundImage) {
+        pfr[tk] = frameBackground[tk];
+        if (ColorInRotationOnPlane(originalPlaneRotates, IDfound, pfr[tk],
+                                   &prot[tk * 2], &prot[tk * 2 + 1], false))
+          pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
+                        (cshft[prot[tk * 2]] + prot[tk * 2 + 1]) %
+                            prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
+      } else {
+        return false;
+      }
+      backgroundShows(tk);
+      return true;
+    };
     memset(isdynapix, 0, g_serumData.fheight * g_serumData.fwidth);
     if (layerMode) ResetScaledLayerCoverage();
     for (tj = 0; tj < g_serumData.fheight; tj++) {
@@ -5933,23 +5954,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
             (frameBackgroundMask[tk] > 0) && !unlitDynamicKeepsColour) {
           if (isdynapix[tk] == 0 && sdRendersStatics) {
             if (sdOwnsStatics) MarkScaledLayer(tk);
-            if (applySceneBackground) {
-              pfr[tk] = GetSceneBackgroundPixel(ti, tj, g_serumData.fwidth,
-                                                g_serumData.fheight);
-              backgroundShows(tk);
-            } else if (!suppressFrameBackgroundImage) {
-              pfr[tk] = frameBackground[tk];
-              backgroundShows(tk);
-              if (ColorInRotationOnPlane(originalPlaneRotates, IDfound, pfr[tk],
-                                         &prot[tk * 2], &prot[tk * 2 + 1],
-                                         false))
-                pfr[tk] =
-                    prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                        (cshft[prot[tk * 2]] + prot[tk * 2 + 1]) %
-                            prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
-            } else {
-              // Keep current output pixel: background image is a placeholder.
-            }
+            // Behind a placeholder the pixel keeps what the plane holds.
+            drawBackground(tk);
           }
         } else {
           if (!frameHasDynamic || frameDynaActive[tk] == 0) {
@@ -5985,26 +5991,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
               if (replaceDynamicBlackContent && dynamicColor == 0 &&
                   hasBackground && frameBackgroundMask[tk] > 0) {
                 dynamicBlackSuppressed = true;
-                if (isdynapix[tk] == 0) {
-                  if (applySceneBackground) {
-                    pfr[tk] = GetSceneBackgroundPixel(
-                        ti, tj, g_serumData.fwidth, g_serumData.fheight);
-                    backgroundShows(tk);
-                  } else if (!suppressFrameBackgroundImage) {
-                    pfr[tk] = frameBackground[tk];
-                    backgroundShows(tk);
-                    if (ColorInRotationOnPlane(originalPlaneRotates, IDfound,
-                                               pfr[tk], &prot[tk * 2],
-                                               &prot[tk * 2 + 1], false))
-                      pfr[tk] =
-                          prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                              (cshft[prot[tk * 2]] + prot[tk * 2 + 1]) %
-                                  prt[prot[tk * 2] *
-                                      MAX_LENGTH_COLOR_ROTATION]];
-                  } else {
-                    dynamicBlackSuppressed = false;
-                  }
-                }
+                // Behind a placeholder the pixel keeps its dynamic colour.
+                if (isdynapix[tk] == 0 && !drawBackground(tk))
+                  dynamicBlackSuppressed = false;
               }
               if (!dynamicBlackSuppressed) {
                 // In layer mode the shadow is only recorded: the extra
@@ -6120,6 +6109,25 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
       sceneBackgroundWidth = g_serumData.fwidth_extra;
       sceneBackgroundHeight = g_serumData.fheight_extra;
     }
+    // Draw the background at pixel tk of row tj, column ti, as the original
+    // plane's pass does with its own (drawBackground there). Nothing is
+    // upscaled from this plane, so nothing is marked.
+    const auto drawBackgroundExtra = [&](uint16_t tk) {
+      if (applySceneBackground) {
+        pfr[tk] = GetSceneBackgroundPixel(ti, tj, g_serumData.fwidth_extra,
+                                          g_serumData.fheight_extra);
+      } else if (!suppressFrameBackgroundImage) {
+        pfr[tk] = frameBackgroundExtra[tk];
+        if (ColorInRotationOnPlane(extraPlaneRotates, IDfound, pfr[tk],
+                                   &prot[tk * 2], &prot[tk * 2 + 1], true))
+          pfr[tk] = prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
+                        (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
+                            prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
+      } else {
+        return false;
+      }
+      return true;
+    };
     memset(isdynapix, 0, g_serumData.fheight_extra * g_serumData.fwidth_extra);
     const bool upscaleExtra = ExtraPlaneNeedsUpscaling();
     const bool extraIsNative = ExtraPlaneIsNative();
@@ -6157,24 +6165,8 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
                 0;
         if (hasBackground && (srcShade == 0 || srcIsDynamicZone) &&
             (frameBackgroundMaskExtra[tk] > 0) && !unlitDynamicKeepsColour) {
-          if (isdynapix[tk] == 0) {
-            if (applySceneBackground) {
-              pfr[tk] = GetSceneBackgroundPixel(
-                  ti, tj, g_serumData.fwidth_extra, g_serumData.fheight_extra);
-            } else if (!suppressFrameBackgroundImage) {
-              pfr[tk] = frameBackgroundExtra[tk];
-              if (ColorInRotationOnPlane(extraPlaneRotates, IDfound, pfr[tk],
-                                         &prot[tk * 2], &prot[tk * 2 + 1],
-                                         true)) {
-                pfr[tk] =
-                    prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                        (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                            prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION]];
-              }
-            } else {
-              // Keep current output pixel: background image is a placeholder.
-            }
-          }
+          // Behind a placeholder the pixel keeps what the plane holds.
+          if (isdynapix[tk] == 0) drawBackgroundExtra(tk);
         } else {
           if (!frameHasDynamicExtra || frameDynaExtraActive[tk] == 0) {
             if (isdynapix[tk] == 0) {
@@ -6207,26 +6199,9 @@ void Colorize_Framev2(uint8_t* frame, uint32_t IDfound,
               if (replaceDynamicBlackContent && dynamicColor == 0 &&
                   hasBackground && frameBackgroundMaskExtra[tk] > 0) {
                 dynamicBlackSuppressed = true;
-                if (isdynapix[tk] == 0) {
-                  if (applySceneBackground) {
-                    pfr[tk] = GetSceneBackgroundPixel(
-                        ti, tj, g_serumData.fwidth_extra,
-                        g_serumData.fheight_extra);
-                  } else if (!suppressFrameBackgroundImage) {
-                    pfr[tk] = frameBackgroundExtra[tk];
-                    if (ColorInRotationOnPlane(extraPlaneRotates, IDfound,
-                                               pfr[tk], &prot[tk * 2],
-                                               &prot[tk * 2 + 1], true)) {
-                      pfr[tk] =
-                          prt[prot[tk * 2] * MAX_LENGTH_COLOR_ROTATION + 2 +
-                              (prot[tk * 2 + 1] + cshft[prot[tk * 2]]) %
-                                  prt[prot[tk * 2] *
-                                      MAX_LENGTH_COLOR_ROTATION]];
-                    }
-                  } else {
-                    dynamicBlackSuppressed = false;
-                  }
-                }
+                // Behind a placeholder the pixel keeps its dynamic colour.
+                if (isdynapix[tk] == 0 && !drawBackgroundExtra(tk))
+                  dynamicBlackSuppressed = false;
               }
               if (!dynamicBlackSuppressed) {
                 CheckDynaShadow(pfr, prot, frameShadowDirExtra,
