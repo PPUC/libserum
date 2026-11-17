@@ -368,53 +368,16 @@ where every colorized frame genuinely differs, nothing changes at all.
 
 ## Rotation Scenes
 
-For `Serum v2`, scenes are authored in the editor, which may import them from a
-`*.pup.csv`, and stored in the `*.cROMc`. `Serum_Load(...)` reads no
-`*.pup.csv`; the format below is what the editor imports and what
-`Serum_LoadFromSource(...)` and `Serum_Scene_ParseCSV(...)` take.
+For `Serum v2`, scenes are authored in the editor (PPUC Colorizing DMD) and
+stored in the colorization; libserum reads no `*.pup.csv`. How a scene is
+encoded there is internal to the editor and libserum and changes with the cROM
+format version; it is not a syntax to write by hand. The editor's handbook
+describes the scene settings.
 
-Format of a PUP scene line:
-
-```text
-1: PUP scene ID
-2: number of frames
-3: duration of each frame
-4: 0 - not interruptable, 1 - interruptable by frame match or PUP event
-5: 0 - start after frame duration, 1 - start immediately, replacing the triggering frame
-   background scenes do not replace the triggering frame; instead the first
-   background scene frame is prepared immediately and the triggering normal
-   frame still renders in the foreground
-6: 0 - play once, 1 - loop, >= 2 - repeat x times
-7: 0 - no frame groups, >= 2 - create x frame groups
-8: 0 - play frame group in order, 1 - play random frame group
-9: 0 - no autostart, >= 1 - start this scene after x seconds of inactivity
-   if scene flag 0 is used for a non-interruptable scene, this value is used as
-   end-hold duration in seconds instead
-10: scene flags
-   the finish behavior is selected by the low bits: 0, 1 or 2
-   0 - default: keep the last scene frame visible when the scene finishes
-       until a new normal frame is identified
-       if that next identified normal frame would immediately retrigger the
-       same scene, the scene is not restarted and the preserved last scene
-       frame remains visible
-   1 - black screen when scene finished
-   2 - show last frame before scene started when scene finished
-   4 - run scene as background
-       after a background scene finishes with flag 0, its last scene frame
-       remains visible in the background until a newly identified normal frame
-       stops that background state; same-trigger continuation does not clear it
-   8 - replace static content with background scene, only dynamic zones,
-       sprites and shadows stay in the foreground
-  16 - continue scene at previous frame when interrupted for less than 8s
-  32 - with flag 4, replace dynamic-zone pixels whose selected dynamic color is
-       black with the background scene; these pixels do not generate dynamic
-       shadows and do not replace already-written dynamic shadow pixels;
-       unlit dynamic-zone pixels whose dynamic color for shade 0 is not black
-       keep that color instead of showing the background scene
-       and cast dynamic shadows like lit dynamic content
-```
-
-Positions `4` to `10` are optional. If not provided, the default is `0`.
+The editor can import the `*.pup.csv` of an older colorization once, when it
+converts that project. That import takes the format as it was; scene settings
+added since, such as playing a scene back and forth or starting another scene
+when one has played, exist only in the editor.
 
 ### Choosing the frame that triggers a scene
 
@@ -447,8 +410,8 @@ So when a scene is meant to cover the end of an animation:
   or its repeats will still interrupt the scene — and, with the trigger moved
   away, nothing will restart it.
 
-Set field `5` to `1` if the scene should replace the triggering frame at once
-rather than after its frame duration.
+Set `Start immediately` in the editor if the scene should replace the
+triggering frame at once rather than after its frame duration.
 
 ## License
 
