@@ -340,6 +340,10 @@ uint8_t sceneOptionFlags = 0;
 uint32_t sceneEndHoldUntilMs = 0;
 uint32_t sceneEndHoldDurationMs = 0;
 uint32_t sceneNextFrameAtMs = 0;
+// The scene that starts when the running one has finished, -1 for none: the
+// running scene then holds its last frame (sceneEndHoldUntilMs) instead of its
+// finish mode.
+int32_t sceneFollowUpId = -1;
 uint8_t sceneFrame[256 * 64] = {0};
 uint8_t lastFrame[256 * 64] = {0};
 uint32_t lastFrameId = 0;  // last frame ID identified
@@ -599,6 +603,9 @@ static bool IsFullBlackFrame(const uint8_t* frame, uint32_t size);
 static void ConfigureSceneEndHold(uint16_t sceneId, bool interruptable,
                                   uint8_t sceneOptions);
 static void ForceNormalFrameRefreshAfterSceneEnd(void);
+static bool StartScene(uint16_t sceneId, uint32_t now);
+// Starts the scene that follows the one that has just finished, if any.
+static bool StartFollowUpScene(uint32_t now);
 static void ResetNotice(void);
 // What the signature of the loaded cROMc says (see "Signed colorizations").
 static serum_signing::CheckResult g_authenticity;
@@ -1920,6 +1927,7 @@ void Serum_free(void) {
   sceneInterruptable = false;
   sceneStartImmediately = false;
   sceneRepeatCount = 0;
+  sceneFollowUpId = -1;
   sceneOptionFlags = 0;
   sceneIsLastBackgroundFrame = false;
   lastFrameId = 0;
@@ -2056,6 +2064,10 @@ uint32_t calc_crc32(uint8_t* source, uint8_t mask, uint32_t n, uint8_t Shape) {
 //   colorization text: uint32 byte count, then UTF-8 text: the author, the
 //            license and the terms of use, stored readable in the cROMc
 //            header (SerumData::colorizationText).
+//   follow-up scenes: uint32 count, per scene uint16 scene ID and uint16 ID of
+//            the scene that starts when it has finished
+//            (SceneGenerator::setSceneNext()); both are scenes of the block,
+//            not the same.
 // Bytes after these are ignored, so fields can be appended to the payload.
 static constexpr uint32_t kCromSettingsMagic = 0x31584353;  // "SCX1"
 static constexpr uint32_t kCromSettingsScenes = 1;
@@ -2071,6 +2083,7 @@ static constexpr uint32_t kCromSettingsSceneVariants = 128;
 static constexpr uint32_t kCromSettingsSpriteOffsets = 256;
 static constexpr uint32_t kCromSettingsNoticeFrame = 512;
 static constexpr uint32_t kCromSettingsColorizationText = 1024;
+static constexpr uint32_t kCromSettingsSceneFollowUps = 2048;
 static constexpr uint32_t kCromSettingsSpriteOffsetBytes = 10;
 static constexpr uint32_t kCromSettingsLightEffectBytes = 24;
 static constexpr uint32_t kCromSettingsLightActionBytes = 8;
@@ -2339,6 +2352,18 @@ static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
     g_serumData.colorizationText.assign(
         reinterpret_cast<const char*>(payload.data()) + offset, bytes);
     offset += bytes;
+  }
+  if (contents & kCromSettingsSceneFollowUps) {
+    uint32_t count = 0;
+    if (!take(&count, sizeof(count)) ||
+        (uint64_t)count * 4 > payload.size() - offset)
+      return false;
+    for (uint32_t i = 0; i < count; ++i) {
+      uint16_t sceneId = 0, nextSceneId = 0;
+      if (!take(&sceneId, 2) || !take(&nextSceneId, 2) ||
+          !g_serumData.sceneGenerator->setSceneNext(sceneId, nextSceneId))
+        return false;
+    }
   }
   return true;
 }
@@ -7265,6 +7290,8 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
               }
               ConfigureSceneEndHold(lastTriggerID, sceneInterruptable,
                                     sceneOptionFlags);
+              sceneFollowUpId =
+                  g_serumData.sceneGenerator->nextSceneId(lastTriggerID);
               // Log(DMDUtil_LogLevel_DEBUG, "Serum: trigger ID %lu found in
               // scenes, frame count=%d, duration=%dms",
               //     m_pSerum->triggerID, sceneFrameCount,
@@ -7539,6 +7566,8 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
               sceneStartImmediately, sceneRepeatCount, sceneOptionFlags)) {
         ConfigureSceneEndHold(g_serumData.sceneGenerator->getAutoStartSceneId(),
                               sceneInterruptable, sceneOptionFlags);
+        sceneFollowUpId = g_serumData.sceneGenerator->nextSceneId(
+            g_serumData.sceneGenerator->getAutoStartSceneId());
         mySerum.rotationtimer = g_serumData.sceneGenerator->getAutoStartTimer();
         rotationIsScene = true;
       }
@@ -8254,33 +8283,19 @@ uint32_t Serum_RenderScene(void) {
           sceneCurrentFrame, sceneFrameCount, sceneDurationPerFrame,
           sceneOptionFlags, sceneInterruptable, sceneStartImmediately,
           sceneRepeatCount);
-      sceneFrameCount = 0;
-      mySerum.rotationtimer = 0;
-      ForceNormalFrameRefreshAfterSceneEnd();
-      const uint8_t sceneFinishMode =
-          sceneOptionFlags & FLAG_SCENE_FINISH_MODE_MASK;
+      // A scene that follows starts in place of the finish mode and shows its
+      // first frame now, below.
+      if (!StartFollowUpScene(now)) {
+        sceneFrameCount = 0;
+        mySerum.rotationtimer = 0;
+        ForceNormalFrameRefreshAfterSceneEnd();
+        const uint8_t sceneFinishMode =
+            sceneOptionFlags & FLAG_SCENE_FINISH_MODE_MASK;
 
-      switch (sceneFinishMode) {
-        case FLAG_SCENE_BLACK_WHEN_FINISHED:
-          sceneIsLastForegroundFrame = false;
-          sceneIsLastBackgroundFrame = false;
-          if (mySerum.frame32)
-            memset(mySerum.frame32, 0, 32 * OriginalPlaneWidth());
-          if (mySerum.frame64) {
-            memset(mySerum.frame64, 0, 64 * mySerum.width64);
-            ExtraPlaneNoLongerDerived();
-          }
-          ReportedOutputNoLongerOnDisplay();
-          FinishProfileRenderedFrameOperationMaybe();
-          break;
-
-        case FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED:
-          sceneIsLastForegroundFrame = false;
-          sceneIsLastBackgroundFrame = false;
-          if (lastfound < MAX_NUMBER_FRAMES &&
-              FrameHasRenderableContent(lastfound)) {
-            Serum_ColorizeWithMetadatav2(lastFrame);
-          } else {
+        switch (sceneFinishMode) {
+          case FLAG_SCENE_BLACK_WHEN_FINISHED:
+            sceneIsLastForegroundFrame = false;
+            sceneIsLastBackgroundFrame = false;
             if (mySerum.frame32)
               memset(mySerum.frame32, 0, 32 * OriginalPlaneWidth());
             if (mySerum.frame64) {
@@ -8289,27 +8304,45 @@ uint32_t Serum_RenderScene(void) {
             }
             ReportedOutputNoLongerOnDisplay();
             FinishProfileRenderedFrameOperationMaybe();
-          }
-          break;
-
-        case 0:  // keep the last frame of the scene
-        default:
-          if (sceneEndHoldDurationMs > 0 && !sceneInterruptable) {
-            // autoStart+flag0 for non-interruptable scene means timed
-            // end-hold.
             break;
-          }
-          if (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) {
-            sceneIsLastBackgroundFrame = true;
-            sceneIsLastForegroundFrame = false;
-          } else {
-            sceneIsLastForegroundFrame = true;
-            sceneIsLastBackgroundFrame = false;
-          }
-          break;
-      }
 
-      return finishSceneProfile(FLAG_RETURNED_V2_SCENE);
+          case FLAG_SCENE_SHOW_PREVIOUS_FRAME_WHEN_FINISHED:
+            sceneIsLastForegroundFrame = false;
+            sceneIsLastBackgroundFrame = false;
+            if (lastfound < MAX_NUMBER_FRAMES &&
+                FrameHasRenderableContent(lastfound)) {
+              Serum_ColorizeWithMetadatav2(lastFrame);
+            } else {
+              if (mySerum.frame32)
+                memset(mySerum.frame32, 0, 32 * OriginalPlaneWidth());
+              if (mySerum.frame64) {
+                memset(mySerum.frame64, 0, 64 * mySerum.width64);
+                ExtraPlaneNoLongerDerived();
+              }
+              ReportedOutputNoLongerOnDisplay();
+              FinishProfileRenderedFrameOperationMaybe();
+            }
+            break;
+
+          case 0:  // keep the last frame of the scene
+          default:
+            if (sceneEndHoldDurationMs > 0 && !sceneInterruptable) {
+              // autoStart+flag0 for non-interruptable scene means timed
+              // end-hold.
+              break;
+            }
+            if (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) {
+              sceneIsLastBackgroundFrame = true;
+              sceneIsLastForegroundFrame = false;
+            } else {
+              sceneIsLastForegroundFrame = true;
+              sceneIsLastBackgroundFrame = false;
+            }
+            break;
+        }
+
+        return finishSceneProfile(FLAG_RETURNED_V2_SCENE);
+      }
     }
 
     bool renderedFromDirectTriplet = false;
@@ -8399,6 +8432,18 @@ uint32_t Serum_RenderScene(void) {
                          sceneDurationPerFrame, sceneOptionFlags,
                          sceneInterruptable, sceneStartImmediately,
                          sceneRepeatCount);
+      if (sceneFollowUpId >= 0) {
+        // The last frame shows for its time (or the end hold), then the scene
+        // that follows starts.
+        const uint32_t holdMs = std::max<uint32_t>(
+            1, sceneEndHoldDurationMs > 0 ? sceneEndHoldDurationMs
+                                          : sceneDurationPerFrame);
+        sceneEndHoldUntilMs = now + holdMs;
+        mySerum.rotationtimer = holdMs;
+        return finishSceneProfile((mySerum.rotationtimer & 0xffff) |
+                                  BuildCurrentFrameChangedFlags() |
+                                  FLAG_RETURNED_V2_SCENE);
+      }
       if (sceneEndHoldDurationMs > 0) {
         sceneEndHoldUntilMs = now + sceneEndHoldDurationMs;
         mySerum.rotationtimer = sceneEndHoldDurationMs;
@@ -8718,22 +8763,10 @@ SERUM_API bool Serum_Scene_GenerateFrame(uint16_t sceneId, uint16_t frameIndex,
   SERUM_API_GUARD_END("Serum_Scene_GenerateFrame", false)
 }
 
-SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
-  SERUM_API_GUARD_START("Serum_Scene_Trigger")
-  if (!g_serumData.sceneGenerator || g_serumData.SerumVersion != SERUM_V2) {
-    return 0;
-  }
-
-  // Do not interrupt an already running non-interruptable scene, unless it's
-  // the same scene being retriggered and we are allowed to resume it.
-  if (sceneFrameCount > 0 &&
-      (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
-      !sceneInterruptable && sceneId != lastTriggerID) {
-    uint32_t wait =
-        mySerum.rotationtimer ? mySerum.rotationtimer : sceneDurationPerFrame;
-    return (wait & 0xffff) | FLAG_RETURNED_V2_SCENE;
-  }
-
+// Makes sceneId the running scene, at its first frame (or where a resumed run
+// stopped), and reports its trigger. False, changing nothing, for a scene the
+// colorization does not have.
+static bool StartScene(uint16_t sceneId, uint32_t now) {
   uint16_t frameCount = 0;
   uint16_t durationPerFrame = 0;
   bool interruptable = false;
@@ -8744,10 +8777,8 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
   if (!g_serumData.sceneGenerator->getSceneInfo(
           sceneId, frameCount, durationPerFrame, interruptable,
           startImmediately, repeat, options)) {
-    return 0;
+    return false;
   }
-
-  uint32_t now = GetMonotonicTimeMs();
 
   if (sceneFrameCount > 0 &&
       (sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
@@ -8795,6 +8826,44 @@ SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
   mySerum.triggerID = sceneId;
   if (keepTriggersInternal || mySerum.triggerID >= PUP_TRIGGER_MAX_THRESHOLD) {
     mySerum.triggerID = 0xffffffff;
+  }
+
+  sceneFollowUpId = g_serumData.sceneGenerator->nextSceneId(sceneId);
+  return true;
+}
+
+static bool StartFollowUpScene(uint32_t now) {
+  if (sceneFollowUpId < 0) return false;
+  const uint16_t followUp = static_cast<uint16_t>(sceneFollowUpId);
+  sceneFollowUpId = -1;
+  sceneFrameCount = 0;
+  if (!StartScene(followUp, now)) return false;
+  DebugLogSceneEvent("follow-up", followUp, sceneCurrentFrame, sceneFrameCount,
+                     sceneDurationPerFrame, sceneOptionFlags,
+                     sceneInterruptable, sceneStartImmediately,
+                     sceneRepeatCount);
+  return true;
+}
+
+SERUM_API uint32_t Serum_Scene_Trigger(uint16_t sceneId) {
+  SERUM_API_GUARD_START("Serum_Scene_Trigger")
+  if (!g_serumData.sceneGenerator || g_serumData.SerumVersion != SERUM_V2) {
+    return 0;
+  }
+
+  // Do not interrupt an already running non-interruptable scene, unless it's
+  // the same scene being retriggered and we are allowed to resume it.
+  if (sceneFrameCount > 0 &&
+      (sceneCurrentFrame < sceneFrameCount || sceneEndHoldUntilMs > 0) &&
+      !sceneInterruptable && sceneId != lastTriggerID) {
+    uint32_t wait =
+        mySerum.rotationtimer ? mySerum.rotationtimer : sceneDurationPerFrame;
+    return (wait & 0xffff) | FLAG_RETURNED_V2_SCENE;
+  }
+
+  const uint32_t now = GetMonotonicTimeMs();
+  if (!StartScene(sceneId, now)) {
+    return 0;
   }
 
   if (sceneStartImmediately || ((sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) ==

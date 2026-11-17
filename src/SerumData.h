@@ -842,12 +842,16 @@ class SerumData {
       if (concentrateFileVersion >= 10) {
         ar(hasLights, lightEffects, lightFrames);
         for (SerumLightAction &action : lightDefaults) ar(action);
-        std::vector<std::pair<uint16_t, uint16_t>> sceneBases;
+        std::vector<std::pair<uint16_t, uint16_t>> sceneBases, sceneNexts;
         if (sceneGenerator) {
           for (const SceneData &scene : sceneGenerator->getSceneData()) {
             if (scene.baseSceneId >= 0) {
               sceneBases.emplace_back(scene.sceneId,
                                       static_cast<uint16_t>(scene.baseSceneId));
+            }
+            if (scene.nextSceneId >= 0) {
+              sceneNexts.emplace_back(scene.sceneId,
+                                      static_cast<uint16_t>(scene.nextSceneId));
             }
           }
         }
@@ -856,7 +860,8 @@ class SerumData {
         ar(originalOnlySets, sceneFramesFromColorization, sceneFrames,
            dofFrames, pupTriggerIDs, monochromeTriggerIDs, sceneBases,
            spriteOffsets, cframes_v2.differenceBases(),
-           cframes_v2_extra.differenceBases(), noticeFrameId, noticeOriginal);
+           cframes_v2_extra.differenceBases(), noticeFrameId, noticeOriginal,
+           sceneNexts);
       } else if (cframes_v2.hasDifferences() ||
                  cframes_v2_extra.hasDifferences()) {
         throw std::runtime_error(
@@ -887,15 +892,22 @@ class SerumData {
       if (concentrateFileVersion >= 10) {
         ar(hasLights, lightEffects, lightFrames);
         for (SerumLightAction &action : lightDefaults) ar(action);
-        std::vector<std::pair<uint16_t, uint16_t>> sceneBases;
+        std::vector<std::pair<uint16_t, uint16_t>> sceneBases, sceneNexts;
         std::vector<std::pair<uint32_t, uint32_t>> bases, basesExtra;
         ar(originalOnlySets, sceneFramesFromColorization, sceneFrames,
            dofFrames, pupTriggerIDs, monochromeTriggerIDs, sceneBases,
-           spriteOffsets, bases, basesExtra, noticeFrameId, noticeOriginal);
+           spriteOffsets, bases, basesExtra, noticeFrameId, noticeOriginal,
+           sceneNexts);
         for (const auto &base : sceneBases) {
           if (!sceneGenerator ||
               !sceneGenerator->setSceneBase(base.first, base.second)) {
             throw std::runtime_error("Invalid scene variant in cROMc");
+          }
+        }
+        for (const auto &next : sceneNexts) {
+          if (!sceneGenerator ||
+              !sceneGenerator->setSceneNext(next.first, next.second)) {
+            throw std::runtime_error("Invalid follow-up scene in cROMc");
           }
         }
         cframes_v2.setDifferenceBases(bases);

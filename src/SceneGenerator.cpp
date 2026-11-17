@@ -236,6 +236,27 @@ bool SceneGenerator::setSceneBase(uint16_t sceneId, uint16_t baseSceneId) {
   return true;
 }
 
+bool SceneGenerator::setSceneNext(uint16_t sceneId, uint16_t nextSceneId) {
+  const auto find = [this](uint16_t id) {
+    return std::find_if(
+        m_sceneData.begin(), m_sceneData.end(),
+        [id](const SceneData &data) { return data.sceneId == id; });
+  };
+  auto scene = find(sceneId);
+  if (sceneId == nextSceneId || scene == m_sceneData.end() ||
+      find(nextSceneId) == m_sceneData.end())
+    return false;
+  scene->nextSceneId = nextSceneId;
+  return true;
+}
+
+int32_t SceneGenerator::nextSceneId(uint16_t sceneId) const {
+  for (const SceneData &data : m_sceneData) {
+    if (data.sceneId == sceneId) return data.nextSceneId;
+  }
+  return -1;
+}
+
 uint16_t SceneGenerator::framesSceneId(uint16_t sceneId) const {
   for (const SceneData &data : m_sceneData) {
     if (data.sceneId == sceneId) {

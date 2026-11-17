@@ -36,6 +36,10 @@ struct SceneData {
   // are the base's (setSceneBase()). Not in serialize(): the cROMc keeps the
   // bases apart (concentrate version 16).
   int32_t baseSceneId = -1;
+  // The scene that starts when this one has finished (-1: none), in place of
+  // its finish mode (setSceneNext()). Not in serialize(): the cROMc keeps the
+  // follow-ups apart (concentrate version 21).
+  int32_t nextSceneId = -1;
   // Serialisation using cereal
   template <class Archive>
   void serialize(Archive &ar) {
@@ -94,6 +98,11 @@ class SceneGenerator {
   bool setSceneBase(uint16_t sceneId, uint16_t baseSceneId);
   // The scene whose frames sceneId plays: its base, or itself.
   uint16_t framesSceneId(uint16_t sceneId) const;
+  // Makes nextSceneId start when sceneId has finished. False when either
+  // scene is missing or they are the same.
+  bool setSceneNext(uint16_t sceneId, uint16_t nextSceneId);
+  // The scene that follows sceneId, -1 for none.
+  int32_t nextSceneId(uint16_t sceneId) const;
 
  private:
   void Log(const char *format, ...);

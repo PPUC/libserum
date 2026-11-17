@@ -357,7 +357,9 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
   from; a frame beyond the frames fails the load. Last comes the
   colorization's text (`kCromSettingsColorizationText`, 1024): its author,
   license and terms of use as UTF-8, which the cROMc keeps readable in its
-  header.
+  header. Then the follow-up scenes (`kCromSettingsSceneFollowUps`, 2048):
+  pairs of a scene and the scene that starts when it has finished, both
+  scenes of the block, not the same (see "Scene playback and options").
   A block that is cut short or malformed fails the load.
 - Scenes from the block set `scenesFromColorization`, scaling settings set
   `scalingFromColorization` (also when the block holds zero scenes). Either
@@ -1416,6 +1418,23 @@ fallback). The base is a scene without a base. Variants come with the settings
 block (`kCromSettingsSceneVariants`, 128) and are stored in the cROMc apart from
 `SceneData` (concentrate version 16), as pup.csv has no column for them.
 
+Follow-up scenes: a scene can name the scene that starts when it has finished
+(`SceneData::nextSceneId`, `SceneGenerator::setSceneNext()`), so that scenes of
+different speeds play one after the other without a frame triggering the
+second. Every start of a scene (a frame trigger, the auto-start scene,
+`Serum_Scene_Trigger()`, through `StartScene()` where it can) notes its
+follow-up in `sceneFollowUpId`. When its last run has shown its last frame,
+`Serum_RenderScene()` holds that frame for the scene's frame duration (its end
+hold instead, if it has one) in `sceneEndHoldUntilMs`, as the frame of a
+running scene: a scene that cannot be interrupted still keeps normal frames
+out. When the hold has elapsed, `StartFollowUpScene()` starts the follow-up in
+place of the finish mode and renders its first frame in the same call; the
+follow-up's own settings (duration, repeat, finish mode, its own follow-up)
+apply from there. A scene stopped by a normal frame starts no follow-up.
+Follow-ups may form a cycle; a scene cannot follow itself (repeat does that).
+They come with the settings block (`kCromSettingsSceneFollowUps`, 2048) and
+are stored in the cROMc apart from `SceneData` (concentrate version 21).
+
 Flags (from `serum.h`):
 - Scene finish behavior is selected by the low finish-mode bits: `0`, `1`, or
   `2`. Other scene flags are orthogonal and may be combined with that finish
@@ -1535,16 +1554,16 @@ removed. `src/SerumSigning.h` documents the formats.
   author), `show` and `check`.
 
 ## cROMc persistence
-Current concentrate version: **20** (`SERUM_CONCENTRATE_VERSION`). libserum
+Current concentrate version: **21** (`SERUM_CONCENTRATE_VERSION`). libserum
 reads the current version and the versions libserum 2.8.2 wrote (up to 9,
 `SERUM_CONCENTRATE_VERSION_STABLE`; 6 was never stable and is refused). The
-development versions in between (10 to 19) are refused: they were written by
+development versions in between (10 to 20) are refused: they were written by
 unreleased 2.99.x builds, whose authors export the colorization again. So
 `SerumData::serialize()` knows two shapes only: up to 9, and the current one,
 which stores after the version 9 flags, in this order, the speaker lights, the
 original-only dynamic sets, the scene frames, the DOF events, the frame
 triggers, the scene variants, the sprite offsets, the frames stored as
-differences and the notice frame.
+differences, the notice frame and the follow-up scenes.
 
 The current version has the colorization's text (`colorizationText`, from the
 settings block; see "Signed colorizations") uncompressed in its header:
