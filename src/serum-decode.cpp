@@ -2068,6 +2068,12 @@ uint32_t calc_crc32(uint8_t* source, uint8_t mask, uint32_t n, uint8_t Shape) {
 //            the scene that starts when it has finished
 //            (SceneGenerator::setSceneNext()); both are scenes of the block,
 //            not the same.
+//   scene frame durations: uint32 count, per frame uint16 scene ID, uint8
+//            frame group (from 1), uint8 0, uint16 frame index, uint16
+//            duration in ms (not 0) (8 bytes): how long the frame shows when
+//            that scene plays, in place of its duration per frame
+//            (SceneGenerator::setFrameDuration()). A variant has its own,
+//            within its base's frames.
 // Bytes after these are ignored, so fields can be appended to the payload.
 static constexpr uint32_t kCromSettingsMagic = 0x31584353;  // "SCX1"
 static constexpr uint32_t kCromSettingsScenes = 1;
@@ -2084,6 +2090,8 @@ static constexpr uint32_t kCromSettingsSpriteOffsets = 256;
 static constexpr uint32_t kCromSettingsNoticeFrame = 512;
 static constexpr uint32_t kCromSettingsColorizationText = 1024;
 static constexpr uint32_t kCromSettingsSceneFollowUps = 2048;
+static constexpr uint32_t kCromSettingsSceneFrameDurations = 4096;
+static constexpr uint32_t kCromSettingsSceneFrameDurationBytes = 8;
 static constexpr uint32_t kCromSettingsSpriteOffsetBytes = 10;
 static constexpr uint32_t kCromSettingsLightEffectBytes = 24;
 static constexpr uint32_t kCromSettingsLightActionBytes = 8;
@@ -2362,6 +2370,22 @@ static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
       uint16_t sceneId = 0, nextSceneId = 0;
       if (!take(&sceneId, 2) || !take(&nextSceneId, 2) ||
           !g_serumData.sceneGenerator->setSceneNext(sceneId, nextSceneId))
+        return false;
+    }
+  }
+  if (contents & kCromSettingsSceneFrameDurations) {
+    uint32_t count = 0;
+    if (!take(&count, sizeof(count)) ||
+        (uint64_t)count * kCromSettingsSceneFrameDurationBytes >
+            payload.size() - offset)
+      return false;
+    for (uint32_t i = 0; i < count; ++i) {
+      uint16_t sceneId = 0, frameIndex = 0, durationMs = 0;
+      uint8_t group = 0, unused = 0;
+      if (!take(&sceneId, 2) || !take(&group, 1) || !take(&unused, 1) ||
+          !take(&frameIndex, 2) || !take(&durationMs, 2) ||
+          !g_serumData.sceneGenerator->setFrameDuration(sceneId, group,
+                                                        frameIndex, durationMs))
         return false;
     }
   }
@@ -7342,7 +7366,11 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                   backgroundScenePrimedThisCall = true;
                 }
               }
-              mySerum.rotationtimer = sceneDurationPerFrame;
+              // A primed background scene waits as long as its first frame
+              // shows (Serum_RenderScene() set that).
+              if (!backgroundScenePrimedThisCall) {
+                mySerum.rotationtimer = sceneDurationPerFrame;
+              }
               rotationIsScene = true;
             }
           }
@@ -8352,6 +8380,10 @@ uint32_t Serum_RenderScene(void) {
         static_cast<uint16_t>(lastTriggerID), sceneCurrentFrame,
         sceneBackward ? sceneGroup : -1, currentGroup);
     sceneGroup = currentGroup;
+    // How long this step's frame shows: its own duration, else the scene's.
+    const uint16_t shownFrameMs = g_serumData.sceneGenerator->frameDurationMs(
+        static_cast<uint16_t>(lastTriggerID), currentGroup, sceneCurrentFrame,
+        sceneDurationPerFrame);
     if (hasGroup && !g_serumData.sceneFrameIdByTriplet.empty()) {
       auto it = g_serumData.sceneFrameIdByTriplet.find(
           MakeSceneTripletKey(g_serumData.sceneGenerator->framesSceneId(
@@ -8371,8 +8403,8 @@ uint32_t Serum_RenderScene(void) {
           return finishSceneProfile(mySerum.rotationtimer |
                                     FLAG_RETURNED_V2_SCENE);
         }
-        mySerum.rotationtimer = sceneDurationPerFrame;
-        sceneNextFrameAtMs = now + sceneDurationPerFrame;
+        mySerum.rotationtimer = shownFrameMs;
+        sceneNextFrameAtMs = now + shownFrameMs;
         Serum_ColorizeWithMetadatav2Internal(sceneFrame, true, it->second);
         renderedFromDirectTriplet = true;
       }
@@ -8413,8 +8445,8 @@ uint32_t Serum_RenderScene(void) {
         return finishSceneProfile((mySerum.rotationtimer & 0xffff) |
                                   FLAG_RETURNED_V2_SCENE);
       }
-      mySerum.rotationtimer = sceneDurationPerFrame;
-      sceneNextFrameAtMs = now + sceneDurationPerFrame;
+      mySerum.rotationtimer = shownFrameMs;
+      sceneNextFrameAtMs = now + shownFrameMs;
       Serum_ColorizeWithMetadatav2(sceneFrame, true);
     } else {
       DebugLogSceneEvent("triplet-render", static_cast<uint16_t>(lastTriggerID),
@@ -8436,8 +8468,8 @@ uint32_t Serum_RenderScene(void) {
         // The last frame shows for its time (or the end hold), then the scene
         // that follows starts.
         const uint32_t holdMs = std::max<uint32_t>(
-            1, sceneEndHoldDurationMs > 0 ? sceneEndHoldDurationMs
-                                          : sceneDurationPerFrame);
+            1,
+            sceneEndHoldDurationMs > 0 ? sceneEndHoldDurationMs : shownFrameMs);
         sceneEndHoldUntilMs = now + holdMs;
         mySerum.rotationtimer = holdMs;
         return finishSceneProfile((mySerum.rotationtimer & 0xffff) |

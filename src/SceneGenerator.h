@@ -3,6 +3,7 @@
 #include <cereal/access.hpp>
 #include <cereal/types/vector.hpp>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -83,6 +84,7 @@ class SceneGenerator {
     m_autoStartTimer = 0;
     m_autoStartSceneId = 0;
     m_sceneEndHoldDurationMs.clear();
+    m_frameDurationsMs.clear();
     m_depth = 2;
     m_templateInitialized = false;
     initializeTemplate();
@@ -103,6 +105,26 @@ class SceneGenerator {
   bool setSceneNext(uint16_t sceneId, uint16_t nextSceneId);
   // The scene that follows sceneId, -1 for none.
   int32_t nextSceneId(uint16_t sceneId) const;
+  // Makes frame frameIndex of group `group` show for durationMs when sceneId
+  // plays, in place of the scene's duration per frame. A variant has durations
+  // of its own, keyed by its ID: they are not the base's. False when the scene
+  // is missing, the group or frame is beyond the scene (a variant's are its
+  // base's, so setSceneBase() comes first) or durationMs is 0.
+  bool setFrameDuration(uint16_t sceneId, uint8_t group, uint16_t frameIndex,
+                        uint16_t durationMs);
+  // How long the frame shows when sceneId plays: its own duration, else
+  // sceneDurationMs (the scene's duration per frame).
+  uint16_t frameDurationMs(uint16_t sceneId, uint8_t group, uint16_t frameIndex,
+                           uint16_t sceneDurationMs) const;
+  // Every frame duration, ordered by scene, group and frame, for the cROMc:
+  // the key is frameDurationKey().
+  const std::map<uint64_t, uint16_t> &frameDurations() const {
+    return m_frameDurationsMs;
+  }
+  static uint64_t frameDurationKey(uint16_t sceneId, uint8_t group,
+                                   uint16_t frameIndex) {
+    return ((uint64_t)sceneId << 24) | ((uint64_t)group << 16) | frameIndex;
+  }
 
  private:
   void Log(const char *format, ...);
@@ -131,4 +153,7 @@ class SceneGenerator {
   uint8_t m_autoStartTimer = 0;     // Timer for auto-start scenes
   uint16_t m_autoStartSceneId = 0;  // Scene ID to auto-start
   std::unordered_map<uint16_t, uint32_t> m_sceneEndHoldDurationMs;
+  // The frames' own durations (setFrameDuration()), by frameDurationKey(); an
+  // ordered map, so that the cROMc stores them in the same order everywhere.
+  std::map<uint64_t, uint16_t> m_frameDurationsMs;
 };

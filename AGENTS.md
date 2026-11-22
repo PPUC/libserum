@@ -360,6 +360,10 @@ writes it, so the colorization needs no `pup.csv` or `scaling.txt`.
   header. Then the follow-up scenes (`kCromSettingsSceneFollowUps`, 2048):
   pairs of a scene and the scene that starts when it has finished, both
   scenes of the block, not the same (see "Scene playback and options").
+  Then the scene frame durations (`kCromSettingsSceneFrameDurations`, 4096):
+  a scene, group, frame index and duration in ms per frame that shows for a
+  time of its own; the frame must be within the scene (a variant's within its
+  base's), the duration not 0.
   A block that is cut short or malformed fails the load.
 - Scenes from the block set `scenesFromColorization`, scaling settings set
   `scalingFromColorization` (also when the block holds zero scenes). Either
@@ -1435,6 +1439,25 @@ Follow-ups may form a cycle; a scene cannot follow itself (repeat does that).
 They come with the settings block (`kCromSettingsSceneFollowUps`, 2048) and
 are stored in the cROMc apart from `SceneData` (concentrate version 21).
 
+Frame durations: a frame of a scene can show for a time of its own instead of
+the scene's duration per frame (`SceneGenerator::setFrameDuration()`, keyed by
+scene, group and frame index). `Serum_RenderScene()` takes the duration of the
+frame it shows from `SceneGenerator::frameDurationMs()` for the running scene
+(`lastTriggerID`), falling back to `sceneDurationPerFrame`: the rotation timer
+it returns, `sceneNextFrameAtMs` and the hold of the last frame before a
+follow-up scene all use it, and so does a background scene primed by the frame
+that starts it. Played back and forth, a frame keeps its duration both ways.
+A variant has durations of its own under its own ID, not its base's: the
+editor writes each variant's durations scaled by its speed, so libserum knows
+no speed factor. The wait before the first frame of a scene that does not
+start at once stays the scene's duration. The frames `generateFrame()` makes
+for a scene without colorized frames keep the scene's duration (its own
+throttle); `generateDump()` writes the frames' durations. The durations come
+with the settings block (`kCromSettingsSceneFrameDurations`, 4096) and are
+stored in the cROMc after the follow-up scenes, ordered by key (concentrate
+version 22). Callers see nothing new: the rotation timer of each step simply
+differs from frame to frame.
+
 Flags (from `serum.h`):
 - Scene finish behavior is selected by the low finish-mode bits: `0`, `1`, or
   `2`. Other scene flags are orthogonal and may be combined with that finish
@@ -1554,16 +1577,17 @@ removed. `src/SerumSigning.h` documents the formats.
   author), `show` and `check`.
 
 ## cROMc persistence
-Current concentrate version: **21** (`SERUM_CONCENTRATE_VERSION`). libserum
+Current concentrate version: **22** (`SERUM_CONCENTRATE_VERSION`). libserum
 reads the current version and the versions libserum 2.8.2 wrote (up to 9,
 `SERUM_CONCENTRATE_VERSION_STABLE`; 6 was never stable and is refused). The
-development versions in between (10 to 20) are refused: they were written by
+development versions in between (10 to 21) are refused: they were written by
 unreleased 2.99.x builds, whose authors export the colorization again. So
 `SerumData::serialize()` knows two shapes only: up to 9, and the current one,
 which stores after the version 9 flags, in this order, the speaker lights, the
 original-only dynamic sets, the scene frames, the DOF events, the frame
 triggers, the scene variants, the sprite offsets, the frames stored as
-differences, the notice frame and the follow-up scenes.
+differences, the notice frame, the follow-up scenes and the scene frame
+durations.
 
 The current version has the colorization's text (`colorizationText`, from the
 settings block; see "Signed colorizations") uncompressed in its header:

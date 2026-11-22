@@ -862,6 +862,13 @@ class SerumData {
            spriteOffsets, cframes_v2.differenceBases(),
            cframes_v2_extra.differenceBases(), noticeFrameId, noticeOriginal,
            sceneNexts);
+        // The frames' own durations, by SceneGenerator::frameDurationKey().
+        std::vector<std::pair<uint64_t, uint16_t>> frameDurations;
+        if (sceneGenerator) {
+          frameDurations.assign(sceneGenerator->frameDurations().begin(),
+                                sceneGenerator->frameDurations().end());
+        }
+        ar(frameDurations);
       } else if (cframes_v2.hasDifferences() ||
                  cframes_v2_extra.hasDifferences()) {
         throw std::runtime_error(
@@ -908,6 +915,17 @@ class SerumData {
           if (!sceneGenerator ||
               !sceneGenerator->setSceneNext(next.first, next.second)) {
             throw std::runtime_error("Invalid follow-up scene in cROMc");
+          }
+        }
+        std::vector<std::pair<uint64_t, uint16_t>> frameDurations;
+        ar(frameDurations);
+        for (const auto &duration : frameDurations) {
+          if (!sceneGenerator ||
+              !sceneGenerator->setFrameDuration(
+                  static_cast<uint16_t>(duration.first >> 24),
+                  static_cast<uint8_t>(duration.first >> 16),
+                  static_cast<uint16_t>(duration.first), duration.second)) {
+            throw std::runtime_error("Invalid scene frame duration in cROMc");
           }
         }
         cframes_v2.setDifferenceBases(bases);

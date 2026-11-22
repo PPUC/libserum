@@ -5354,6 +5354,132 @@ static void Test_CromSettingsSceneFollowUps(void) {
   n256::Unload();
 }
 
+// A scene frame can show for a time of its own: scene 7 (two frames at
+// 100 ms) shows its first frame for 250 ms and its last for 300 ms, which is
+// also how long the last frame holds before the follow-up, scene 8, starts.
+// Scene 8 is a variant of 7 at 40 ms with durations of its own: its first
+// frame shows for 20 ms, not 250. Through a cROMc too; a duration of a frame,
+// group or scene the colorization does not have, or of 0 ms, fails the load.
+static void Test_CromSettingsSceneFrameDurations(void) {
+  const uint32_t none = 0xffffffff;
+  struct Duration {
+    uint16_t sceneId;
+    uint8_t group;
+    uint16_t frameIndex;
+    uint16_t durationMs;
+  };
+  const auto block = [none](std::vector<Duration> durations) {
+    std::vector<uint8_t> payload;
+    const auto put = [&payload](const void* data, size_t bytes) {
+      const uint8_t* p = (const uint8_t*)data;
+      payload.insert(payload.end(), p, p + bytes);
+    };
+    const auto putU32 = [&put](uint32_t value) { put(&value, 4); };
+    const auto putU16 = [&put](uint16_t value) { put(&value, 2); };
+    const auto putU8 = [&put](uint8_t value) { put(&value, 1); };
+    putU32(kCromSettingsScenes | kCromSettingsSceneFrames |
+           kCromSettingsFrameTriggers | kCromSettingsSceneVariants |
+           kCromSettingsSceneFollowUps | kCromSettingsSceneFrameDurations);
+    // Scenes 7 and 8; neither can be interrupted, neither starts at once.
+    putU32(2);
+    for (const uint16_t id : {7, 8}) {
+      putU16(id);
+      putU16(2);
+      putU16(id == 7 ? 100 : 40);
+      const uint8_t flags[7] = {0, 0, 0, 1, 0, 0, 0};
+      put(flags, sizeof(flags));
+    }
+    // Scene frames: kBackground and kScene are frames 0 and 1 of scene 7.
+    putU32(2);
+    for (const uint32_t frame :
+         {(uint32_t)n256::kBackground, (uint32_t)n256::kScene}) {
+      putU32(frame);
+      putU16(7);
+      putU16(frame == n256::kScene ? 1 : 0);
+      const uint8_t group[2] = {1, 0};
+      put(group, 2);
+    }
+    // kStatic starts scene 7.
+    putU32(1);
+    putU32(n256::kStatic);
+    putU32(none);
+    putU32(7);
+    putU32(none);
+    // Scene 8 plays the frames of 7, and follows it.
+    putU32(1);
+    putU16(8);
+    putU16(7);
+    putU32(1);
+    putU16(7);
+    putU16(8);
+    putU32((uint32_t)durations.size());
+    for (const Duration& duration : durations) {
+      putU16(duration.sceneId);
+      putU8(duration.group);
+      putU8(0);
+      putU16(duration.frameIndex);
+      putU16(duration.durationMs);
+    }
+    std::vector<uint8_t> result;
+    const uint32_t magic = kCromSettingsMagic;
+    const uint32_t size = (uint32_t)payload.size();
+    result.insert(result.end(), (const uint8_t*)&magic,
+                  (const uint8_t*)&magic + 4);
+    result.insert(result.end(), (const uint8_t*)&size,
+                  (const uint8_t*)&size + 4);
+    result.insert(result.end(), payload.begin(), payload.end());
+    return result;
+  };
+  n256::Synth s;
+  std::vector<uint8_t> crom = s.Serialize();
+  const std::vector<uint8_t> durations =
+      block({{7, 1, 0, 250}, {7, 1, 1, 300}, {8, 1, 0, 20}});
+  crom.insert(crom.end(), durations.begin(), durations.end());
+  for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+    CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
+    if (viaConcentrate) {
+      Serum_Dispose();
+      CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
+                       n256::kBothPlanes) != NULL);
+    }
+    CHECK_EQ(g_serumData.sceneGenerator->frameDurationMs(7, 1, 0, 100), 250);
+    CHECK_EQ(g_serumData.sceneGenerator->frameDurationMs(8, 1, 1, 40), 40);
+    n256::Colorize(s.Frame(n256::kStatic));
+    CHECK_EQ(lastTriggerID, 7u);
+    // The first frame shows for its 250 ms: asked again at once, the scene
+    // says to wait longer than the scene's 100 ms.
+    sceneNextFrameAtMs = 0;
+    uint32_t result = Serum_RenderScene();
+    CHECK(result & FLAG_RETURNED_V2_SCENE);
+    CHECK_EQ(mySerum.frameID, (uint32_t)n256::kBackground);
+    CHECK_EQ(mySerum.rotationtimer, 250u);
+    result = Serum_RenderScene();
+    CHECK(result & FLAG_RETURNED_V2_SCENE);
+    CHECK((result & 0xffff) > 100);
+    CHECK_EQ(sceneCurrentFrame, 1);
+    // The last frame holds for its own 300 ms before the follow-up starts.
+    sceneNextFrameAtMs = 0;
+    Serum_RenderScene();
+    CHECK_EQ(mySerum.frameID, (uint32_t)n256::kScene);
+    CHECK(sceneEndHoldUntilMs > 0);
+    CHECK_EQ(mySerum.rotationtimer, 300u);
+    // Scene 8 shows the same first frame for its own 20 ms.
+    sceneEndHoldUntilMs = 1;
+    CHECK(Serum_RenderScene() & FLAG_RETURNED_V2_SCENE);
+    CHECK_EQ(lastTriggerID, 8u);
+    CHECK_EQ(mySerum.frameID, (uint32_t)n256::kBackground);
+    CHECK_EQ(mySerum.rotationtimer, 20u);
+    Serum_Dispose();
+  }
+  for (const auto& bad : {block({{7, 1, 2, 50}}), block({{7, 2, 0, 50}}),
+                          block({{6, 1, 0, 50}}), block({{7, 1, 0, 0}})}) {
+    std::vector<uint8_t> broken = s.Serialize();
+    broken.insert(broken.end(), bad.begin(), bad.end());
+    CHECK(source::LoadCrom(broken, n256::kBothPlanes) == NULL);
+  }
+  n256::Unload();
+}
+
 // A cROMc stores each frame of a scene group after the first as the
 // difference to the frame before it, on each plane where that is smaller, and
 // reads back the frames' colours. The cROM itself has them whole. A cROMc of
@@ -6474,6 +6600,8 @@ static const TestCase kTests[] = {
     {"crom/settings_frame_triggers", Test_CromSettingsFrameTriggers},
     {"crom/settings_scene_variants", Test_CromSettingsSceneVariants},
     {"crom/settings_scene_follow_ups", Test_CromSettingsSceneFollowUps},
+    {"crom/settings_scene_frame_durations",
+     Test_CromSettingsSceneFrameDurations},
     {"crom/settings_sprite_offsets", Test_CromSettingsSpriteOffsets},
     {"source/builds_the_croms_colorization",
      Test_SourceBuildsTheCromsColorization},

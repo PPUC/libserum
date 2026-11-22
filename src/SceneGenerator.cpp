@@ -186,7 +186,9 @@ bool SceneGenerator::generateDump(const std::string &dump_filename, int id) {
     int goups = scene.frameGroups > 0 ? scene.frameGroups : 1;
     for (int group = 1; group <= goups; group++) {
       for (int frameIndex = 0; frameIndex < scene.frameCount; frameIndex++) {
-        cumulative_duration += static_cast<uint32_t>(scene.durationPerFrame);
+        cumulative_duration += frameDurationMs(
+            scene.sceneId, static_cast<uint8_t>(group),
+            static_cast<uint16_t>(frameIndex), scene.durationPerFrame);
 
         // Format as 8-digit hex with 0x prefix
         char hex_line[11];
@@ -255,6 +257,29 @@ int32_t SceneGenerator::nextSceneId(uint16_t sceneId) const {
     if (data.sceneId == sceneId) return data.nextSceneId;
   }
   return -1;
+}
+
+bool SceneGenerator::setFrameDuration(uint16_t sceneId, uint8_t group,
+                                      uint16_t frameIndex,
+                                      uint16_t durationMs) {
+  const auto scene = std::find_if(
+      m_sceneData.begin(), m_sceneData.end(),
+      [sceneId](const SceneData &data) { return data.sceneId == sceneId; });
+  if (scene == m_sceneData.end() || durationMs == 0 || group == 0 ||
+      group > std::max<uint8_t>(1, scene->frameGroups) ||
+      frameIndex >= scene->frameCount)
+    return false;
+  m_frameDurationsMs[frameDurationKey(sceneId, group, frameIndex)] = durationMs;
+  return true;
+}
+
+uint16_t SceneGenerator::frameDurationMs(uint16_t sceneId, uint8_t group,
+                                         uint16_t frameIndex,
+                                         uint16_t sceneDurationMs) const {
+  if (m_frameDurationsMs.empty()) return sceneDurationMs;
+  const auto it =
+      m_frameDurationsMs.find(frameDurationKey(sceneId, group, frameIndex));
+  return it != m_frameDurationsMs.end() ? it->second : sceneDurationMs;
 }
 
 uint16_t SceneGenerator::framesSceneId(uint16_t sceneId) const {
