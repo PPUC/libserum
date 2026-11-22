@@ -122,6 +122,22 @@ enum {
   FLAG_SCENE_BACK_AND_FORTH = 64,
 };
 
+// When a scene that a frame triggers starts (its start mode, the byte after
+// interruptable in the colorization's scenes).
+enum {
+  // the triggering frame shows for the scene's duration per frame first
+  SERUM_SCENE_START_AFTER_FIRST_FRAME = 0,
+  // the scene's first frame replaces the triggering frame
+  SERUM_SCENE_START_IMMEDIATELY = 1,
+  // the triggering frame shows until the next frame arrives, however long that
+  // takes, and the scene's first frame replaces that frame. An interruptable
+  // scene starts only on a frame that is not identified itself; an identified
+  // one drops it. Repeats of the triggering frame keep it waiting. A scene
+  // started by Serum_Scene_Trigger() or as a follow-up starts after its first
+  // frame instead, it has no triggering frame.
+  SERUM_SCENE_START_WITH_NEXT_FRAME = 2,
+};
+
 enum  // returned by Serum_Load in *SerumVersion
 {
   SERUM_V1 = 1,

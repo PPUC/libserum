@@ -16,7 +16,8 @@ struct SceneData {
   uint16_t frameCount;
   uint16_t durationPerFrame;
   bool interruptable = false;
-  bool immediateStart = false;
+  // SERUM_SCENE_START_AFTER_FIRST_FRAME, _IMMEDIATELY or _WITH_NEXT_FRAME
+  uint8_t startMode = SERUM_SCENE_START_AFTER_FIRST_FRAME;
   // 0 - play once
   // 1 - loop
   // >= 2 - repeat x times
@@ -44,8 +45,8 @@ struct SceneData {
   // Serialisation using cereal
   template <class Archive>
   void serialize(Archive &ar) {
-    ar(sceneId, frameCount, durationPerFrame, interruptable, immediateStart,
-       repeat, frameGroups, currentGroup, random, autoStart, sceneOptions);
+    ar(sceneId, frameCount, durationPerFrame, interruptable, startMode, repeat,
+       frameGroups, currentGroup, random, autoStart, sceneOptions);
   }
 };
 
@@ -64,6 +65,10 @@ class SceneGenerator {
                     uint16_t &durationPerFrame, bool &interruptable,
                     bool &startImmediately, uint8_t &repeat,
                     uint8_t &sceneOptions) const;
+  // The scene's start mode (SERUM_SCENE_START_...), that of
+  // getSceneInfo()'s startImmediately included; AFTER_FIRST_FRAME for a
+  // missing scene.
+  uint8_t getSceneStartMode(uint16_t sceneId) const;
   bool updateAndGetCurrentGroup(uint16_t sceneId, uint16_t frameIndex,
                                 int requestedGroup, uint8_t &group);
   bool getCurrentGroup(uint16_t sceneId, uint8_t &group) const;

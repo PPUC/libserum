@@ -5480,6 +5480,128 @@ static void Test_CromSettingsSceneFrameDurations(void) {
   n256::Unload();
 }
 
+// A scene that starts with the next frame waits after its triggering frame,
+// however long, and starts on the next frame other than that one: always
+// when it cannot be interrupted, otherwise only on a frame that is not
+// identified itself. Serum_Scene_Trigger() starts it after its first frame.
+static void Test_CromSettingsSceneStartsWithNextFrame(void) {
+  const uint32_t none = 0xffffffff;
+  const auto block = [none](bool interruptable) {
+    std::vector<uint8_t> payload;
+    const auto put = [&payload](const void* data, size_t bytes) {
+      const uint8_t* p = (const uint8_t*)data;
+      payload.insert(payload.end(), p, p + bytes);
+    };
+    const auto putU32 = [&put](uint32_t value) { put(&value, 4); };
+    const auto putU16 = [&put](uint16_t value) { put(&value, 2); };
+    putU32(kCromSettingsScenes | kCromSettingsSceneFrames |
+           kCromSettingsFrameTriggers);
+    // Scene 7 starts with the next frame; scene 8 has a start mode this
+    // library does not know, which starts immediately.
+    putU32(2);
+    for (const uint16_t id : {7, 8}) {
+      putU16(id);
+      putU16(2);
+      putU16(100);
+      const uint8_t flags[7] = {(uint8_t)(interruptable ? 1 : 0),
+                                (uint8_t)(id == 7 ? 2 : 9),
+                                0,
+                                1,
+                                0,
+                                0,
+                                0};
+      put(flags, sizeof(flags));
+    }
+    // Scene frames: kBackground and kScene are frames 0 and 1 of scene 7.
+    putU32(2);
+    for (const uint32_t frame :
+         {(uint32_t)n256::kBackground, (uint32_t)n256::kScene}) {
+      putU32(frame);
+      putU16(7);
+      putU16(frame == n256::kScene ? 1 : 0);
+      const uint8_t group[2] = {1, 0};
+      put(group, 2);
+    }
+    // kStatic starts scene 7.
+    putU32(1);
+    putU32(n256::kStatic);
+    putU32(none);
+    putU32(7);
+    putU32(none);
+    std::vector<uint8_t> result;
+    const uint32_t magic = kCromSettingsMagic;
+    const uint32_t size = (uint32_t)payload.size();
+    result.insert(result.end(), (const uint8_t*)&magic,
+                  (const uint8_t*)&magic + 4);
+    result.insert(result.end(), (const uint8_t*)&size,
+                  (const uint8_t*)&size + 4);
+    result.insert(result.end(), payload.begin(), payload.end());
+    return result;
+  };
+  std::vector<uint8_t> unknown(n256::kNPx);
+  for (uint32_t i = 0; i < n256::kNPx; ++i)
+    unknown[i] = n256::Shade(77, i % n256::kNW, i / n256::kNW);
+  n256::Synth s;
+  enum Next { kUnknownFrame, kIdentifiedFrame, kSceneTrigger };
+  for (int interruptable = 0; interruptable < 2; ++interruptable) {
+    std::vector<uint8_t> crom = s.Serialize();
+    const std::vector<uint8_t> settings = block(interruptable != 0);
+    crom.insert(crom.end(), settings.begin(), settings.end());
+    for (int viaConcentrate = 0; viaConcentrate < 2; ++viaConcentrate) {
+      for (const Next next : {kUnknownFrame, kIdentifiedFrame, kSceneTrigger}) {
+        CHECK(settings::Load(crom, viaConcentrate != 0) != NULL);
+        if (viaConcentrate) {
+          Serum_Dispose();
+          CHECK(Serum_Load(n256::Dir().string().c_str(), n256::kRom,
+                           n256::kBothPlanes) != NULL);
+        }
+        Serum_SetMaximumUnknownFramesToSkip(0);
+        CHECK_EQ(g_serumData.sceneGenerator->getSceneStartMode(7),
+                 SERUM_SCENE_START_WITH_NEXT_FRAME);
+        CHECK_EQ(g_serumData.sceneGenerator->getSceneStartMode(8),
+                 SERUM_SCENE_START_IMMEDIATELY);
+        // The triggering frame shows, with no timer: nothing plays yet.
+        uint32_t result = n256::Colorize(s.Frame(n256::kStatic));
+        CHECK_EQ(lastTriggerID, 7u);
+        CHECK_EQ(mySerum.frameID, (uint32_t)n256::kStatic);
+        CHECK_EQ(result & FLAG_RETURNED_V2_SCENE, 0u);
+        CHECK_EQ(mySerum.rotationtimer, 0u);
+        CHECK_EQ(scenePendingId, 7);
+        CHECK_EQ(sceneFrameCount, 0);
+        // The same frame again keeps the scene waiting.
+        n256::Colorize(s.Frame(n256::kStatic));
+        CHECK_EQ(scenePendingId, 7);
+        CHECK_EQ(sceneFrameCount, 0);
+        if (next == kSceneTrigger) {
+          result = Serum_Scene_Trigger(7);
+          CHECK(result & FLAG_RETURNED_V2_SCENE);
+          CHECK_EQ(result & 0xffff, 100u);
+          CHECK_EQ(scenePendingId, -1);
+          CHECK_EQ(sceneCurrentFrame, 0);
+          n256::Unload();
+          continue;
+        }
+        result = n256::Colorize(
+            next == kUnknownFrame ? unknown : s.Frame(n256::kDynamic));
+        CHECK_EQ(scenePendingId, -1);
+        if (next == kIdentifiedFrame && interruptable) {
+          // An identified frame drops an interruptable scene.
+          CHECK_EQ(mySerum.frameID, (uint32_t)n256::kDynamic);
+          CHECK_EQ(result & FLAG_RETURNED_V2_SCENE, 0u);
+          CHECK_EQ(sceneFrameCount, 0);
+        } else {
+          // The scene's first frame replaces the frame, for its duration.
+          CHECK(result & FLAG_RETURNED_V2_SCENE);
+          CHECK_EQ(mySerum.frameID, (uint32_t)n256::kBackground);
+          CHECK_EQ(sceneFrameCount, 2);
+          CHECK_EQ(mySerum.rotationtimer, 100u);
+        }
+        n256::Unload();
+      }
+    }
+  }
+}
+
 // A cROMc stores each frame of a scene group after the first as the
 // difference to the frame before it, on each plane where that is smaller, and
 // reads back the frames' colours. The cROM itself has them whole. A cROMc of
@@ -6602,6 +6724,8 @@ static const TestCase kTests[] = {
     {"crom/settings_scene_follow_ups", Test_CromSettingsSceneFollowUps},
     {"crom/settings_scene_frame_durations",
      Test_CromSettingsSceneFrameDurations},
+    {"crom/settings_scene_starts_with_next_frame",
+     Test_CromSettingsSceneStartsWithNextFrame},
     {"crom/settings_sprite_offsets", Test_CromSettingsSpriteOffsets},
     {"source/builds_the_croms_colorization",
      Test_SourceBuildsTheCromsColorization},

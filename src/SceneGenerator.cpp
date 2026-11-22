@@ -104,7 +104,13 @@ bool SceneGenerator::parseCSV(const std::string &csv_filename) {
       data.frameCount = (uint16_t)std::stoi(row[1]);
       data.durationPerFrame = (uint16_t)std::stoi(row[2]);
       if (row.size() >= 4) data.interruptable = (std::stoi(row[3]) == 1);
-      if (row.size() >= 5) data.immediateStart = (std::stoi(row[4]) == 1);
+      if (row.size() >= 5) {
+        const int startMode = std::stoi(row[4]);
+        data.startMode = (startMode == SERUM_SCENE_START_IMMEDIATELY ||
+                          startMode == SERUM_SCENE_START_WITH_NEXT_FRAME)
+                             ? static_cast<uint8_t>(startMode)
+                             : SERUM_SCENE_START_AFTER_FIRST_FRAME;
+      }
       if (row.size() >= 6) data.repeat = (uint8_t)std::stoi(row[5]);
       if (row.size() >= 7)
         data.frameGroups =
@@ -292,6 +298,14 @@ uint16_t SceneGenerator::framesSceneId(uint16_t sceneId) const {
   return sceneId;
 }
 
+uint8_t SceneGenerator::getSceneStartMode(uint16_t sceneId) const {
+  auto it = std::find_if(
+      m_sceneData.begin(), m_sceneData.end(),
+      [sceneId](const SceneData &data) { return data.sceneId == sceneId; });
+  return it == m_sceneData.end() ? SERUM_SCENE_START_AFTER_FIRST_FRAME
+                                 : it->startMode;
+}
+
 bool SceneGenerator::getSceneInfo(uint16_t sceneId, uint16_t &frameCount,
                                   uint16_t &durationPerFrame,
                                   bool &interruptable, bool &startImmediately,
@@ -314,7 +328,7 @@ bool SceneGenerator::getSceneInfo(uint16_t sceneId, uint16_t &frameCount,
   frameCount = it->frameCount;
   durationPerFrame = it->durationPerFrame;
   interruptable = it->interruptable;
-  startImmediately = it->immediateStart;
+  startImmediately = it->startMode == SERUM_SCENE_START_IMMEDIATELY;
   repeat = it->repeat;
   sceneOptions = it->sceneOptions;
   return true;

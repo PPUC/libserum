@@ -1497,6 +1497,33 @@ Finished-scene default behavior:
 - Same-trigger background-scene continuation does not clear that preserved
   background frame; it follows the historical seamless continuation path.
 
+Start modes (`SceneData::startMode`, `SERUM_SCENE_START_...` in `serum.h`):
+the byte after interruptable in the settings block's scenes and the fifth
+column of a scene CSV. 0 starts after the scene's duration per frame (the
+triggering frame shows that long), 1 immediately (`startImmediately`), 2 with
+the next frame. An unknown value in the settings block starts immediately, as
+any value but 0 did before; in a CSV it starts after the first frame.
+`getSceneInfo()` reports `startImmediately` for 1 only; `getSceneStartMode()`
+has the mode.
+
+Start with the next frame (`SERUM_SCENE_START_WITH_NEXT_FRAME`):
+- The triggering frame shows as usual and the scene waits for the next frame,
+  however long that takes: `scenePendingId` (with `scenePendingFrameId` and
+  `scenePendingInterruptable`) holds it, `sceneFrameCount` stays 0 and no scene
+  timer runs, so nothing plays and the auto-start scene does not arm.
+- On the next `Serum_Colorize()` with a frame that is neither a repeat of the
+  triggering frame (`IDENTIFY_SAME_FRAME`) nor identified as it again (that one
+  shows as usual and the scene keeps waiting), `StartScene()` sets the scene up
+  and `Serum_RenderScene()` returns its first frame in place of that frame. The
+  trigger is not reported again.
+- An interruptable scene starts only on a frame that is not identified; an
+  identified frame drops it and is handled as usual (and may fire its own
+  trigger). A non-interruptable scene starts on any frame but a critical
+  monochrome trigger frame, which drops it.
+- `Serum_Scene_Trigger()` and follow-ups have no triggering frame: such a scene
+  starts after its first frame's duration. `StartScene()` drops a waiting scene.
+- Background scenes ignore the mode, as they ignore `startImmediately`.
+
 `startImmediately` behavior:
 - `startImmediately` is honored for foreground scenes.
 - Background scenes do not use foreground-style immediate takeover semantics.
@@ -1577,17 +1604,19 @@ removed. `src/SerumSigning.h` documents the formats.
   author), `show` and `check`.
 
 ## cROMc persistence
-Current concentrate version: **22** (`SERUM_CONCENTRATE_VERSION`). libserum
+Current concentrate version: **23** (`SERUM_CONCENTRATE_VERSION`). libserum
 reads the current version and the versions libserum 2.8.2 wrote (up to 9,
 `SERUM_CONCENTRATE_VERSION_STABLE`; 6 was never stable and is refused). The
-development versions in between (10 to 21) are refused: they were written by
+development versions in between (10 to 22) are refused: they were written by
 unreleased 2.99.x builds, whose authors export the colorization again. So
 `SerumData::serialize()` knows two shapes only: up to 9, and the current one,
 which stores after the version 9 flags, in this order, the speaker lights, the
 original-only dynamic sets, the scene frames, the DOF events, the frame
 triggers, the scene variants, the sprite offsets, the frames stored as
 differences, the notice frame, the follow-up scenes and the scene frame
-durations.
+durations. Version 23 keeps each scene's start mode in `SceneData::startMode`
+(a byte, `SERUM_SCENE_START_...`) where earlier versions had the bool
+`immediateStart`.
 
 The current version has the colorization's text (`colorizationText`, from the
 settings block; see "Signed colorizations") uncompressed in its header:

@@ -344,6 +344,13 @@ uint32_t sceneNextFrameAtMs = 0;
 // running scene then holds its last frame (sceneEndHoldUntilMs) instead of its
 // finish mode.
 int32_t sceneFollowUpId = -1;
+// A scene that starts with the next frame (SERUM_SCENE_START_WITH_NEXT_FRAME)
+// and is waiting for it, -1 for none; nothing of it plays until then
+// (sceneFrameCount is 0). scenePendingFrameId is the frame that triggered it,
+// scenePendingInterruptable whether an identified frame drops it.
+int32_t scenePendingId = -1;
+uint32_t scenePendingFrameId = 0;
+bool scenePendingInterruptable = false;
 uint8_t sceneFrame[256 * 64] = {0};
 uint8_t lastFrame[256 * 64] = {0};
 uint32_t lastFrameId = 0;  // last frame ID identified
@@ -1928,6 +1935,7 @@ void Serum_free(void) {
   sceneStartImmediately = false;
   sceneRepeatCount = 0;
   sceneFollowUpId = -1;
+  scenePendingId = -1;
   sceneOptionFlags = 0;
   sceneIsLastBackgroundFrame = false;
   lastFrameId = 0;
@@ -2022,7 +2030,7 @@ uint32_t calc_crc32(uint8_t* source, uint8_t mask, uint32_t n, uint8_t Shape) {
 //   uint32 magic "SCX1", uint32 payload size, then the payload:
 //   uint32 contents: kCromSettingsScenes | kCromSettingsScaling
 //   scenes:  uint32 count, then per scene uint16 sceneId, frameCount,
-//            durationPerFrame and uint8 interruptable, immediateStart, repeat,
+//            durationPerFrame and uint8 interruptable, startMode, repeat,
 //            frameGroups, random, autoStart, sceneOptions (13 bytes)
 //   scaling: uint8 algorithm, uint8 shadow offset mode
 //   lights:  uint32 effect count, per effect uint8 mode, uint8 options,
@@ -2124,7 +2132,11 @@ static bool ApplyCromSettings(const std::vector<uint8_t>& payload) {
           !take(flags, sizeof(flags)))
         return false;
       scene.interruptable = flags[0] != 0;
-      scene.immediateStart = flags[1] != 0;
+      // An unknown start mode starts immediately, as any value but 0 did
+      // before SERUM_SCENE_START_WITH_NEXT_FRAME.
+      scene.startMode = flags[1] <= SERUM_SCENE_START_WITH_NEXT_FRAME
+                            ? flags[1]
+                            : SERUM_SCENE_START_IMMEDIATELY;
       scene.repeat = flags[2];
       scene.frameGroups = flags[3] == 0 ? 1 : flags[3];
       scene.random = flags[4] != 0;
@@ -7058,6 +7070,33 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
   }
   uint32_t now = GetMonotonicTimeMs();
   bool rotationIsScene = false;
+  // A scene waiting for the next frame starts on any frame but its
+  // triggering frame (repeated, or identified as it again: the scene keeps
+  // waiting). An interruptable scene starts only on a frame that is not
+  // identified itself; an identified frame drops it and is handled as usual
+  // below, as is a critical monochrome trigger frame.
+  if (scenePendingId >= 0 && !sceneFrameRequested &&
+      frameID != IDENTIFY_SAME_FRAME && frameID != scenePendingFrameId) {
+    const uint16_t pendingId = static_cast<uint16_t>(scenePendingId);
+    scenePendingId = -1;
+    const bool identified = frameID != IDENTIFY_NO_FRAME;
+    const bool startScene =
+        !identified || (!scenePendingInterruptable &&
+                        !IsCriticalMonochromeTriggerFrame(frameID));
+    if (startScene && StartScene(pendingId, now)) {
+      // The trigger was reported with the triggering frame.
+      mySerum.triggerID = 0xffffffff;
+      DebugLogSceneEvent("start-next-frame", pendingId, sceneCurrentFrame,
+                         sceneFrameCount, sceneDurationPerFrame,
+                         sceneOptionFlags, sceneInterruptable,
+                         sceneStartImmediately, sceneRepeatCount);
+      const uint32_t sceneRotationResult = Serum_RenderScene();
+      if (sceneRotationResult & FLAG_RETURNED_V2_SCENE) {
+        MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
+        return sceneRotationResult;
+      }
+    }
+  }
   if (is_real_machine() && !showStatusMessages) {
     showStatusMessages =
         (g_serumData.monochromeTriggerIDs[lastfound][0] > 0xff98 &&
@@ -7218,6 +7257,9 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
         }
         MaybeLogDynamicHotPathProfileWindow(sceneFrameRequested);
         return IDENTIFY_SAME_FRAME;
+      } else if (scenePendingId >= 0 && frameID == scenePendingFrameId) {
+        // The triggering frame again: the scene keeps waiting for the next
+        // frame, and this one shows as usual.
       } else {
         if (sceneFrameCount > 0 &&
             (sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==
@@ -7236,6 +7278,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
               sceneRepeatCount);
         }
         sceneFrameCount = 0;
+        scenePendingId = -1;
         sceneIsLastForegroundFrame = false;
         sceneIsLastBackgroundFrame = false;
         sceneEndHoldUntilMs = 0;
@@ -7297,7 +7340,23 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
                   sceneStartImmediately ? "true" : "false", sceneRepeatCount,
                   sceneOptionFlags);
             }
-            if (hasSceneInfo) {
+            const bool waitsForNextFrame =
+                hasSceneInfo &&
+                (sceneOptionFlags & FLAG_SCENE_AS_BACKGROUND) == 0 &&
+                g_serumData.sceneGenerator->getSceneStartMode(lastTriggerID) ==
+                    SERUM_SCENE_START_WITH_NEXT_FRAME;
+            if (waitsForNextFrame) {
+              // This frame shows as usual; the next one starts the scene
+              // (StartScene() then sets it up).
+              DebugLogSceneEvent(
+                  "wait-next-frame", static_cast<uint16_t>(lastTriggerID), 0,
+                  sceneFrameCount, sceneDurationPerFrame, sceneOptionFlags,
+                  sceneInterruptable, sceneStartImmediately, sceneRepeatCount);
+              scenePendingId = static_cast<int32_t>(lastTriggerID);
+              scenePendingFrameId = frameID;
+              scenePendingInterruptable = sceneInterruptable;
+              sceneFrameCount = 0;
+            } else if (hasSceneInfo) {
               DebugLogSceneEvent(
                   "trigger", static_cast<uint16_t>(lastTriggerID), 0,
                   sceneFrameCount, sceneDurationPerFrame, sceneOptionFlags,
@@ -7586,7 +7645,7 @@ static uint32_t Serum_ColorizeWithMetadatav2Internal(uint8_t* frame,
         }
       }
 
-      if (0 == mySerum.rotationtimer &&
+      if (0 == mySerum.rotationtimer && scenePendingId < 0 &&
           g_serumData.sceneGenerator->isActive() && !sceneFrameRequested &&
           sceneEndHoldUntilMs == 0 && sceneCurrentFrame >= sceneFrameCount &&
           g_serumData.sceneGenerator->getAutoStartSceneInfo(
@@ -8811,6 +8870,7 @@ static bool StartScene(uint16_t sceneId, uint32_t now) {
           startImmediately, repeat, options)) {
     return false;
   }
+  scenePendingId = -1;
 
   if (sceneFrameCount > 0 &&
       (sceneOptionFlags & FLAG_SCENE_RESUME_IF_RETRIGGERED) ==

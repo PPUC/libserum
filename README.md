@@ -410,8 +410,10 @@ So when a scene is meant to cover the end of an animation:
   or its repeats will still interrupt the scene — and, with the trigger moved
   away, nothing will restart it.
 
-Set `Start immediately` in the editor if the scene should replace the
-triggering frame at once rather than after its frame duration.
+Set the scene to start `immediately` in the editor if it should replace the
+triggering frame at once rather than after its frame duration, or `with the
+next frame` if the triggering frame should stay until the ROM sends its next
+frame, however long that takes, and the scene should replace that one.
 
 ## License
 
