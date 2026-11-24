@@ -1598,7 +1598,7 @@ removed. `src/SerumSigning.h` documents the formats.
   after loading it, through `g_unsignedLoadDelay`. A cROMc of libserum 2.8.2
   and a modified one do not wait. Only `Serum_Load()` waits: an authoring
   tool's `Serum_LoadFromSource()` does not. A build that loads cROMc files to
-  test them (libserum-accel's, an editor's tests) may set the delay to 0; the
+  test them (an editor's tests, for instance) may set the delay to 0; the
   unit tests record it instead of waiting.
 - `Serum_Load()` logs the colorization's text line by line;
   `Serum_GetColorizationText()` returns it.
