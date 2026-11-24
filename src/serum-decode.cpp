@@ -8253,7 +8253,8 @@ static bool SignConcentrate(const char* const cromcPath,
     if (!in && !in.eof()) return false;
   }
   const std::vector<uint8_t> trailer = serum_signing::BuildTrailer(
-      serum_signing::Sha512Of(content.data(), content.size()), chain, seed);
+      serum_signing::ContentDigestOf(content.data(), content.size()), chain,
+      seed);
   std::ofstream out(cromcPath, std::ios::binary | std::ios::app);
   out.write(reinterpret_cast<const char*>(trailer.data()),
             (std::streamsize)trailer.size());

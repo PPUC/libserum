@@ -6431,6 +6431,88 @@ static void Test_SigningCromc(void) {
   n256::Unload();
 }
 
+// The signature covers the content in chunks of a MiB: the digest is the
+// SHA-512 of the chunk size, the length and the chunks' SHA-512, whether the
+// file is read or the digests are given. A byte changed in any chunk, a
+// digest that does not match and a block of the first version make the file
+// modified.
+static void Test_SigningChunkedContent(void) {
+  const signing::TestKeys keys;
+  CHECK_EQ(serum_signing::ContentChunks(0), 0u);
+  CHECK_EQ(serum_signing::ContentChunks(1), 1u);
+  CHECK_EQ(serum_signing::ContentChunks(1u << 20), 1u);
+  CHECK_EQ(serum_signing::ContentChunks((1u << 20) + 1), 2u);
+
+  std::vector<uint8_t> content((5u << 19) + 17);
+  for (size_t i = 0; i < content.size(); ++i)
+    content[i] = (uint8_t)(i * 131 + (i >> 11));
+  std::vector<serum_signing::Digest> chunks;
+  for (size_t at = 0; at < content.size(); at += 1u << 20)
+    chunks.push_back(serum_signing::Sha512Of(
+        content.data() + at, std::min<size_t>(1u << 20, content.size() - at)));
+  CHECK_EQ(chunks.size(), 3u);
+  std::vector<uint8_t> layout = {0x00, 0x00, 0x10, 0x00};
+  for (int i = 0; i < 8; ++i)
+    layout.push_back((uint8_t)((uint64_t)content.size() >> (8 * i)));
+  for (const auto& chunk : chunks)
+    layout.insert(layout.end(), chunk.begin(), chunk.end());
+  const serum_signing::Digest digest =
+      serum_signing::ContentDigestOf(content.data(), content.size());
+  CHECK(digest == serum_signing::Sha512Of(layout.data(), layout.size()));
+  CHECK(digest == serum_signing::ContentDigest(chunks, content.size()));
+  CHECK(digest != serum_signing::Sha512Of(content.data(), content.size()));
+  const serum_signing::Digest empty = serum_signing::ContentDigestOf(NULL, 0);
+  std::vector<uint8_t> emptyLayout = {0x00, 0x00, 0x10, 0x00};
+  emptyLayout.resize(12, 0);
+  CHECK(empty == serum_signing::Sha512Of(emptyLayout.data(), 12));
+
+  std::vector<uint8_t> chain;
+  CHECK(serum_signing::ChainFromText(keys.certificate, chain));
+  const std::vector<uint8_t> trailer =
+      serum_signing::BuildTrailer(digest, chain, keys.author);
+  std::error_code ec;
+  std::filesystem::create_directories(n256::Dir(), ec);
+  const std::filesystem::path path = n256::Dir() / "chunks.cROMc";
+  const auto write = [&](const std::vector<uint8_t>& bytes) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write((const char*)bytes.data(), (std::streamsize)bytes.size());
+  };
+  const auto status = [&](const std::vector<serum_signing::Digest>* given) {
+    return serum_signing::CheckFile(path.string().c_str(), given).authenticity;
+  };
+  std::vector<uint8_t> file = content;
+  file.insert(file.end(), trailer.begin(), trailer.end());
+  write(file);
+  CHECK(status(NULL) == serum_signing::Authenticity::Signed);
+  CHECK(status(&chunks) == serum_signing::Authenticity::Signed);
+  CHECK_EQ(serum_signing::CheckFile(path.string().c_str()).contentBytes,
+           (uint64_t)content.size());
+  // Digests of another number of chunks are not used: the file is read.
+  const std::vector<serum_signing::Digest> tooFew(chunks.begin(),
+                                                  chunks.begin() + 2);
+  CHECK(status(&tooFew) == serum_signing::Authenticity::Signed);
+  // Digests of the right number are used as they are.
+  std::vector<serum_signing::Digest> wrong = chunks;
+  wrong[1][0] ^= 1;
+  CHECK(status(&wrong) == serum_signing::Authenticity::Modified);
+
+  for (const size_t at : {(size_t)0, (size_t)(1u << 20) - 1,
+                          (size_t)(1u << 20) + 5, content.size() - 1}) {
+    std::vector<uint8_t> changed = file;
+    changed[at] ^= 0x40;
+    write(changed);
+    CHECK(status(NULL) == serum_signing::Authenticity::Modified);
+  }
+
+  // A block of the first version, whose signature covered the SHA-512 of the
+  // whole content, is not read.
+  std::vector<uint8_t> first = file;
+  first[content.size() + 4] = 1;
+  write(first);
+  CHECK(status(NULL) == serum_signing::Authenticity::Modified);
+  std::filesystem::remove(path, ec);
+}
+
 // The notice frame is never identified. In a modified colorization it is shown
 // in place of the frames that come for the first seconds, then the frames are
 // identified as before, the frame shown before the notice too; a reminder
@@ -6745,6 +6827,7 @@ static const TestCase kTests[] = {
     {"signing/primitives", Test_SigningPrimitives},
     {"signing/certificates", Test_SigningCertificates},
     {"signing/cromc", Test_SigningCromc},
+    {"signing/chunked_content", Test_SigningChunkedContent},
     {"signing/notice_frame", Test_SigningNoticeFrame},
     {"signing/notice_text", Test_SigningNoticeText},
     {"signing/unsigned_load_delay", Test_UnsignedLoadDelay},

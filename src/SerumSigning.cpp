@@ -341,8 +341,8 @@ uint64_t GetLE(const uint8_t* p, int bytes) {
 
 constexpr uint32_t kCertificateMagic = 0x54524353;  // "SCRT"
 constexpr uint8_t kCertificateVersion = 1;
-constexpr uint16_t kTrailerVersion = 1;
-constexpr char kSignedMessagePrefix[] = "SERUM-CROMC-1";
+constexpr uint16_t kTrailerVersion = 2;
+constexpr char kSignedMessagePrefix[] = "SERUM-CROMC-2";
 constexpr char kChainTextPrefix[] = "SERUM-CERTIFICATE-1:";
 constexpr size_t kMaxChain = 4;
 
@@ -470,6 +470,31 @@ Digest Sha512Of(const void* data, size_t size) {
   Sha512 sha;
   sha.update(data, size);
   return sha.finish();
+}
+
+uint64_t ContentChunks(uint64_t contentBytes) {
+  return (contentBytes + kContentChunkBytes - 1) / kContentChunkBytes;
+}
+
+Digest ContentDigest(const std::vector<Digest>& chunkDigests,
+                     uint64_t contentBytes) {
+  std::vector<uint8_t> header;
+  PutU32(header, kContentChunkBytes);
+  PutU64(header, contentBytes);
+  Sha512 sha;
+  sha.update(header.data(), header.size());
+  for (const Digest& chunk : chunkDigests)
+    sha.update(chunk.data(), chunk.size());
+  return sha.finish();
+}
+
+Digest ContentDigestOf(const void* data, size_t size) {
+  const uint8_t* p = static_cast<const uint8_t*>(data);
+  std::vector<Digest> chunks;
+  for (size_t at = 0; at < size; at += kContentChunkBytes)
+    chunks.push_back(
+        Sha512Of(p + at, std::min<size_t>(kContentChunkBytes, size - at)));
+  return ContentDigest(chunks, size);
 }
 
 // ---- Ed25519
@@ -796,7 +821,8 @@ uint64_t TrailerBytes(FILE* fp, uint64_t size) {
   return trailerSize <= size ? trailerSize : 0;
 }
 
-CheckResult CheckFile(const char* path) {
+CheckResult CheckFile(const char* path,
+                      const std::vector<Digest>* chunkDigests) {
   CheckResult result;
   FILE* fp = fopen(path, "rb");
   if (!fp) {
@@ -851,23 +877,31 @@ CheckResult CheckFile(const char* path) {
   Signature signature;
   memcpy(signature.data(), trailer.data() + 12 + chainSize, 64);
 
-  if (fseek(fp, 0, SEEK_SET) != 0) {
-    result.reason = "the file cannot be read";
-    return result;
-  }
-  Sha512 sha;
-  std::vector<uint8_t> buffer(1u << 16);
-  uint64_t left = result.contentBytes;
-  while (left > 0) {
-    const size_t n = (size_t)std::min<uint64_t>(left, buffer.size());
-    if (fread(buffer.data(), 1, n, fp) != n) {
+  // The chunks' digests: the caller's, or read now.
+  std::vector<Digest> chunks;
+  const uint64_t chunkCount = ContentChunks(result.contentBytes);
+  if (chunkDigests && chunkDigests->size() == chunkCount) {
+    chunks = *chunkDigests;
+  } else {
+    if (fseek(fp, 0, SEEK_SET) != 0) {
       result.reason = "the file cannot be read";
       return result;
     }
-    sha.update(buffer.data(), n);
-    left -= n;
+    std::vector<uint8_t> buffer(kContentChunkBytes);
+    chunks.reserve((size_t)chunkCount);
+    uint64_t left = result.contentBytes;
+    while (left > 0) {
+      const size_t n = (size_t)std::min<uint64_t>(left, buffer.size());
+      if (fread(buffer.data(), 1, n, fp) != n) {
+        result.reason = "the file cannot be read";
+        return result;
+      }
+      chunks.push_back(Sha512Of(buffer.data(), n));
+      left -= n;
+    }
   }
-  const std::vector<uint8_t> message = SignedMessage(sha.finish());
+  const std::vector<uint8_t> message =
+      SignedMessage(ContentDigest(chunks, result.contentBytes));
 
   std::string reason;
   if (!CheckChain(chain, reason)) {

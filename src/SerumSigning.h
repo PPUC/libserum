@@ -10,7 +10,8 @@
 // check needs no connection.
 //
 // The signature is a block behind the compressed data of the cROMc
-// (SignatureTrailer below). It signs the SHA-512 of every byte before it.
+// (BuildTrailer() below). It signs the digest of every byte before it, which
+// is taken in chunks (ContentDigest()).
 //
 // None of this protects anything: anyone can still change a cROMc and remove
 // the signature. It tells a player whether the file is still the one its
@@ -46,6 +47,21 @@ class Sha512 {
 };
 
 Digest Sha512Of(const void* data, size_t size);
+
+// The content of a signed cROMc -- every byte before its signature block --
+// is hashed in chunks of kContentChunkBytes, the last one shorter, and the
+// signature covers the digest of those digests: the SHA-512 of the chunk size
+// (uint32), the content's length (uint64), both little-endian, and the
+// SHA-512 of each chunk in order. A file of no bytes has no chunk.
+constexpr uint32_t kContentChunkBytes = 1u << 20;
+
+// The number of chunks of a content of `contentBytes` bytes.
+uint64_t ContentChunks(uint64_t contentBytes);
+// The digest the signature covers, of the chunks' digests.
+Digest ContentDigest(const std::vector<Digest>& chunkDigests,
+                     uint64_t contentBytes);
+// The digest of a content in memory, chunk by chunk.
+Digest ContentDigestOf(const void* data, size_t size);
 
 // Ed25519 (RFC 8032). A secret key is its 32-byte seed.
 PublicKey PublicKeyFromSeed(const Seed& seed);
@@ -118,12 +134,13 @@ const std::vector<PublicKey>& RevokedKeys();
 void SetRootPublicKeysForTesting(const std::vector<PublicKey>& keys);
 
 // The block behind the compressed data of a signed cROMc:
-//   "SSIG", uint16 version (1), uint16 0,
+//   "SSIG", uint16 version (2), uint16 0,
 //   uint32 chain length, the chain (SerializeChain()),
 //   the signature (64 bytes),
 //   uint32 length of the whole block, "SSIG".
-// The signature is the author key's of the message "SERUM-CROMC-1" followed
-// by the SHA-512 of every byte of the file before the block.
+// The signature is the author key's of the message "SERUM-CROMC-2" followed
+// by the ContentDigest() of every byte of the file before the block. A block
+// of another version is not read: the file counts as modified.
 constexpr uint32_t kTrailerMagic = 0x47495353;  // "SSIG"
 constexpr size_t kTrailerTailBytes = 8;
 
@@ -156,7 +173,10 @@ struct CheckResult {
 uint64_t TrailerBytes(FILE* fp, uint64_t size);
 
 // Reads the signature block of a cROMc, if it has one, and checks it against
-// the bytes before it.
-CheckResult CheckFile(const char* path);
+// the bytes before it. chunkDigests, when given, are the SHA-512 of the
+// chunks of those bytes, which are then not read; digests of another number
+// of chunks are not used.
+CheckResult CheckFile(const char* path,
+                      const std::vector<Digest>* chunkDigests = nullptr);
 
 }  // namespace serum_signing

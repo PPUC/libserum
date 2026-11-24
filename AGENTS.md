@@ -1556,8 +1556,11 @@ removed. `src/SerumSigning.h` documents the formats.
   beside the old.
 - `Serum_ConcentrateFromSourceSigned()` writes the cROMc as
   `Serum_ConcentrateFromSource()` does and appends the signature block: the
-  certificate chain and the author key's signature of `"SERUM-CROMC-1"`
-  followed by the SHA-512 of every byte before the block.
+  certificate chain and the author key's signature of `"SERUM-CROMC-2"`
+  followed by `ContentDigest()` of every byte before the block: the SHA-512 of
+  the chunk size, the content's length and the SHA-512 of each 1 MiB chunk.
+  This is signature block version 2 (2.99.22); a block of version 1 is not
+  read.
 - `Serum_Load()` checks the file after loading it (`CheckFile()`, a second
   read of the file) and logs the result: not signed, signed by whom, or
   modified and why. `Serum_GetAuthenticity()` returns it.
