@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "miniz/miniz.h"
+#include "serum-accel.h"
 
 // Buffers - use conservative sizes that account for high compression ratios
 #define COMPRESSED_BUFFER_SIZE (16 * 1024)     // 16KB compressed chunks
@@ -20,6 +21,8 @@ class DecompressingIStream : public std::istream {
     uint32_t m_compressedSize;
     uint32_t m_originalSize;
     uint32_t m_compressedRead;
+    // Where the compressed data start in the file, for ContentRead().
+    uint64_t m_fileOffset;
     mz_stream m_stream;
     bool m_streamInitialized;
     bool m_finished;
@@ -37,10 +40,13 @@ class DecompressingIStream : public std::istream {
           m_compressedSize(compressedSize),
           m_originalSize(originalSize),
           m_compressedRead(0),
+          m_fileOffset(0),
           m_streamInitialized(false),
           m_finished(false),
           m_decompressedPos(0),
           m_decompressedAvailable(0) {
+      const long start = ftell(fp);
+      if (start > 0) m_fileOffset = (uint64_t)start;
       // Initialize miniz stream
       memset(&m_stream, 0, sizeof(m_stream));
       m_stream.zalloc = Z_NULL;
@@ -115,6 +121,8 @@ class DecompressingIStream : public std::istream {
             throw std::runtime_error("Failed to read compressed data");
           }
 
+          serum_accel::ContentRead(m_fileOffset + m_compressedRead,
+                                   m_compressedBuffer.data(), bytesRead);
           m_compressedRead += bytesRead;
           m_stream.avail_in = (uint32_t)bytesRead;
           m_stream.next_in = m_compressedBuffer.data();

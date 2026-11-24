@@ -134,7 +134,8 @@ set(SERUM_INCLUDE_DIRS
 # directory's serum-accel.cmake names. That file must set
 # SERUM_ACCEL_SEAM_VERSION (the SERUM_ACCEL_SEAM_VERSION of serum-accel.h) and
 # SERUM_ACCEL_SOURCES (absolute paths), and may set
-# SERUM_ACCEL_COMPILE_DEFINITIONS and SERUM_ACCEL_INCLUDE_DIRS.
+# SERUM_ACCEL_COMPILE_DEFINITIONS, SERUM_ACCEL_INCLUDE_DIRS and
+# SERUM_ACCEL_LINK_LIBRARIES.
 file(READ src/serum-accel.h _serum_accel_header)
 string(REGEX MATCH "#[ \t]*define[ \t]+SERUM_ACCEL_SEAM_VERSION[ \t]+([0-9]+)" _tmp "${_serum_accel_header}")
 if("${CMAKE_MATCH_1}" STREQUAL "")
@@ -146,6 +147,7 @@ set(SERUM_ACCEL_IS_REFERENCE ON)
 set(SERUM_ACCEL_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/serum-accel-ref.cpp)
 set(SERUM_ACCEL_COMPILE_DEFINITIONS "")
 set(SERUM_ACCEL_INCLUDE_DIRS "")
+set(SERUM_ACCEL_LINK_LIBRARIES "")
 if(SERUM_ACCEL_DIR)
    set(SERUM_ACCEL_IS_REFERENCE OFF)
    if(NOT IS_DIRECTORY "${SERUM_ACCEL_DIR}")
@@ -225,6 +227,7 @@ if(BUILD_SHARED)
    target_include_directories(serum_shared PUBLIC ${SERUM_INCLUDE_DIRS})
    target_include_directories(serum_shared PRIVATE ${SERUM_ACCEL_INCLUDE_DIRS})
    target_compile_definitions(serum_shared PRIVATE ${SERUM_ACCEL_COMPILE_DEFINITIONS})
+   target_link_libraries(serum_shared PRIVATE ${SERUM_ACCEL_LINK_LIBRARIES})
 
    if((PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "win-mingw") AND ARCH STREQUAL "x64")
       set(SERUM_OUTPUT_NAME "serum64")
@@ -301,6 +304,7 @@ if(BUILD_SHARED)
          target_sources(serum_unit_tests PRIVATE ${SERUM_ACCEL_SOURCES})
          target_include_directories(serum_unit_tests PRIVATE ${SERUM_ACCEL_INCLUDE_DIRS})
          target_compile_definitions(serum_unit_tests PRIVATE ${SERUM_ACCEL_COMPILE_DEFINITIONS})
+         target_link_libraries(serum_unit_tests PRIVATE ${SERUM_ACCEL_LINK_LIBRARIES})
       endif()
       add_test(NAME serum_unit_tests COMMAND serum_unit_tests)
 
@@ -319,6 +323,7 @@ if(BUILD_STATIC)
    target_include_directories(serum_static PUBLIC ${SERUM_INCLUDE_DIRS})
    target_include_directories(serum_static PRIVATE ${SERUM_ACCEL_INCLUDE_DIRS})
    target_compile_definitions(serum_static PRIVATE ${SERUM_ACCEL_COMPILE_DEFINITIONS})
+   target_link_libraries(serum_static PUBLIC ${SERUM_ACCEL_LINK_LIBRARIES})
 
    if(PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "win-mingw")
       set_target_properties(serum_static PROPERTIES

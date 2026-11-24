@@ -384,6 +384,16 @@ const uint16_t* SpriteColourArray(SerumData&, SpriteColours, uint16_t) {
 }
 
 // ---------------------------------------------------------------------------
+// The content of a cROMc file that SerumData::LoadFromFile() reads
+// ---------------------------------------------------------------------------
+
+// CheckFile() reads the file itself.
+void ContentReadBegins(FILE*, uint64_t, uint64_t) {}
+void ContentRead(uint64_t, const uint8_t*, size_t) {}
+void ContentReadEnds(FILE*, bool) {}
+bool LoadedContentDigests(std::vector<serum_signing::Digest>&) { return false; }
+
+// ---------------------------------------------------------------------------
 // Notifications
 // ---------------------------------------------------------------------------
 

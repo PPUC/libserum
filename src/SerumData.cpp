@@ -1213,6 +1213,22 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
     }
     Log("cROMc compressed size %u", compressedSize);
 
+    // The content is read from here on (serum_accel::ContentReadBegins()).
+    struct ContentReadScope {
+      FILE *fp;
+      bool ended = false;
+      ContentReadScope(FILE *file, uint64_t headerBytes, uint64_t contentBytes)
+          : fp(file) {
+        serum_accel::ContentReadBegins(fp, headerBytes, contentBytes);
+      }
+      void End(bool complete) {
+        if (ended) return;
+        ended = true;
+        serum_accel::ContentReadEnds(fp, complete);
+      }
+      ~ContentReadScope() { End(false); }
+    } contentRead(fp, headerSize, totalSize);
+
     // File-based cROMc load must stay streaming to avoid requiring the full
     // inflated payload in memory on constrained devices.
     DecompressingIStream decompStream(fp, compressedSize, originalSize);
@@ -1237,6 +1253,7 @@ bool SerumData::LoadFromFile(const char *filename, const uint8_t flags) {
                                     ? std::chrono::steady_clock::now()
                                     : std::chrono::steady_clock::time_point{};
 
+    contentRead.End(true);
     fclose(fp);
     DebugLogSceneLookupSummary("post-load-file");
     if (loadTimingEnabled) {

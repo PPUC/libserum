@@ -4520,7 +4520,11 @@ SERUM_API Serum_Frame_Struc* Serum_Load(const char* const altcolorpath,
   if (result) {
     FinishColorizationLoad(loadedFromConcentrate, false, loadTotalStart, 0.0,
                            cromcLoadMs, 0.0, 0.0);
-    g_authenticity = serum_signing::CheckFile(pFoundFile->c_str());
+    // The chunks' digests from the load, if any.
+    std::vector<serum_signing::Digest> loadedChunks;
+    const bool chunksLoaded = serum_accel::LoadedContentDigests(loadedChunks);
+    g_authenticity = serum_signing::CheckFile(
+        pFoundFile->c_str(), chunksLoaded ? &loadedChunks : nullptr);
     LogColorizationText();
     LogAuthenticity();
     // A cROMc of the current version comes from an editor that signs it: one

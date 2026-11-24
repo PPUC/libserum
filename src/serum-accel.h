@@ -13,7 +13,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <vector>
+
+#include "SerumSigning.h"
 
 class SerumData;
 
@@ -22,7 +25,9 @@ class SerumData;
 // 2: sprite IDs are uint16_t (more than 255 sprites).
 // 3: KeepPackedPayloads(), LoadPackedPayloads(), ElementResolved(),
 //    FindResolvedElement().
-#define SERUM_ACCEL_SEAM_VERSION 3
+// 4: ContentReadBegins(), ContentRead(), ContentReadEnds(),
+//    LoadedContentDigests().
+#define SERUM_ACCEL_SEAM_VERSION 4
 
 namespace serum_accel {
 
@@ -214,6 +219,27 @@ enum class SpriteColours {
 // again, or null; the caller then reads each colour from the store.
 const uint16_t* SpriteColourArray(SerumData& data, SpriteColours which,
                                   uint16_t sprite);
+
+// ---------------------------------------------------------------------------
+// The content of a cROMc file that SerumData::LoadFromFile() reads
+// ---------------------------------------------------------------------------
+
+// The load reads the first `contentBytes` bytes of `fp`, the bytes before the
+// signature block, and has read `headerBytes` of them; the file position is
+// at `headerBytes` and is left there. ContentReadEnds() follows.
+void ContentReadBegins(FILE* fp, uint64_t headerBytes, uint64_t contentBytes);
+
+// The `size` bytes at `offset` of the content, as they are read, in order.
+void ContentRead(uint64_t offset, const uint8_t* data, size_t size);
+
+// The load is done with `fp`, which is still open; `complete` is false when
+// it failed.
+void ContentReadEnds(FILE* fp, bool complete);
+
+// The SHA-512 of each chunk of the content of the last complete load
+// (serum_signing::ContentDigest()), or false. Given once;
+// ColorizationUnloaded() drops it.
+bool LoadedContentDigests(std::vector<serum_signing::Digest>& out);
 
 // ---------------------------------------------------------------------------
 // Notifications
